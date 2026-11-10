@@ -4066,43 +4066,84 @@ object Hooks {
     private var gVideoPressX = 0f
     private var gVideoPressY = 0f
     private var gVideoLongPressMenuUntil = 0L
+    private var gVideoLongPressOwner: java.lang.ref.WeakReference<Activity>? = null
+    private var gVideoLastEventDownTime = -1L
+    private var gVideoLastEventAt = -1L
+    private var gVideoLastEventAction = -1
     private val gVideoMenuInjected = java.util.Collections.synchronizedMap(
         java.util.WeakHashMap<View, Boolean>()
     )
     private val gVideoMenuStrongLabels = listOf(
-        "不感兴趣", "举报", "播放设置", "画质", "清晰度", "倍速", "弹幕", "静音",
+        "不感兴趣", "举报", "播放设置", "画质", "清晰度", "倍速", "倍速播放",
+        "弹幕", "静音", "音量", "屏幕锁定", "锁屏", "自动连播", "画面比例",
+        "播放速度", "视频设置", "不喜欢",
     )
     private val gVideoMenuOtherLabels = listOf(
-        "收藏", "分享", "下载", "缓存", "投屏", "复制链接", "反馈", "更多操作",
+        "收藏", "分享", "下载", "缓存", "投屏", "复制链接", "反馈",
+        "更多操作", "追剧", "选集", "看下一集", "下一集", "截图",
+        "定时关闭", "分享剧集",
     )
+
+    private fun isFullSeriesVideoScreen(act: Activity?): Boolean {
+        val name = act?.javaClass?.name ?: return false
+        return name.startsWith("com.dragon.read.") && (
+            name.contains("ShortSeries") || name.contains("ShortVideo") ||
+            name.contains("VideoAlbum") || name.contains("FullScreen") ||
+            name.contains("Fullscreen") || name.contains("VideoPlay") ||
+            name.contains("SeriesPlayer")
+        )
+    }
 
     private fun isLikelyVideoScreen(act: Activity?): Boolean {
         val name = act?.javaClass?.name ?: return false
-        if (!name.startsWith("com.dragon.read.")) return false
-        if (isLikelySettingsActivity(act)) return false
-        return name.contains("MainFragmentActivity") ||
-            name.contains("ShortSeries") || name.contains("Video") ||
-            name.contains("FeedActivity")
+        if (!name.startsWith("com.dragon.read.") || isLikelySettingsActivity(act)) return false
+        return name.contains("MainFragmentActivity") || isFullSeriesVideoScreen(act) ||
+            name.contains("Video") || name.contains("FeedActivity")
+    }
+
+    private fun markVideoLongPressCandidate(activity: Activity, source: String) {
+        if (!gVideoLongPressSettingsOn || !isLikelyVideoScreen(activity)) return
+        val owner = gVideoLongPressOwner?.get()
+        if (owner != null && owner !== activity) return
+        gVideoLongPressMenuUntil = android.os.SystemClock.uptimeMillis() + 3500L
+        LogUtil.incr("videoLongPressCandidate")
+        LogUtil.info("视频长按菜单候选: " + source + " | " + activity.javaClass.simpleName)
+        scheduleLongPressMenuInjection()
     }
 
     private fun observeVideoLongPress(ev: android.view.MotionEvent?, act: Activity?) {
         val activity = act ?: return
         if (!gVideoLongPressSettingsOn || ev == null || !isLikelyVideoScreen(activity)) return
+
+        // A full-series Activity can override dispatchTouchEvent and call super.
+        // Observe the event once even when both hooks see the same MotionEvent.
+        val action = ev.actionMasked
+        if (gVideoLastEventDownTime == ev.downTime &&
+            gVideoLastEventAt == ev.eventTime && gVideoLastEventAction == action) return
+        gVideoLastEventDownTime = ev.downTime
+        gVideoLastEventAt = ev.eventTime
+        gVideoLastEventAction = action
+
         val now = android.os.SystemClock.uptimeMillis()
-        when (ev.actionMasked) {
+        val timeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+        when (action) {
             android.view.MotionEvent.ACTION_DOWN -> {
                 gVideoPressActive = true
                 gVideoPressDownAt = now
                 gVideoPressX = ev.x
                 gVideoPressY = ev.y
+                gVideoLongPressOwner = java.lang.ref.WeakReference(activity)
+                gVideoLongPressMenuUntil = 0L
                 val captured = gVideoPressDownAt
+                // Set the candidate slightly BEFORE the native long-press menu
+                // opens. On fullscreen playback it often CANCELs the touch
+                // immediately after opening, before our old delayed callback.
                 mainHandler.postDelayed({
                     if (gVideoPressActive && gVideoPressDownAt == captured &&
-                        gVideoLongPressSettingsOn && isLikelyVideoScreen(gCurrentActivity)) {
-                        gVideoLongPressMenuUntil = android.os.SystemClock.uptimeMillis() + 2500L
-                        scheduleLongPressMenuInjection()
+                        gVideoLongPressOwner?.get() === activity) {
+                        markVideoLongPressCandidate(activity, "hold")
                     }
-                }, android.view.ViewConfiguration.getLongPressTimeout().toLong() + 60L)
+                }, (timeout - 55L).coerceAtLeast(100L))
             }
             android.view.MotionEvent.ACTION_MOVE -> {
                 val slop = try {
@@ -4114,23 +4155,29 @@ object Hooks {
                     gVideoPressActive = false
                 }
             }
-            android.view.MotionEvent.ACTION_UP -> {
-                if (gVideoPressActive &&
-                    now - gVideoPressDownAt >= android.view.ViewConfiguration.getLongPressTimeout()) {
-                    gVideoLongPressMenuUntil = now + 2500L
-                    scheduleLongPressMenuInjection()
+            android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                if (gVideoPressActive && now - gVideoPressDownAt >= timeout - 110L) {
+                    markVideoLongPressCandidate(activity, if (action ==
+                        android.view.MotionEvent.ACTION_CANCEL) "native-cancel" else "release")
                 }
                 gVideoPressActive = false
             }
-            android.view.MotionEvent.ACTION_CANCEL, android.view.MotionEvent.ACTION_POINTER_DOWN -> {
-                gVideoPressActive = false
-            }
+            android.view.MotionEvent.ACTION_POINTER_DOWN -> gVideoPressActive = false
         }
     }
 
-    private fun isInLongPressMenuWindow(): Boolean =
-        gVideoLongPressSettingsOn && isLikelyVideoScreen(gCurrentActivity) &&
-            android.os.SystemClock.uptimeMillis() <= gVideoLongPressMenuUntil
+    private fun isInLongPressMenuWindow(): Boolean {
+        if (!gVideoLongPressSettingsOn || !isLikelyVideoScreen(gCurrentActivity)) return false
+        val owner = gVideoLongPressOwner?.get() ?: return false
+        if (owner !== gCurrentActivity || owner.isFinishing) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now <= gVideoLongPressMenuUntil) return true
+        // Native fullscreen menus may show before long-press ACTION_CANCEL,
+        // even when the delayed Runnable has not run yet.
+        val timeout = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+        return gVideoPressActive &&
+            now - gVideoPressDownAt in (timeout - 125L).coerceAtLeast(0L)..(timeout + 550L)
+    }
 
     private fun nativeMenuLabels(root: View): Pair<Int, Int> {
         val texts = collectUiTexts(root, 8).map { it.trim().replace(" ", "") }
