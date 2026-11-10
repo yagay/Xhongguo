@@ -312,6 +312,10 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
+                        if (isShoppingMallDisabled()) {
+                            gNextShoppingTabScanAt = 0L
+                            mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
+                        } else restoreShoppingTabViews()
                         if (!gMasterOn || (previouslyHiddenControls && !gControlOn)) {
                             restoreAllSavedViews()
                             restoreShortVideoNativeControls()
@@ -2335,6 +2339,7 @@ object Hooks {
     private fun scanAllWindows() {
         try {
             if (gCurrentActivity == null) return
+            scanShoppingTabIfNeeded(gCurrentActivity)
             val decor = gCurrentActivity!!.window.decorView
             gNames.hideIdNames.forEach { resolveEntryId(it, decor) }
             gNames.progressIdNames.forEach { resolveEntryId(it, decor, gProgressIdSet, "进度条资源") }
@@ -2369,6 +2374,7 @@ object Hooks {
         gScanRunnable = object : Runnable {
             override fun run() {
                 try {
+                    scanShoppingTabIfNeeded(gCurrentActivity)
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
                     }
@@ -4404,6 +4410,9 @@ object Hooks {
                         !(gRestoreControlsOnPause && gVideoPaused)) {
                         collapseNativeMainBottomFrame(frame)
                     }
+                    if (isShoppingMallDisabled()) mainHandler.post {
+                        scanShoppingTabIfNeeded(gCurrentActivity, force = true)
+                    }
                     result
                 }
                 LogUtil.info("  ✓ BottomTabFrameLayout.setBottomTabBackground/windowNavColor | pkg=$pkg")
@@ -5338,6 +5347,17 @@ object Hooks {
                     }
                 }
 
+                if (view != null && isKnownShoppingTabView(view) &&
+                    targetVisibility != null && isShoppingMallDisabled()) {
+                    synchronized(gOriginalShoppingTabVisibility) {
+                        gOriginalShoppingTabVisibility[view] = targetVisibility
+                    }
+                    if (targetVisibility != View.GONE) {
+                        val args = (chain.args as Array<Any?>).copyOf()
+                        args[0] = View.GONE
+                        return@ham chain.proceed(args)
+                    }
+                }
                 if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham chain.proceed()
                 try {
                     LogUtil.incr("setVis")
@@ -5381,6 +5401,20 @@ object Hooks {
                 } catch (_: Exception) { chain.proceed() }
             }
             LogUtil.info("  ✓ setVis")
+            // Return false (not consumed by the native click handler) for the
+            // removed shopping-tab item and any of its icon/text descendants.
+            ham(c, "performClick", "shoppingTabPerformClick") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View)) {
+                    false
+                } else chain.proceed()
+            }
+            ham(c, "callOnClick", "shoppingTabCallOnClick") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View)) {
+                    false
+                } else chain.proceed()
+            }
         } catch (e: Exception) { LogUtil.error("setVis", e) }
         try {
             val c = Class.forName("android.view.ViewGroup", false, classLoader)
@@ -5446,8 +5480,16 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
+                            a.finish()
+                            LogUtil.info("商城入口已禁用: " + a.javaClass.name)
+                            LogUtil.incr("shoppingActivityBlocked")
+                        }
                         if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
+                        if (a.javaClass.name == MAIN_TAB_ACTIVITY) mainHandler.postDelayed({
+                            scanShoppingTabIfNeeded(a, force = true)
+                        }, 200L)
                         createNotification(a)
                     }
                 } catch (_: Exception) {}
@@ -5479,8 +5521,14 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
+                            a.finish()
+                        }
                         if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
+                        if (a.javaClass.name == MAIN_TAB_ACTIVITY) mainHandler.post {
+                            scanShoppingTabIfNeeded(a, force = true)
+                        }
                         createNotification(a)
                     }
                 } catch (_: Exception) {}
@@ -5507,6 +5555,24 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onPause")
+            // Reject only the dedicated shopping-mall Activity intent.
+            // Shopping-related short-drama classes are deliberately not blocked.
+            ham(c, "startActivity", "shoppingStartActivity") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
+                    LogUtil.incr("shoppingActivityIntentBlocked")
+                    LogUtil.info("已拦截打开商城 Activity")
+                    null
+                } else chain.proceed()
+            }
+            ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
+                    LogUtil.incr("shoppingActivityIntentBlocked")
+                    null
+                } else chain.proceed()
+            }
+            LogUtil.info("  ✓ targeted shopping activity launch intercept")
         } catch (e: Exception) { LogUtil.error("lifecycle", e) }
 
         val settingsSpec = nativeSettingsSpec()
