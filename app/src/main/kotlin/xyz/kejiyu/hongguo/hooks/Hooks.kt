@@ -4547,6 +4547,49 @@ object Hooks {
             }
         }
 
+        // Hook native popup presentation rather than replacing the video's
+        // long-press listener. The original menu and gesture always proceed.
+        try {
+            module.hook(Dialog::class.java.getDeclaredMethod("show"))
+                .setId("xh_video_longpress_dialog")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    val result = chain.proceed()
+                    try {
+                        val dialog = chain.thisObject as? Dialog
+                        if (dialog != null && isInLongPressMenuWindow()) {
+                            scheduleLongPressMenuInjection(dialog.window?.decorView) {
+                                dialog.dismiss()
+                            }
+                        }
+                    } catch (e: Throwable) { LogUtil.warn("长按菜单 Dialog 观察失败: " + e.message) }
+                    result
+                })
+            LogUtil.info("  ✓ video long-press Dialog observer")
+        } catch (e: Throwable) {
+            LogUtil.warn("video long-press Dialog hook unavailable: " + e.message)
+        }
+        try {
+            val popup = Class.forName("android.widget.PopupWindow", false, classLoader)
+            for (methodName in listOf("showAtLocation", "showAsDropDown")) {
+                ham(popup, methodName, "xh_video_longpress_popup_" + methodName) { chain ->
+                    val result = chain.proceed()
+                    try {
+                        val instance = chain.thisObject as? android.widget.PopupWindow
+                        if (instance != null && isInLongPressMenuWindow()) {
+                            scheduleLongPressMenuInjection(instance.contentView) {
+                                instance.dismiss()
+                            }
+                        }
+                    } catch (e: Throwable) { LogUtil.warn("长按菜单 Popup 观察失败: " + e.message) }
+                    result
+                }
+            }
+            LogUtil.info("  ✓ video long-press PopupWindow observers")
+        } catch (e: Throwable) {
+            LogUtil.warn("video long-press PopupWindow hooks unavailable: " + e.message)
+        }
+
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)
             module.hook(c.getDeclaredMethod("onWindowFocusChanged", Boolean::class.java))
@@ -5195,7 +5238,19 @@ object Hooks {
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 
         try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
-        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
+        try {
+            val c = Class.forName("android.app.Activity", false, classLoader)
+            module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java))
+                .setId("tz2")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    val ev = chain.getArg(0) as? android.view.MotionEvent
+                    try { observeVideoLongPress(ev, chain.thisObject as? Activity) } catch (_: Throwable) {}
+                    if (gMasterOn && gTopZoneOn && handleTopZoneEvent(ev)) true
+                    else chain.proceed()
+                })
+            LogUtil.info("  ✓ dispatchTouch + native long-press menu observer")
+        } catch (e: Exception) { LogUtil.error("tz2", e) }
 
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)
