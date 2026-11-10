@@ -4271,11 +4271,89 @@ object Hooks {
     }
 
     /**
+     * Full-series menus are sometimes rendered as a ConstraintLayout,
+     * RecyclerView or Compose-based BottomSheet rather than the vertical
+     * menu used on the feed. Add one small entry inside the *popup window*,
+     * never reparent the native menu or change its layout/insets.
+     */
+    private fun attachFullSeriesPopupEntry(root: View?, dismissMenu: () -> Unit): Boolean {
+        val act = gCurrentActivity ?: return false
+        if (!isFullSeriesVideoScreen(act) || !isInLongPressMenuWindow() ||
+            root == null || containsVideoMenuEntry(root)) return false
+
+        var host: FrameLayout? = root as? FrameLayout
+        if (host == null) {
+            fun findFrame(view: View?, depth: Int): FrameLayout? {
+                if (view == null || depth > 12) return null
+                if (view is FrameLayout && view.isShown &&
+                    (view.width > act.resources.displayMetrics.widthPixels / 2 ||
+                        view.measuredWidth > act.resources.displayMetrics.widthPixels / 2)) {
+                    return view
+                }
+                if (view is ViewGroup) {
+                    for (i in 0 until view.childCount) {
+                        val found = findFrame(view.getChildAt(i), depth + 1)
+                        if (found != null) return found
+                    }
+                }
+                return null
+            }
+            host = findFrame(root, 0)
+        }
+        val target = host ?: return false
+        if (target.width <= 0 || target.height <= dp(act, 54f)) return false
+        if (containsVideoMenuEntry(target)) return true
+        synchronized(gVideoMenuInjected) {
+            if (gVideoMenuInjected.containsKey(target)) return true
+            gVideoMenuInjected[target] = true
+        }
+        return try {
+            val chip = TextView(act).apply {
+                tag = VIDEO_LONG_PRESS_SETTINGS_TAG
+                text = "⚙ Xhongguo 设置"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                setPadding(dp(act, 14f), dp(act, 9f), dp(act, 14f), dp(act, 9f))
+                gravity = Gravity.CENTER
+                background = roundedBg(act, Color.argb(245, 40, 41, 46), 14f)
+                elevation = dp(act, 10f).toFloat()
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    try { dismissMenu() } catch (_: Throwable) {}
+                    openLongPressModuleSettings(act)
+                }
+            }
+            // The popup's own root often occupies only the bottom-sheet bounds;
+            // keep the chip near its top, not at the OS navigation-button area.
+            val position = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(act, 42f),
+                Gravity.TOP or Gravity.END,
+            ).apply {
+                rightMargin = dp(act, 12f)
+                topMargin = dp(act, 10f)
+            }
+            target.addView(chip, position)
+            LogUtil.info("全集视频长按菜单：使用原生弹窗内部入口，host=" +
+                target.javaClass.simpleName)
+            LogUtil.incr("videoFullSeriesMenuInjected")
+            true
+        } catch (e: Throwable) {
+            synchronized(gVideoMenuInjected) { gVideoMenuInjected.remove(target) }
+            LogUtil.warn("全集视频弹窗入口失败: " + e.message)
+            false
+        }
+    }
+
+    /**
      * Prefer append-only injection into the native vertical command container.
      * Other RecyclerView/ConstraintLayout menus are left untouched rather than
      * shifting the series selector or modifying system bars to make room.
      */
-    private fun injectLongPressMenuRoot(root: View?, dismissMenu: () -> Unit = {}): Boolean {
+    private fun injectLongPressMenuRoot(
+        root: View?, dismissMenu: () -> Unit = {}, allowPopupOverlay: Boolean = false,
+    ): Boolean {
         if (root == null || !isInLongPressMenuWindow()) return false
         val act = gCurrentActivity ?: return false
         if (containsVideoMenuEntry(root)) return true
@@ -4293,7 +4371,15 @@ object Hooks {
             }
         }
         find(root, 0)
-        val menu = best ?: return false
+        val menu = best ?: run {
+            if (allowPopupOverlay && isFullSeriesVideoScreen(act)) {
+                return attachFullSeriesPopupEntry(root, dismissMenu)
+            }
+            // A full-series in-activity sheet may use non-vertical views; when
+            // it contains multiple video actions we can add a popup-only chip.
+            // Never put a chip directly on an unrecognized video view.
+            return false
+        }
         if (containsVideoMenuEntry(menu)) return true
         synchronized(gVideoMenuInjected) {
             if (gVideoMenuInjected.containsKey(menu)) return true
@@ -4317,13 +4403,14 @@ object Hooks {
 
     private fun scheduleLongPressMenuInjection(
         preferredRoot: View? = null, dismissMenu: () -> Unit = {},
+        allowPopupOverlay: Boolean = false,
     ) {
         if (!isInLongPressMenuWindow()) return
-        for (delay in longArrayOf(0L, 70L, 190L, 420L)) {
+        for (delay in longArrayOf(0L, 70L, 190L, 420L, 760L)) {
             mainHandler.postDelayed({
                 if (!isInLongPressMenuWindow()) return@postDelayed
                 if (preferredRoot != null &&
-                    injectLongPressMenuRoot(preferredRoot, dismissMenu)) return@postDelayed
+                    injectLongPressMenuRoot(preferredRoot, dismissMenu, allowPopupOverlay)) return@postDelayed
                 for (root in collectAllWindows()) {
                     if (injectLongPressMenuRoot(root, dismissMenu)) break
                 }
