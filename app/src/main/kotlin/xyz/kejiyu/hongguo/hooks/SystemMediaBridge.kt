@@ -217,8 +217,10 @@ internal object SystemMediaBridge {
     private fun launchIntent(ctx: Context): Intent? =
         try {
             ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
+                // Return to the existing playback task; CLEAR_TOP could
+                // destroy the active full-series Activity and stop the video.
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra("xhongguo_return_to_video", true)
             }
         } catch (_: Throwable) { null }
