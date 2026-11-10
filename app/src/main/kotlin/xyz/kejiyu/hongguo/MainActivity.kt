@@ -1,12 +1,14 @@
 package xyz.kejiyu.hongguo
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageInfo
 import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.WindowInsetsController
 import android.widget.TextView
+import android.widget.Toast
 import xyz.kejiyu.hongguo.hooks.TargetNames
 
 class MainActivity : Activity() {
@@ -28,6 +30,20 @@ class MainActivity : Activity() {
         currentVersion = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
         tvVersion.text = "模块 ${BuildConfig.VERSION_NAME}  ·  versionCode ${BuildConfig.VERSION_CODE}"
         updateTargetVersionText()
+
+        findViewById<View>(R.id.btn_open_settings).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        findViewById<View>(R.id.btn_open_target).setOnClickListener {
+            val pkg = when {
+                packageInfo(TargetNames.CN_PACKAGE) != null -> TargetNames.CN_PACKAGE
+                packageInfo(TargetNames.OVERSEA_PACKAGE) != null -> TargetNames.OVERSEA_PACKAGE
+                else -> null
+            }
+            val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
+            if (launch != null) startActivity(launch)
+            else Toast.makeText(this, "未找到已安装的红果 App", Toast.LENGTH_SHORT).show()
+        }
 
         findViewById<View>(R.id.btn_check_update).setOnClickListener { manualCheck() }
         findViewById<View>(R.id.btn_github).setOnClickListener {
