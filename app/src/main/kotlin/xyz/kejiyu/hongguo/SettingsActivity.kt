@@ -74,7 +74,7 @@ class SettingsActivity : Activity() {
 
         section("界面精简")
         toggle("隐藏状态栏", "视频页面沉浸显示", "status_bar")
-        toggle("隐藏控件", "隐藏顶部、底部、作品信息和互动控件", "control_hide")
+        toggle("隐藏控件", "三键导航下保留首页底部栏和全集入口", "control_hide")
         toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
         toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
         toggle("隐藏系统小白条", "隐藏手势导航提示条", "nav_bar_off")
