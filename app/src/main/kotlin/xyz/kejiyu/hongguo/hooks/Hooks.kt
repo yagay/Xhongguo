@@ -62,6 +62,8 @@ object Hooks {
     private var gControlOn = false
     // Independent of the master switch, so a disabled module can still be opened.
     private var gVideoLongPressSettingsOn = true
+    // Keep the app's other tabs and Android three-button navigation untouched.
+    private var gDisableShoppingMall = true
     private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
@@ -270,6 +272,7 @@ object Hooks {
         gStatusOn = prefs.getBoolean("status_bar", false)
         gControlOn = prefs.getBoolean("control_hide", false)
         gVideoLongPressSettingsOn = prefs.getBoolean("video_longpress_settings", true)
+        gDisableShoppingMall = prefs.getBoolean("disable_shopping_mall", true)
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -309,6 +312,10 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
+                        if (isShoppingMallDisabled()) {
+                            gNextShoppingTabScanAt = 0L
+                            mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
+                        } else restoreShoppingTabViews()
                         if (!gMasterOn || (previouslyHiddenControls && !gControlOn)) {
                             restoreAllSavedViews()
                             restoreShortVideoNativeControls()
@@ -1207,6 +1214,178 @@ object Hooks {
             enforceNativeMainBottomHidden(gCurrentActivity)
         }
     }
+
+    // Only the shopping tab and its dedicated activity are blocked. In particular
+    // SeriesBookMallTabFragment and SeriesMallFragment are SHORT-DRAMA screens,
+    // not the e-commerce shopping mall, and must remain functional.
+    private const val SHOP_ACTIVITY =
+        "com.dragon.read.component.biz.impl.mall.activity.MallPageActivity"
+    private const val MAIN_TAB_ACTIVITY =
+        "com.dragon.read.pages.main.MainFragmentActivity"
+    private val gOriginalShoppingTabVisibility = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<View, Int>()
+    )
+    private var gNextShoppingTabScanAt = 0L
+
+    private fun isShoppingMallDisabled(): Boolean =
+        gMasterOn && gDisableShoppingMall && gPkg == TargetNames.CN_PACKAGE
+
+    private fun hasExactText(view: View?, value: String, depth: Int = 0): Boolean {
+        if (view == null || depth > 5) return false
+        if (view is TextView &&
+            view.text?.toString()?.trim()?.replace(" ", "") == value) return true
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                if (hasExactText(view.getChildAt(i), value, depth + 1)) return true
+            }
+        }
+        return false
+    }
+
+    private fun findMallBottomBarRoot(act: Activity): ViewGroup? {
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+
+        for (entry in listOf("bottom_bar_layout", "aot")) {
+            try {
+                val id = act.resources.getIdentifier(entry, "id", gPkg)
+                if (id != 0) {
+                    val view = act.findViewById<View>(id)
+                    if (view is ViewGroup && view.isAttachedToWindow) return view
+                }
+            } catch (_: Throwable) {}
+        }
+
+        for (field in listOf("H", "G")) {
+            val view = try { findFieldValue(act, field) as? ViewGroup } catch (_: Throwable) { null }
+            if (view?.javaClass?.name == "com.dragon.read.widget.BottomTabFrameLayout") return view
+        }
+
+        fun walk(view: View?, depth: Int = 0): ViewGroup? {
+            if (view == null || depth > 18) return null
+            if (view is ViewGroup) {
+                if (view.javaClass.name == "com.dragon.read.widget.BottomTabFrameLayout") return view
+                for (i in 0 until view.childCount) {
+                    val found = walk(view.getChildAt(i), depth + 1)
+                    if (found != null) return found
+                }
+            }
+            return null
+        }
+        return walk(act.window.decorView)
+    }
+
+    private fun findShoppingTabView(root: ViewGroup): View? {
+        val matches = mutableListOf<TextView>()
+        fun collectMallLabels(view: View?, depth: Int) {
+            if (view == null || depth > 15 || matches.size >= 3) return
+            if (view is TextView &&
+                view.text?.toString()?.trim()?.replace(" ", "") == "商城") {
+                matches.add(view)
+                return
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    collectMallLabels(view.getChildAt(i), depth + 1)
+                }
+            }
+        }
+        collectMallLabels(root, 0)
+        if (matches.isEmpty()) return null
+
+        val otherNames = setOf("首页", "剧场", "我的", "赚钱")
+        for (match in matches) {
+            val location = IntArray(2)
+            try { match.getLocationOnScreen(location) } catch (_: Throwable) { continue }
+            if (location[1] < match.resources.displayMetrics.heightPixels * 0.68f) continue
+
+            var item: View = match
+            for (level in 0 until 8) {
+                val parent = item.parent as? ViewGroup ?: break
+                val siblings = (0 until parent.childCount).mapNotNull { parent.getChildAt(it) }
+                if (siblings.size in 3..7 &&
+                    siblings.count { child -> otherNames.any { hasExactText(child, it) } } >= 2 &&
+                    siblings.count { child -> hasExactText(child, "商城") } == 1) {
+                    // The item contains only "商城"; the siblings contain other tabs.
+                    return item
+                }
+                if (parent === root) break
+                item = parent
+            }
+        }
+        return null
+    }
+
+    private fun isKnownShoppingTabView(view: View?): Boolean = view != null &&
+        synchronized(gOriginalShoppingTabVisibility) {
+            gOriginalShoppingTabVisibility.containsKey(view)
+        }
+
+    private fun isWithinShoppingTab(view: View?): Boolean {
+        var node = view
+        repeat(12) {
+            if (node == null) return false
+            if (isKnownShoppingTabView(node)) return true
+            node = node?.parent as? View
+        }
+        return false
+    }
+
+    private fun restoreShoppingTabViews() {
+        val saved = synchronized(gOriginalShoppingTabVisibility) {
+            gOriginalShoppingTabVisibility.entries.map { it.key to it.value }.also {
+                gOriginalShoppingTabVisibility.clear()
+            }
+        }
+        for ((item, visibility) in saved) {
+            try {
+                setModuleVisibility(item, visibility)
+                item.requestLayout()
+                (item.parent as? ViewGroup)?.requestLayout()
+            } catch (_: Throwable) {}
+        }
+        if (saved.isNotEmpty()) LogUtil.info("商城导航已恢复: " + saved.size)
+    }
+
+    private fun enforceShoppingTabHidden(act: Activity?) {
+        if (!isShoppingMallDisabled()) {
+            if (gOriginalShoppingTabVisibility.isNotEmpty()) restoreShoppingTabViews()
+            return
+        }
+        if (act?.javaClass?.name != MAIN_TAB_ACTIVITY || act.isFinishing) return
+        try {
+            val root = findMallBottomBarRoot(act) ?: return
+            val item = findShoppingTabView(root) ?: return
+            synchronized(gOriginalShoppingTabVisibility) {
+                if (!gOriginalShoppingTabVisibility.containsKey(item)) {
+                    gOriginalShoppingTabVisibility[item] = item.visibility
+                }
+            }
+            if (item.visibility != View.GONE) {
+                setModuleVisibility(item, View.GONE)
+                item.requestLayout()
+                (item.parent as? ViewGroup)?.requestLayout()
+                LogUtil.info("首页仅隐藏商城 Tab, parent=" +
+                    (item.parent as? View)?.javaClass?.name)
+                LogUtil.incr("shoppingTabHide")
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("商城 Tab 隐藏失败: " + e.message)
+        }
+    }
+
+    private fun scanShoppingTabIfNeeded(act: Activity?, force: Boolean = false) {
+        if (!isShoppingMallDisabled()) {
+            restoreShoppingTabViews()
+            return
+        }
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now < gNextShoppingTabScanAt) return
+        gNextShoppingTabScanAt = now + 850L
+        enforceShoppingTabHidden(act)
+    }
+
+    private fun isShoppingActivityIntent(intent: Intent?): Boolean =
+        intent?.component?.className == SHOP_ACTIVITY
 
     private val mainBottomNavLabels = setOf("首页", "剧场", "商城", "赚钱", "我的")
 
@@ -2160,6 +2339,7 @@ object Hooks {
     private fun scanAllWindows() {
         try {
             if (gCurrentActivity == null) return
+            scanShoppingTabIfNeeded(gCurrentActivity)
             val decor = gCurrentActivity!!.window.decorView
             gNames.hideIdNames.forEach { resolveEntryId(it, decor) }
             gNames.progressIdNames.forEach { resolveEntryId(it, decor, gProgressIdSet, "进度条资源") }
@@ -2194,6 +2374,7 @@ object Hooks {
         gScanRunnable = object : Runnable {
             override fun run() {
                 try {
+                    scanShoppingTabIfNeeded(gCurrentActivity)
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
                     }
@@ -3328,6 +3509,11 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
+            addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
+                gDisableShoppingMall = it
+                if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
+                else restoreShoppingTabViews()
+            }, "disable_shopping_mall")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
@@ -4228,6 +4414,9 @@ object Hooks {
                     if (gMasterOn && gControlOn && !keepNativeNavigation() &&
                         !(gRestoreControlsOnPause && gVideoPaused)) {
                         collapseNativeMainBottomFrame(frame)
+                    }
+                    if (isShoppingMallDisabled()) mainHandler.post {
+                        scanShoppingTabIfNeeded(gCurrentActivity, force = true)
                     }
                     result
                 }
@@ -5163,6 +5352,17 @@ object Hooks {
                     }
                 }
 
+                if (view != null && isKnownShoppingTabView(view) &&
+                    targetVisibility != null && isShoppingMallDisabled()) {
+                    synchronized(gOriginalShoppingTabVisibility) {
+                        gOriginalShoppingTabVisibility[view] = targetVisibility
+                    }
+                    if (targetVisibility != View.GONE) {
+                        val args = (chain.args as Array<Any?>).copyOf()
+                        args[0] = View.GONE
+                        return@ham chain.proceed(args)
+                    }
+                }
                 if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham chain.proceed()
                 try {
                     LogUtil.incr("setVis")
@@ -5206,6 +5406,20 @@ object Hooks {
                 } catch (_: Exception) { chain.proceed() }
             }
             LogUtil.info("  ✓ setVis")
+            // Return false (not consumed by the native click handler) for the
+            // removed shopping-tab item and any of its icon/text descendants.
+            ham(c, "performClick", "shoppingTabPerformClick") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View)) {
+                    false
+                } else chain.proceed()
+            }
+            ham(c, "callOnClick", "shoppingTabCallOnClick") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View)) {
+                    false
+                } else chain.proceed()
+            }
         } catch (e: Exception) { LogUtil.error("setVis", e) }
         try {
             val c = Class.forName("android.view.ViewGroup", false, classLoader)
@@ -5271,8 +5485,16 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
+                            a.finish()
+                            LogUtil.info("商城入口已禁用: " + a.javaClass.name)
+                            LogUtil.incr("shoppingActivityBlocked")
+                        }
                         if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
+                        if (a.javaClass.name == MAIN_TAB_ACTIVITY) mainHandler.postDelayed({
+                            scanShoppingTabIfNeeded(a, force = true)
+                        }, 200L)
                         createNotification(a)
                     }
                 } catch (_: Exception) {}
@@ -5304,8 +5526,14 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
+                            a.finish()
+                        }
                         if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
+                        if (a.javaClass.name == MAIN_TAB_ACTIVITY) mainHandler.post {
+                            scanShoppingTabIfNeeded(a, force = true)
+                        }
                         createNotification(a)
                     }
                 } catch (_: Exception) {}
@@ -5332,6 +5560,24 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onPause")
+            // Reject only the dedicated shopping-mall Activity intent.
+            // Shopping-related short-drama classes are deliberately not blocked.
+            ham(c, "startActivity", "shoppingStartActivity") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
+                    LogUtil.incr("shoppingActivityIntentBlocked")
+                    LogUtil.info("已拦截打开商城 Activity")
+                    null
+                } else chain.proceed()
+            }
+            ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
+                if (isShoppingMallDisabled() &&
+                    isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
+                    LogUtil.incr("shoppingActivityIntentBlocked")
+                    null
+                } else chain.proceed()
+            }
+            LogUtil.info("  ✓ targeted shopping activity launch intercept")
         } catch (e: Exception) { LogUtil.error("lifecycle", e) }
 
         val settingsSpec = nativeSettingsSpec()

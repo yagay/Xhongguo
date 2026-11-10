@@ -79,6 +79,7 @@ class SettingsActivity : Activity() {
         toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
         toggle("隐藏系统小白条", "仅手势导航有效，三键导航始终保留按键", "nav_bar_off")
         toggle("视频长按菜单入口", "在原生视频长按菜单中添加 Xhongguo 设置", "video_longpress_settings", true)
+        toggle("禁用商城", "隐藏底部「商城」Tab，并阻止打开独立商城页面；不影响剧场", "disable_shopping_mall", true)
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")
