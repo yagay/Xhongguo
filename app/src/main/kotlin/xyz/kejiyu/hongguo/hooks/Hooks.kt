@@ -38,11 +38,28 @@ object Hooks {
     private var gPrefs: SharedPreferences? = null
     private var gSettingsObserver: android.database.ContentObserver? = null
 
+    // Capture window state only when the module actually changes the status bar.
+    private data class OriginalStatusBar(
+        val flags: Int,
+        val systemUiVisibility: Int,
+        val color: Int,
+        val cutoutMode: Int,
+        val lightAppearance: Int,
+        val wasVisible: Boolean?,
+    )
+    private val gOriginalStatusBars = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Activity, OriginalStatusBar>()
+    )
+    private val gHiddenGestureBars = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Activity, Boolean>()
+    )
+    // View hierarchy scans run often; never read Settings.Secure per View.
+    @Volatile private var gGestureNavigationCache: Boolean? = null
+
+
     private var gMasterOn = false
     private var gStatusOn = false
     private var gControlOn = false
-    // Separate opt-in: hiding ordinary controls must not hide the app's navigation.
-    private var gHideMainTabs = false
     private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
@@ -250,7 +267,6 @@ object Hooks {
         gMasterOn = prefs.getBoolean("master_on", false)
         gStatusOn = prefs.getBoolean("status_bar", false)
         gControlOn = prefs.getBoolean("control_hide", false)
-        gHideMainTabs = prefs.getBoolean("hide_main_tabs", false)
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -271,13 +287,11 @@ object Hooks {
         gDownloadOneDaySeries = prefs.getInt(DOWNLOAD_LIMIT_SERIES_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
         gDownloadTotalSeries = prefs.getInt(DOWNLOAD_LIMIT_TOTAL_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
 
-        // Obfuscated bottom-layout IDs must never be applied to an unverified version.
-        // In particular 7.3.5.32 is not a supported profile yet.
-        if (gTargetVersionName != "未知" && !TargetNames.isSupported(gPkg, gTargetVersionName)) {
+        // Newer obfuscated versions must not inherit old fullscreen/episode layout IDs.
+        if (!hasVerifiedUiProfile()) {
             gStatusOn = false
             gNavBarOff = false
             gControlOn = false
-            gHideMainTabs = false
             gPlayerOn = false
         }
     }
@@ -289,17 +303,14 @@ object Hooks {
                 mainHandler.post {
                     try {
                         val context = appCtx ?: ctx.applicationContext
-                        val previouslyHidingTabs = gHideMainTabs
-                        val previouslyHidingControls = gControlOn
-                        val previouslyHidingSeries = gPlayerOn
+                        val previouslyHiddenControls = gMasterOn && gControlOn
+                        val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
-                        if (!gMasterOn ||
-                            (previouslyHidingTabs && !gHideMainTabs) ||
-                            (previouslyHidingControls && !gControlOn)) {
+                        if (!gMasterOn || (previouslyHiddenControls && !gControlOn)) {
                             restoreAllSavedViews()
                             restoreShortVideoNativeControls()
                             setVideoToolbarsVisible(true)
-                        } else if (previouslyHidingSeries && !gPlayerOn) {
+                        } else if (previouslyHiddenPlayer && !gPlayerOn) {
                             restoreShortVideoNativeControls()
                             setVideoToolbarsVisible(true)
                         }
@@ -547,17 +558,18 @@ object Hooks {
     }
     private fun quickMatch(v: View?): Boolean {
         if (v == null) return false
-        // Never treat the app navigation, its mask, or the entry into full series
-        // as a generic removable control.
-        if (isNativeMainBottomFrame(v) || isNativeVideoFeedBottomMask(v) ||
-            isKnownFullSeriesEntry(v) || isHomeFullSeriesEntry(v)) return false
+        if (keepNativeNavigation()) {
+            val entry = viewEntryName(v)
+            if (v.javaClass.name == "com.dragon.read.widget.BottomTabFrameLayout" ||
+                entry == "bottom_bar_layout" || entry == "aot" ||
+                entry == "bottom_tab_mask" || entry == "ar8" || entry == "ar9") return false
+        }
         LogUtil.incr("matchCall")
         try { val id = v.id; if (id > 0 && gTargetIdSet.contains(id)) { LogUtil.incr("matchHit"); return true } } catch (_: Exception) {}
         try { if (v.javaClass.name in hideClasses) { LogUtil.incr("matchHit"); return true } } catch (_: Exception) {}
         if (isFullscreenWatchControl(v)) { LogUtil.incr("matchHit"); return true }
-        if (gHideMainTabs && (isKnownBottomBackdrop(v) || isHomeBottomBackdropMarker(v))) {
-            LogUtil.incr("matchHit"); return true
-        }
+        if (isKnownFullSeriesEntry(v) || isHomeFullSeriesEntry(v)) { LogUtil.incr("matchHit"); return true }
+        if (isKnownBottomBackdrop(v) || isHomeBottomBackdropMarker(v)) { LogUtil.incr("matchHit"); return true }
         return false
     }
 
@@ -678,6 +690,7 @@ object Hooks {
     }
 
     private fun isHomeFullSeriesEntry(v: View?): Boolean {
+        if (keepNativeNavigation()) return false
         if (gPkg !in setOf(TargetNames.CN_PACKAGE, TargetNames.OVERSEA_PACKAGE) ||
             v !is ViewGroup || !isInsideCurrentActivityDecor(v)) return false
         synchronized(gKnownFullSeriesEntryViews) {
@@ -721,7 +734,7 @@ object Hooks {
         synchronized(gKnownFullSeriesEntryViews) { gKnownFullSeriesEntryViews.containsKey(v) }
 
     private fun isHomeBottomBackdropMarker(v: View?): Boolean {
-        if (!gHideMainTabs) return false
+        if (keepNativeNavigation()) return false
         if (gPkg !in setOf(TargetNames.CN_PACKAGE, TargetNames.OVERSEA_PACKAGE) ||
             v == null || !isInsideCurrentActivityDecor(v)) return false
         val markerName = viewEntryName(v)
@@ -749,6 +762,7 @@ object Hooks {
         synchronized(gKnownBottomBackdropViews) { gKnownBottomBackdropViews.containsKey(v) }
 
     private fun isNativeMainBottomFrame(v: View?): Boolean {
+        if (keepNativeNavigation()) return false
         if (gPkg !in setOf(TargetNames.CN_PACKAGE, TargetNames.OVERSEA_PACKAGE) || v == null) return false
         return try {
             val idName = viewEntryName(v)
@@ -758,6 +772,7 @@ object Hooks {
     }
 
     private fun isNativeVideoFeedBottomMask(v: View?): Boolean {
+        if (keepNativeNavigation()) return false
         if (gPkg !in setOf(TargetNames.CN_PACKAGE, TargetNames.OVERSEA_PACKAGE) || v == null) return false
         return try {
             val idName = viewEntryName(v)
@@ -793,15 +808,12 @@ object Hooks {
         val color = synchronized(gSavedNativeNavBarColors) { gSavedNativeNavBarColors.remove(act) } ?: return
         try {
             act.window.navigationBarColor = color
-            if (Build.VERSION.SDK_INT >= 30) {
-                act.window.decorView.windowInsetsController?.show(WindowInsets.Type.navigationBars())
-            }
             act.window.decorView.requestApplyInsets()
         } catch (_: Throwable) {}
     }
 
     private fun collapseNativeMainBottomFrame(v: View?) {
-        if (!gHideMainTabs) return
+        if (keepNativeNavigation()) return
         if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (!isNativeMainBottomFrame(v)) return
         try {
@@ -814,7 +826,7 @@ object Hooks {
             }
             v.requestLayout()
             (v.parent as? View)?.requestLayout()
-            // Collapsing an app tab must not alter the system bar fit/insets.
+            // App-tab visibility must not change the OS navigation bar's insets.
             LogUtil.incr("nativeBottomFrameCollapse")
         } catch (e: Throwable) {
             LogUtil.warn("collapse native BottomTabFrameLayout failed: $e")
@@ -822,7 +834,6 @@ object Hooks {
     }
 
     private fun collapseNativeVideoFeedBottomMask(v: View?) {
-        if (!gHideMainTabs) return
         if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (!isNativeVideoFeedBottomMask(v)) return
         try {
@@ -881,7 +892,6 @@ object Hooks {
     }
 
     private fun enforceNativeMainBottomHidden(act: Activity?) {
-        if (!gHideMainTabs) return
         if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         collapseNativeMainBottomFrame(findNativeMainBottomFrame(act))
     }
@@ -904,7 +914,6 @@ object Hooks {
     }
 
     private fun reclaimFeedViewportBottomMargin(root: View?) {
-        if (!gHideMainTabs) return
         if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         val pager = findFeedViewport(root) ?: return
         try {
@@ -929,7 +938,6 @@ object Hooks {
     }
 
     private fun enforceKnownFeedViewportBottomMargin() {
-        if (!gHideMainTabs) return
         if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         val views = synchronized(gKnownFeedViewportViews) { gKnownFeedViewportViews.keys.toList() }
         for (pager in views) reclaimFeedViewportBottomMargin(pager)
@@ -1189,7 +1197,6 @@ object Hooks {
     }
 
     private fun collapseHomeBottomBackdrop(marker: View?) {
-        if (!gHideMainTabs) return
         if (marker == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
 
         if (isNativeVideoFeedBottomMask(marker) || isHomeBottomBackdropMarker(marker) || isKnownBottomBackdrop(marker)) {
@@ -1201,7 +1208,7 @@ object Hooks {
     private val mainBottomNavLabels = setOf("首页", "剧场", "商城", "赚钱", "我的")
 
     private fun isMainBottomNavContainer(v: View?): Boolean {
-        if (!gHideMainTabs) return false
+        if (keepNativeNavigation()) return false
         if (gPkg != TargetNames.CN_PACKAGE || v !is ViewGroup || !isInsideCurrentActivityDecor(v)) return false
         synchronized(gKnownMainBottomNavViews) { if (gKnownMainBottomNavViews.containsKey(v)) return true }
         val density = try { v.resources.displayMetrics.density.coerceAtLeast(0.1f) } catch (_: Throwable) { 1f }
@@ -1249,9 +1256,10 @@ object Hooks {
         val idName = viewEntryName(v)
 
         if (idName == "iu1" || idName == "is7") return true
-        if (gHideMainTabs && (isNativeMainBottomFrame(v) || isNativeVideoFeedBottomMask(v))) return true
-        if (gHideMainTabs && (isKnownBottomBackdrop(v) || isHomeBottomBackdropMarker(v))) return true
-        return gHideMainTabs && isMainBottomNavContainer(v)
+        if (isKnownFullSeriesEntry(v) || isHomeFullSeriesEntry(v)) return true
+        if (isNativeMainBottomFrame(v) || isNativeVideoFeedBottomMask(v)) return true
+        if (isKnownBottomBackdrop(v) || isHomeBottomBackdropMarker(v)) return true
+        return isMainBottomNavContainer(v)
     }
 
     private fun installSeriesToolbarLayoutGuard(v: View?) {
@@ -1577,16 +1585,10 @@ object Hooks {
         if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         LogUtil.incr("scanTree")
 
-        if (isNativeMainBottomFrame(v)) {
-            if (gHideMainTabs) collapseNativeMainBottomFrame(v)
-            return
-        }
-        if (isNativeVideoFeedBottomMask(v)) {
-            if (gHideMainTabs) collapseNativeVideoFeedBottomMask(v)
-            return
-        }
-        if (gHideMainTabs && isHomeBottomBackdropMarker(v)) { collapseHomeBottomBackdrop(v); return }
-        if (gHideMainTabs && isKnownBottomBackdrop(v)) { blindView(v); return }
+        if (isNativeMainBottomFrame(v)) { collapseNativeMainBottomFrame(v); return }
+        if (isNativeVideoFeedBottomMask(v)) { collapseNativeVideoFeedBottomMask(v); return }
+        if (isHomeBottomBackdropMarker(v)) { collapseHomeBottomBackdrop(v); return }
+        if (isKnownBottomBackdrop(v)) { blindView(v); return }
 
         if (isMainBottomNavContainer(v)) { blindView(v); return }
         if (quickMatch(v)) { blindView(v); return }
@@ -2224,6 +2226,57 @@ object Hooks {
     }
     private fun applyToCurrent() { mainHandler.post { scanAllWindows() } }
 
+    /**
+     * 0 = three-button, 1 = two-button, 2 = gesture navigation.
+     * Use both secure settings and framework overlay: if either indicates
+     * buttons, preserve the button bar. Unknown modes are treated as buttons.
+     */
+    private fun isGestureNavigation(ctx: Context?): Boolean {
+        gGestureNavigationCache?.let { return it }
+        if (ctx == null) return false
+        val secureMode = try {
+            android.provider.Settings.Secure.getInt(ctx.contentResolver, "navigation_mode", -1)
+        } catch (_: Throwable) { -1 }
+        val overlayMode = try {
+            val resId = ctx.resources.getIdentifier("config_navBarInteractionMode", "integer", "android")
+            if (resId != 0) ctx.resources.getInteger(resId) else -1
+        } catch (_: Throwable) { -1 }
+        val gestural = if (secureMode == 0 || secureMode == 1 ||
+            overlayMode == 0 || overlayMode == 1) false
+        else secureMode == 2 || overlayMode == 2
+        gGestureNavigationCache = gestural
+        return gestural
+    }
+
+    private fun hasVerifiedUiProfile(): Boolean =
+        TargetNames.isSupported(gPkg, gTargetVersionName)
+
+    private fun keepNativeNavigation(): Boolean =
+        !hasVerifiedUiProfile() || !isGestureNavigation(appCtx ?: gCurrentActivity)
+
+    private fun rememberOriginalStatusBar(act: Activity) {
+        val window = act.window
+        val decor = window.decorView
+        synchronized(gOriginalStatusBars) {
+            if (gOriginalStatusBars.containsKey(act)) return
+            val light = if (Build.VERSION.SDK_INT >= 30) {
+                decor.windowInsetsController?.systemBarsAppearance
+                    ?.and(WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS) ?: 0
+            } else 0
+            val visible = if (Build.VERSION.SDK_INT >= 30) try {
+                decor.rootWindowInsets?.isVisible(WindowInsets.Type.statusBars())
+            } catch (_: Throwable) { null } else null
+            gOriginalStatusBars[act] = OriginalStatusBar(
+                flags = window.attributes.flags,
+                systemUiVisibility = decor.systemUiVisibility,
+                color = window.statusBarColor,
+                cutoutMode = if (Build.VERSION.SDK_INT >= 28) window.attributes.layoutInDisplayCutoutMode else 0,
+                lightAppearance = light,
+                wasVisible = visible,
+            )
+        }
+    }
+
     private fun isWindowedMode(act: Activity?): Boolean {
         if (act == null) return false
         try {
@@ -2311,7 +2364,9 @@ object Hooks {
     }
 
     private fun applyWindowedTop(act: Activity) {
+        if (!gMasterOn || !gStatusOn || !hasVerifiedUiProfile()) return
         try {
+            rememberOriginalStatusBar(act)
             val window = act.window ?: return
             val decor = window.decorView
 
@@ -2336,8 +2391,7 @@ object Hooks {
                         View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN.inv() and
                         View.SYSTEM_UI_FLAG_FULLSCREEN.inv() and
                         View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY.inv()
-                    // Keep the target window's existing bottom-inset policy.
-                    // Forcing edge-to-edge here places full-series controls off-screen.
+                    // Preserve app-owned insets in windowed mode.
                     window.statusBarColor = Color.TRANSPARENT
                     decor.windowInsetsController?.apply {
                         setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
@@ -2419,17 +2473,16 @@ object Hooks {
     }
 
     private fun applyCleanTop(act: Activity?) {
-        if (act == null || !gMasterOn || !gStatusOn) return
+        if (act == null || !gMasterOn || !gStatusOn || !hasVerifiedUiProfile()) return
         if (isWindowedMode(act)) {
             applyWindowedTop(act)
             return
         }
         try {
+            rememberOriginalStatusBar(act)
             val window = act.window ?: return
             val decor = window.decorView
-
-            // Do not change decorFitsSystemWindows here: it also changes how
-            // bottom sheets/episode selectors receive navigation-bar insets.
+            // Do not modify decorFitsSystemWindows; three-key navigation consumes insets.
             if (Build.VERSION.SDK_INT >= 28) {
                 val attrs = window.attributes
                 attrs.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30) {
@@ -2466,52 +2519,60 @@ object Hooks {
     }
     private fun showStatusBar(act: Activity?) {
         if (act == null) return
+        // When disabled, leave Hongguo's native status bar untouched.
+        // The previous unconditional restoration removed LAYOUT_FULLSCREEN,
+        // causing white icons on white and shifting the video header down.
+        val saved = synchronized(gOriginalStatusBars) { gOriginalStatusBars.remove(act) } ?: return
         try {
-            val window = act.window ?: return
+            val window = act.window
             val decor = window.decorView
-            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-            if (Build.VERSION.SDK_INT >= 30) {
-                var topTypes = WindowInsets.Type.statusBars()
-                if (isWindowedMode(act)) topTypes = topTypes or WindowInsets.Type.captionBar()
-                decor.windowInsetsController?.show(topTypes)
-            }
+            val fullscreenFlag = WindowManager.LayoutParams.FLAG_FULLSCREEN
+            if (saved.flags and fullscreenFlag != 0) window.addFlags(fullscreenFlag)
+            else window.clearFlags(fullscreenFlag)
+            window.statusBarColor = saved.color
             if (Build.VERSION.SDK_INT >= 28) {
                 val attrs = window.attributes
-                attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                attrs.layoutInDisplayCutoutMode = saved.cutoutMode
                 window.attributes = attrs
             }
             @Suppress("DEPRECATION")
-            decor.systemUiVisibility = decor.systemUiVisibility and
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN.inv() and
-                View.SYSTEM_UI_FLAG_FULLSCREEN.inv() and
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY.inv()
+            run { decor.systemUiVisibility = saved.systemUiVisibility }
+            if (Build.VERSION.SDK_INT >= 30) {
+                decor.windowInsetsController?.apply {
+                    setSystemBarsAppearance(saved.lightAppearance,
+                        WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
+                    when (saved.wasVisible) {
+                        true -> show(WindowInsets.Type.statusBars())
+                        false -> hide(WindowInsets.Type.statusBars())
+                        else -> Unit
+                    }
+                }
+            }
             decor.requestApplyInsets()
             updateSeriesMallTopMargin(act, false)
-        } catch (_: Exception) {}
+        } catch (e: Throwable) {
+            LogUtil.warn("restore original status bar failed: " + e)
+        }
     }
 
-    /**
-     * Hide only the OS gesture/navigation bar. Never force edge-to-edge
-     * or LAYOUT_HIDE_NAVIGATION here: both shift episode selectors below
-     * the visible window on some Hongguo builds.
-     */
     private fun applyBottomEdgeToEdge(act: Activity?, hideNavigationBar: Boolean) {
-        if (act == null || !hideNavigationBar || isWindowedMode(act)) return
+        if (act == null || !hideNavigationBar || isWindowedMode(act) ||
+            !hasVerifiedUiProfile() || !isGestureNavigation(act)) return
         try {
             val decor = act.window.decorView
             if (Build.VERSION.SDK_INT >= 30) {
-                decor.windowInsetsController?.apply {
-                    hide(WindowInsets.Type.navigationBars())
-                    systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                }
+                decor.windowInsetsController?.hide(WindowInsets.Type.navigationBars())
             } else {
                 @Suppress("DEPRECATION")
-                decor.systemUiVisibility = decor.systemUiVisibility or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                run {
+                    decor.systemUiVisibility = decor.systemUiVisibility or
+                        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                }
             }
+            synchronized(gHiddenGestureBars) { gHiddenGestureBars[act] = true }
             decor.requestApplyInsets()
         } catch (e: Throwable) {
-            LogUtil.warn("hide navigation bar failed: " + e)
+            LogUtil.warn("gesture-only bar hide failed: " + e)
         }
     }
 
@@ -2549,24 +2610,35 @@ object Hooks {
     }
 
     private fun applyNavBar(act: Activity?) {
-        if (act == null || !gMasterOn || !gNavBarOff) return
+        if (act == null) return
+        if (!gMasterOn || !gNavBarOff || !isGestureNavigation(act) ||
+            !hasVerifiedUiProfile()) {
+            showNavBar(act)
+            return
+        }
         applyBottomEdgeToEdge(act, true)
     }
     private fun showNavBar(act: Activity?) {
         if (act == null) return
+        val hiddenByModule = synchronized(gHiddenGestureBars) {
+            gHiddenGestureBars.remove(act)
+        } == true
+        if (!hiddenByModule) return
         try {
             val decor = act.window.decorView
             if (Build.VERSION.SDK_INT >= 30) {
                 decor.windowInsetsController?.show(WindowInsets.Type.navigationBars())
-            }
-            @Suppress("DEPRECATION")
-            run {
-                decor.systemUiVisibility = decor.systemUiVisibility and
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION.inv() and
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION.inv()
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    decor.systemUiVisibility = decor.systemUiVisibility and
+                        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION.inv()
+                }
             }
             decor.requestApplyInsets()
-        } catch (_: Exception) {}
+        } catch (e: Throwable) {
+            LogUtil.warn("restore gesture bar failed: " + e)
+        }
     }
 
     private fun resolutionRank(resolution: Any?): Int {
@@ -3253,7 +3325,7 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
-            addSwitch("隐藏控件", "隐藏作品信息、右侧互动等已适配区域（不影响底部导航）", { gControlOn }, {
+            addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
 
@@ -3263,16 +3335,11 @@ object Hooks {
                     mainHandler.postDelayed({ restoreShortVideoNativeControls(); scanAllWindows() }, 120L)
                 }
             }, "control_hide")
-            addSwitch("选集相关功能", "隐藏已适配的选集控件（未适配版本将保留选集入口）", { gPlayerOn }, {
+            addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件", { gPlayerOn }, {
                 gPlayerOn = it
                 if (!it || (gRestoreControlsOnPause && gVideoPaused)) setVideoToolbarsVisible(true)
                 else setVideoToolbarsVisible(false)
             }, "player_bar")
-            addSwitch("隐藏首页底部导航", "单独控制首页 Tab 栏；默认保留，避免影响全集选集布局", { gHideMainTabs }, {
-                val wasEnabled = gHideMainTabs
-                gHideMainTabs = it
-                if (wasEnabled && !it) restoreAllSavedViews()
-            }, "hide_main_tabs")
             addSwitch("隐藏视频进度条", "隐藏首页和连续播放页的进度条", { gProgressOff }, {
                 gProgressOff = it
                 if (!it) {
@@ -3280,7 +3347,7 @@ object Hooks {
                     for (root in roots) scanTreeProgressRestore(root)
                 }
             }, "progress_off")
-            addSwitch("隐藏底部小白条", "隐藏系统手势导航提示条", { gNavBarOff }, { gNavBarOff = it }, "nav_bar_off")
+            addSwitch("隐藏底部小白条", "仅手势导航生效；三键导航不会隐藏按键", { gNavBarOff }, { gNavBarOff = it }, "nav_bar_off")
             addSwitch("暂停后恢复所有控件", "暂停视频时临时恢复控件，继续播放后按规则隐藏", { gRestoreControlsOnPause }, {
                 gRestoreControlsOnPause = it
                 if (it) refreshVideoPauseState("switch-enabled", gVideoPaused)
@@ -3831,6 +3898,7 @@ object Hooks {
         gProgressIdSet.clear()
         gPauseRestoreIdSet.clear()
         gPkg = pkg
+        gGestureNavigationCache = null
 
         try {
             val processCtx = try {
@@ -3850,11 +3918,13 @@ object Hooks {
         gTargetVersionCode = detected.second
 
         gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
-        // initPrefs above runs before version detection. Reapply safe-mode after
-        // the installed version has been identified, before installing any UI Hook.
+        // Re-read settings now the target version is known.
         appCtx?.let { initPrefs(it) }
-        if (!TargetNames.isSupported(pkg, gTargetVersionName)) {
-            LogUtil.warn("未验证的红果版本 " + gTargetVersionName + "：已自动停用危险的导航/全屏/选集隐藏 Hook")
+        LogUtil.info("系统导航=" + (if (isGestureNavigation(appCtx)) "gesture" else "three-button/unknown") +
+            " | verifiedUI=" + hasVerifiedUiProfile())
+        if (!hasVerifiedUiProfile()) {
+            LogUtil.warn("未适配版本 " + gTargetVersionName +
+                "：保护系统状态栏、导航按钮、首页Tab和全集入口")
         }
 
         if (gNames.useLegacySeedIds) seedIds.forEach { gTargetIdSet.add(it) }
@@ -3925,7 +3995,7 @@ object Hooks {
                 ham(bottomFrameClazz, "setBottomTabBackground", "nativeBottomBackground_${pkg.hashCode()}") { chain ->
                     val frame = chain.thisObject as? View
                     val result = chain.proceed()
-                    if (gMasterOn && gControlOn && gHideMainTabs &&
+                    if (gMasterOn && gControlOn && !keepNativeNavigation() &&
                         !(gRestoreControlsOnPause && gVideoPaused)) {
                         collapseNativeMainBottomFrame(frame)
                     }
@@ -4830,20 +4900,20 @@ object Hooks {
                                 synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews[view] = true }
                                 View.GONE
                             }
-                            gControlOn && gHideMainTabs && isNativeMainBottomFrame(view) -> {
+                            gControlOn && isNativeMainBottomFrame(view) -> {
                                 synchronized(gKnownMainBottomNavViews) { gKnownMainBottomNavViews[view] = true }
                                 View.GONE
                             }
-                            gControlOn && gHideMainTabs && isNativeVideoFeedBottomMask(view) -> {
+                            gControlOn && isNativeVideoFeedBottomMask(view) -> {
                                 synchronized(gKnownBottomBackdropViews) { gKnownBottomBackdropViews[view] = true }
                                 mainHandler.post { enforceNativeMainBottomHidden(gCurrentActivity) }
                                 View.GONE
                             }
-                            gControlOn && gHideMainTabs && isHomeBottomBackdropMarker(view) -> {
+                            gControlOn && isHomeBottomBackdropMarker(view) -> {
                                 mainHandler.post { collapseHomeBottomBackdrop(view) }
                                 View.GONE
                             }
-                            gControlOn && (quickMatch(view) || (gHideMainTabs && (isKnownMainBottomNav(view) || isMainBottomNavContainer(view) || isKnownBottomBackdrop(view)))) ->
+                            gControlOn && (quickMatch(view) || isKnownMainBottomNav(view) || isMainBottomNavContainer(view) || isKnownBottomBackdrop(view)) ->
                                 if (shouldCollapseControl(view)) View.GONE else View.INVISIBLE
                             gPlayerOn && seriesToolbarKind(view) != 0 -> {
                                 rememberSeriesToolbar(view, seriesToolbarKind(view))
@@ -4875,8 +4945,8 @@ object Hooks {
                     if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham result
                     LogUtil.incr("addView")
                     if (v != null) {
-                        if (gControlOn && gHideMainTabs && isNativeMainBottomFrame(v)) collapseNativeMainBottomFrame(v)
-                        else if (gControlOn && gHideMainTabs && isNativeVideoFeedBottomMask(v)) collapseNativeVideoFeedBottomMask(v)
+                        if (gControlOn && isNativeMainBottomFrame(v)) collapseNativeMainBottomFrame(v)
+                        else if (gControlOn && isNativeVideoFeedBottomMask(v)) collapseNativeVideoFeedBottomMask(v)
                         else if (gControlOn && (quickMatch(v) || isMainBottomNavContainer(v))) blindView(v)
                         if (gRefreshOff && isRefreshAccessoryContainer(v)) hideRefreshAccessory(v)
                         if (gPlayerOn) hideSeriesToolbarView(v)
@@ -4939,6 +5009,8 @@ object Hooks {
                 } catch (_: Exception) {}
                 try {
                     if (a != null) {
+                        // Navigation style may change in Android Settings while paused.
+                        gGestureNavigationCache = null
                         initPrefs(a.applicationContext)
                         appCtx = a.applicationContext
                         ensureReceiver(a.applicationContext)

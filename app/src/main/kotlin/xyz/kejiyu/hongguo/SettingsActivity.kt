@@ -62,7 +62,7 @@ class SettingsActivity : Activity() {
             setPadding(0, dp(5), 0, dp(15))
         })
         root.addView(label(
-            "保存后会同步到红果；未验证版本会优先保护底部导航和选集入口。部分功能需重启红果。",
+            "保存后会同步到红果。部分启动时安装的 Hook 需要完全关闭红果并重新打开才会生效。",
             12, R.color.text_secondary
         ).apply {
             setPadding(dp(14), dp(13), dp(14), dp(13))
@@ -74,11 +74,10 @@ class SettingsActivity : Activity() {
 
         section("界面精简")
         toggle("隐藏状态栏", "视频页面沉浸显示", "status_bar")
-        toggle("隐藏控件", "隐藏作品信息、互动控件，不影响底部导航", "control_hide")
-        toggle("隐藏首页底部导航", "可单独选择隐藏首页 Tab，默认保留", "hide_main_tabs")
-        toggle("隐藏选集相关控件", "未适配版本会自动保留该区域", "player_bar")
+        toggle("隐藏控件", "三键导航下保留首页底部栏和全集入口", "control_hide")
+        toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
         toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
-        toggle("隐藏系统小白条", "隐藏手势导航提示条", "nav_bar_off")
+        toggle("隐藏系统小白条", "仅手势导航有效，三键导航始终保留按键", "nav_bar_off")
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")

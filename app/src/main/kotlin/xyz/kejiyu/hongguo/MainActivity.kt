@@ -78,7 +78,7 @@ class MainActivity : Activity() {
         val pi = packageInfo(pkg) ?: return "$label  未安装\n$pkg"
         val versionName = pi.versionName ?: "未知"
         val code = versionCodeOf(pi)
-        val status = if (versionName in supported) "✓ 已适配" else "! 待验证（已启用布局保护）"
+        val status = if (versionName in supported) "✓ 已适配" else "! 待验证（已保护原生布局）"
         return "$label  $versionName  ·  $status\nversionCode $code  ·  $pkg"
     }
 
