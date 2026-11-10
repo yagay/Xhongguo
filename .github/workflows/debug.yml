@@ -1,0 +1,36 @@
+name: Debug APK
+
+on:
+  push:
+    branches: [main, feature/module-settings-app]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK 36
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then echo "sdkmanager is missing"; exit 1; fi
+          "$SDKMANAGER" --install "platforms;android-36"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build Debug only
+        run: bash ./gradlew :app:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xhongguo-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

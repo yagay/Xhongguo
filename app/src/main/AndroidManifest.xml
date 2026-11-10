@@ -34,6 +34,15 @@
             android:name="xposedscope"
             android:value="com.phoenix.read,com.phoenix.read.oversea.gp,xyz.kejiyu.hongguo" />
 
+        <provider
+            android:name=".ModuleSettingsProvider"
+            android:authorities="xyz.kejiyu.hongguo.settings"
+            android:exported="true" />
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

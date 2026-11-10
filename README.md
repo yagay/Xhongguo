@@ -64,7 +64,8 @@
 | **实验性与工具** | OLED 屏幕亮度防烧屏拦截 |
 | | 系统通知栏快捷控制菜单（总开关、配置面板、重启应用） |
 | | 自定义下载数量限制（单日集数、单日剧数、总缓存上限） |
-| | 自动注入红果原生设置页模块快捷入口 |
+| | 自动注入红果原生设置页模块快捷入口
+| | 支持从 Xhongguo 模块 App 的“模块设置”页面直接配置全部功能（与原设置共用配置） | |
 
 ---
 
@@ -79,6 +80,8 @@
 │       ├── resources/META-INF/xposed/ # libxposed 接口及 Scope 配置文件
 │       └── kotlin/xyz/kejiyu/hongguo/
 │           ├── MainActivity.kt        # 模块主界面 Activity
+│           ├── SettingsActivity.kt    # 模块内独立设置页面
+│           ├── ModuleSettingsStore.kt # 跨进程同步与配置迁移
 │           ├── MainHook.kt            # Xposed Hook 入口类
 │           ├── LogUtil.kt             # 日志记录与统计辅助类
 │           ├── UpdateChecker.kt       # 模块更新检测服务
@@ -100,3 +103,9 @@
 > **⚠️ 注意与声明**
 > 
 > 本项目**仅供学习以及技术交流**，开发者不对此模块造成的任何后果承担责任。
+
+
+## 7. 在模块 App 中配置
+
+安装 APK、在 LSPosed 中启用并选择红果作用域后，直接打开桌面的 **Xhongguo**，点击 **打开模块设置** 即可修改全部功能。
+设置保存到模块自身的私有配置，通过仅允许红果目标应用 UID 访问的 ContentProvider 同步到 Hook；无需先打开目标 App 的设置面板。旧版保存在红果数据目录中的配置会在第一次运行红果时尝试迁移；部分启动时 Hook 需要完全退出并重启红果才能生效。
