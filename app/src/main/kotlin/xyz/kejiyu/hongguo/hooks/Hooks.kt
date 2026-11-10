@@ -289,9 +289,17 @@ object Hooks {
                 mainHandler.post {
                     try {
                         val context = appCtx ?: ctx.applicationContext
+                        val previouslyHidingTabs = gHideMainTabs
+                        val previouslyHidingControls = gControlOn
+                        val previouslyHidingSeries = gPlayerOn
                         initPrefs(context)
-                        if (!gMasterOn) {
+                        if (!gMasterOn ||
+                            (previouslyHidingTabs && !gHideMainTabs) ||
+                            (previouslyHidingControls && !gControlOn)) {
                             restoreAllSavedViews()
+                            restoreShortVideoNativeControls()
+                            setVideoToolbarsVisible(true)
+                        } else if (previouslyHidingSeries && !gPlayerOn) {
                             restoreShortVideoNativeControls()
                             setVideoToolbarsVisible(true)
                         }
@@ -2328,7 +2336,8 @@ object Hooks {
                         View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN.inv() and
                         View.SYSTEM_UI_FLAG_FULLSCREEN.inv() and
                         View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY.inv()
-                    window.setDecorFitsSystemWindows(false)
+                    // Keep the target window's existing bottom-inset policy.
+                    // Forcing edge-to-edge here places full-series controls off-screen.
                     window.statusBarColor = Color.TRANSPARENT
                     decor.windowInsetsController?.apply {
                         setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
