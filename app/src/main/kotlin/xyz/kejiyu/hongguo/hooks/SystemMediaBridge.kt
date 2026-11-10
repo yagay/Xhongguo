@@ -191,9 +191,6 @@ internal object SystemMediaBridge {
                 override fun onStop() {
                     handler.post { requestTransport(false, "system-stop") }
                 }
-                override fun onMediaButtonEvent(event: Intent?): Boolean {
-                    return super.onMediaButtonEvent(event)
-                }
             }, handler)
             launchIntent(ctx)?.let { intent ->
                 media.setSessionActivity(
