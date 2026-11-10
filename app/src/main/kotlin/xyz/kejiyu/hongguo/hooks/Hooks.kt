@@ -25,6 +25,7 @@ import android.graphics.Color
 import android.view.WindowManager
 import android.view.WindowInsetsController
 import android.widget.*
+import xyz.kejiyu.hongguo.ModuleSettingsStore
 import xyz.kejiyu.hongguo.LogUtil
 import xyz.kejiyu.hongguo.MainHook
 import xyz.kejiyu.hongguo.BuildConfig
@@ -35,6 +36,7 @@ import io.github.libxposed.api.XposedInterface.Hooker
 object Hooks {
 
     private var gPrefs: SharedPreferences? = null
+    private var gSettingsObserver: android.database.ContentObserver? = null
 
     private var gMasterOn = false
     private var gStatusOn = false
@@ -226,39 +228,89 @@ object Hooks {
         0x7F0B0BCB, 0x7F0A00D2, 0x7F0B0C6A,
     )
 
+    /**
+     * Settings from the module app are authoritative. Import legacy target prefs
+     * on first use, mirror back to the target XML for the download-process reader,
+     * and refresh runtime fields when the app resumes or the provider changes.
+     */
     private fun initPrefs(ctx: Context) {
         if (gPrefs == null) {
-            gPrefs = ctx.getSharedPreferences("lspilot_kejiyu", 0)
+            gPrefs = ctx.getSharedPreferences("lspilot_kejiyu", Context.MODE_PRIVATE)
+        }
+        val prefs = gPrefs ?: return
+        if (ctx.packageName == TargetNames.CN_PACKAGE ||
+            ctx.packageName == TargetNames.OVERSEA_PACKAGE) {
+            ModuleSettingsStore.importIfEmpty(ctx, prefs.all)
+            ModuleSettingsStore.pullIntoTarget(ctx, prefs)
+            ensureSettingsObserver(ctx)
+        }
 
-            gMasterOn = gPrefs!!.getBoolean("master_on", false)
-            gStatusOn = gPrefs!!.getBoolean("status_bar", false)
-            gControlOn = gPrefs!!.getBoolean("control_hide", false)
-            gPlayerOn = gPrefs!!.getBoolean("player_bar", false)
-            gAdOn = gPrefs!!.getBoolean("ad_block", false)
-            gRefreshOff = gPrefs!!.getBoolean("pull_refresh", false)
-            gTopZoneOn = gPrefs!!.getBoolean("top_zone", false)
-            gNavBarOff = gPrefs!!.getBoolean("nav_bar_off", false)
-            gProgressOff = gPrefs!!.getBoolean("progress_off", false)
-            gRestoreControlsOnPause = gPrefs!!.getBoolean("restore_controls_pause", false)
-            gVipOn = gPrefs!!.getBoolean("vip_unlock", false)
-            gVipIconOn = gPrefs!!.getBoolean("vip_icon", false)
-            gMaxQualityOn = gPrefs!!.getBoolean("max_quality", false)
-            gDefaultSpeedOn = gPrefs!!.getBoolean(DEFAULT_SPEED_PREF, false)
-            gDefaultSpeed = normalizeDefaultSpeed(gPrefs!!.getFloat(DEFAULT_SPEED_VALUE_PREF, 1.0f))
-            gDoubleTapCommentOn = gPrefs!!.getBoolean("double_tap_comment", false)
-            gOledProtectOn = gPrefs!!.getBoolean("oled_protect", false)
-            gNotificationMenuOn = gPrefs!!.getBoolean("notification_menu", false)
-            gDownloadLimitUnlimitOn = gPrefs!!.getBoolean(DOWNLOAD_LIMIT_PREF, false)
-            gDownloadOneDayEpisode = gPrefs!!.getInt(DOWNLOAD_LIMIT_EPISODE_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
-            gDownloadOneDaySeries = gPrefs!!.getInt(DOWNLOAD_LIMIT_SERIES_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
-            gDownloadTotalSeries = gPrefs!!.getInt(DOWNLOAD_LIMIT_TOTAL_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
+        gMasterOn = prefs.getBoolean("master_on", false)
+        gStatusOn = prefs.getBoolean("status_bar", false)
+        gControlOn = prefs.getBoolean("control_hide", false)
+        gPlayerOn = prefs.getBoolean("player_bar", false)
+        gAdOn = prefs.getBoolean("ad_block", false)
+        gRefreshOff = prefs.getBoolean("pull_refresh", false)
+        gTopZoneOn = prefs.getBoolean("top_zone", false)
+        gNavBarOff = prefs.getBoolean("nav_bar_off", false)
+        gProgressOff = prefs.getBoolean("progress_off", false)
+        gRestoreControlsOnPause = prefs.getBoolean("restore_controls_pause", false)
+        gVipOn = prefs.getBoolean("vip_unlock", false)
+        gVipIconOn = prefs.getBoolean("vip_icon", false)
+        gMaxQualityOn = prefs.getBoolean("max_quality", false)
+        gDefaultSpeedOn = prefs.getBoolean(DEFAULT_SPEED_PREF, false)
+        gDefaultSpeed = normalizeDefaultSpeed(prefs.getFloat(DEFAULT_SPEED_VALUE_PREF, 1.0f))
+        gDoubleTapCommentOn = prefs.getBoolean("double_tap_comment", false)
+        gOledProtectOn = prefs.getBoolean("oled_protect", false)
+        gNotificationMenuOn = prefs.getBoolean("notification_menu", false)
+        gDownloadLimitUnlimitOn = prefs.getBoolean(DOWNLOAD_LIMIT_PREF, false)
+        gDownloadOneDayEpisode = prefs.getInt(DOWNLOAD_LIMIT_EPISODE_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
+        gDownloadOneDaySeries = prefs.getInt(DOWNLOAD_LIMIT_SERIES_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
+        gDownloadTotalSeries = prefs.getInt(DOWNLOAD_LIMIT_TOTAL_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
+    }
+
+    private fun ensureSettingsObserver(ctx: Context) {
+        if (gSettingsObserver != null) return
+        val observer = object : android.database.ContentObserver(mainHandler) {
+            override fun onChange(selfChange: Boolean) {
+                mainHandler.post {
+                    try {
+                        val context = appCtx ?: ctx.applicationContext
+                        initPrefs(context)
+                        if (!gMasterOn) {
+                            restoreAllSavedViews()
+                            restoreShortVideoNativeControls()
+                            setVideoToolbarsVisible(true)
+                        }
+                        applyToCurrent()
+                        gCurrentActivity?.let { activity ->
+                            if (gMasterOn && gStatusOn) applyCleanTop(activity) else showStatusBar(activity)
+                            if (gMasterOn && gNavBarOff) applyNavBar(activity) else showNavBar(activity)
+                        }
+                        createNotification(context)
+                        if (gMasterOn && gMaxQualityOn) applyHighestToKnownEngines()
+                        scheduleDefaultSpeedApply("module-settings")
+                        LogUtil.info("模块 App 配置已同步到红果进程")
+                    } catch (e: Throwable) {
+                        LogUtil.warn("模块配置同步失败: " + e.message)
+                    }
+                }
+            }
+        }
+        try {
+            ctx.contentResolver.registerContentObserver(ModuleSettingsStore.URI, false, observer)
+            gSettingsObserver = observer
+        } catch (e: Throwable) {
+            LogUtil.warn("无法监听模块设置更新: " + e.message)
         }
     }
+
     private fun savePref(key: String, value: Boolean) {
         val editor = gPrefs?.edit()?.putBoolean(key, value) ?: return
 
         if (key == DOWNLOAD_LIMIT_PREF || key == "master_on") editor.commit()
         else editor.apply()
+        appCtx?.let { ModuleSettingsStore.pushFromTarget(it, key, value) }
     }
 
     private fun normalizeDefaultSpeed(value: Float): Float {
@@ -279,6 +331,7 @@ object Hooks {
     private fun saveDefaultSpeedValue(value: Float) {
         gDefaultSpeed = normalizeDefaultSpeed(value)
         gPrefs?.edit()?.putFloat(DEFAULT_SPEED_VALUE_PREF, gDefaultSpeed)?.apply()
+        appCtx?.let { ModuleSettingsStore.pushFromTarget(it, DEFAULT_SPEED_VALUE_PREF, gDefaultSpeed) }
     }
 
     private fun defaultSpeedEnabledNow(): Boolean = gMasterOn && gDefaultSpeedOn
@@ -354,6 +407,11 @@ object Hooks {
             ?.putInt(DOWNLOAD_LIMIT_SERIES_PREF, series)
             ?.putInt(DOWNLOAD_LIMIT_TOTAL_PREF, total)
             ?.commit()
+        appCtx?.let {
+            ModuleSettingsStore.pushFromTarget(it, DOWNLOAD_LIMIT_EPISODE_PREF, episode)
+            ModuleSettingsStore.pushFromTarget(it, DOWNLOAD_LIMIT_SERIES_PREF, series)
+            ModuleSettingsStore.pushFromTarget(it, DOWNLOAD_LIMIT_TOTAL_PREF, total)
+        }
     }
 
     private fun readBooleanPrefFromDisk(key: String, defaultValue: Boolean = false): Boolean {
