@@ -81,6 +81,7 @@ class SettingsActivity : Activity() {
         toggle("视频长按菜单入口", "在原生视频长按菜单中添加 Xhongguo 设置", "video_longpress_settings", true)
         toggle("禁用商城", "隐藏底部「商城」Tab，并阻止打开独立商城页面；不影响剧场", "disable_shopping_mall", true)
         toggle("应用内小窗继续播放", "实验功能：从首页切到剧场、我的等页面时尝试保留原视频；可拖动、返回、关闭", "in_app_mini_player")
+        toggle("系统媒体后台播放", "实验功能：使用红果原播放器，通知栏显示系统媒体卡片（播放/暂停/返回），无悬浮图标；后台仍可能受原生播放器生命周期限制", "system_media_playback")
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")

@@ -65,6 +65,7 @@ object Hooks {
     // Keep the app's other tabs and Android three-button navigation untouched.
     private var gDisableShoppingMall = true
     private var gMiniPlayerOn = false
+    private var gSystemMediaOn = false
     private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
@@ -276,6 +277,8 @@ object Hooks {
         gDisableShoppingMall = prefs.getBoolean("disable_shopping_mall", true)
         gMiniPlayerOn = prefs.getBoolean("in_app_mini_player", false)
         InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn
+        gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
+        SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -3743,6 +3746,7 @@ object Hooks {
             addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
                 gMasterOn = it
                 InAppMiniPlayer.enabled = it && gMiniPlayerOn
+                SystemMediaBridge.configure(act, it && gSystemMediaOn)
                 if (!it) {
                     InAppMiniPlayer.restore()
                     restoreAllSavedViews()
@@ -3754,6 +3758,10 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
+            addSwitch("系统媒体后台播放", "实验功能：尝试保留原视频声音，在通知栏显示系统媒体卡片（播放/暂停/返回）；不创建悬浮图标", { gSystemMediaOn }, {
+                gSystemMediaOn = it
+                SystemMediaBridge.configure(act, it && gMasterOn)
+            }, "system_media_playback")
             addSwitch("应用内小窗继续播放", "实验功能：切换底部页面时复用原视频并显示可拖动小窗；默认关闭", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
@@ -5438,11 +5446,18 @@ object Hooks {
                             1 -> {
                                 if (className == "com.ss.android.videoshop.controller.VideoController") {
                                     InAppMiniPlayer.rememberPlayingController(chain.thisObject)
+                                    SystemMediaBridge.rememberController(chain.thisObject)
                                 }
+                                SystemMediaBridge.onNativePlayback(true, "$className#state=1",
+                                    chain.thisObject)
                                 setVideoPaused(false, "$className#state=1")
                                 scheduleDefaultSpeedApply("$className#state=1")
                             }
-                            2 -> setVideoPaused(true, "$className#state=2")
+                            2 -> {
+                                SystemMediaBridge.onNativePlayback(false,
+                                    "$className#state=2", chain.thisObject)
+                                setVideoPaused(true, "$className#state=2")
+                            }
                             0, 3 -> if (gVideoPaused) refreshVideoPauseState("$className#state=$state", false)
                         }
                     } catch (e: Throwable) { LogUtil.warn("playback state parse failed: $className: $e") }
@@ -5459,7 +5474,7 @@ object Hooks {
             val controller = Class.forName("com.ss.android.videoshop.controller.VideoController", false, classLoader)
             val pausingMethods = controller.declaredMethods.filter { method ->
                 method.name in setOf("pause", "pauseVideo") &&
-                    method.returnType == Void.TYPE
+                    method.returnType == Void.TYPE && method.parameterCount == 0
             }
             for ((index, method) in pausingMethods.withIndex()) {
                 module.hook(method).setId("miniHoldPause_" + index)
@@ -5467,6 +5482,8 @@ object Hooks {
                     .intercept(Hooker { chain ->
                         if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
                             LogUtil.incr("inAppMiniPauseIntercept")
+                            null
+                        } else if (SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
                             null
                         } else chain.proceed()
                     })
@@ -5614,11 +5631,17 @@ object Hooks {
             }
             ham(c, "onVideoPause", "videoPauseDirect") { chain ->
                 val result = chain.proceed()
+                SystemMediaBridge.rememberLayer(chain.thisObject)
+                SystemMediaBridge.onNativePlayback(false,
+                    "LayerHostMediaLayout#onVideoPause", chain.thisObject)
                 setVideoPaused(true, "LayerHostMediaLayout#onVideoPause")
                 result
             }
             ham(c, "onVideoPlay", "videoPlayDirect") { chain ->
                 val result = chain.proceed()
+                SystemMediaBridge.rememberLayer(chain.thisObject)
+                SystemMediaBridge.onNativePlayback(true,
+                    "LayerHostMediaLayout#onVideoPlay", chain.thisObject)
                 setVideoPaused(false, "LayerHostMediaLayout#onVideoPlay")
                 scheduleDefaultSpeedApply("LayerHostMediaLayout#onVideoPlay")
                 result
@@ -5997,6 +6020,7 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        SystemMediaBridge.onActivityResumed(a)
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6032,12 +6056,29 @@ object Hooks {
             })
             LogUtil.info("  ✓ onPause")
             try {
+                module.hook(c.getDeclaredMethod("onUserLeaveHint"))
+                    .setId("systemMediaUserLeave")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        try {
+                            SystemMediaBridge.onUserLeave(chain.thisObject as? Activity)
+                        } catch (e: Throwable) {
+                            LogUtil.warn("系统媒体后台离开检测异常: " + e.message)
+                        }
+                        chain.proceed()
+                    })
+                LogUtil.info("  ✓ system MediaSession background lifecycle")
+            } catch (e: Throwable) {
+                LogUtil.warn("  system media leave Hook missing: " + e.message)
+            }
+            try {
                 module.hook(c.getDeclaredMethod("onDestroy"))
                     .setId("inAppMiniActivityDestroy")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
                         (chain.thisObject as? Activity)?.let { activity ->
                             InAppMiniPlayer.onActivityClosed(activity)
+                            SystemMediaBridge.onActivityDestroyed(activity)
                         }
                         chain.proceed()
                     })
