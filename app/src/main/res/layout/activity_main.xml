@@ -132,6 +132,28 @@
                 android:text="启动红果"
                 android:textColor="@color/text_primary"
                 android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/btn_export_diagnostics"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_button_secondary"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="导出诊断日志 ZIP"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="7dp"
+                android:text="包含 LSPosed Hook、Root 进程日志与功能结果报告；需在 KernelSU Next 授权 Root"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <LinearLayout
