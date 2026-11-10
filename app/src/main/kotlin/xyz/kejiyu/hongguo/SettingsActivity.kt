@@ -98,7 +98,7 @@ class SettingsActivity : Activity() {
         toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
 
         section("诊断与日志")
-        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析",) {
+        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
             ModuleDiagnostics.chooseDestination(this)
         }
 
