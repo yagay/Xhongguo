@@ -2264,7 +2264,7 @@ object Hooks {
                 flags = window.attributes.flags,
                 systemUiVisibility = decor.systemUiVisibility,
                 color = window.statusBarColor,
-                cutoutMode = window.attributes.layoutInDisplayCutoutMode,
+                cutoutMode = if (Build.VERSION.SDK_INT >= 28) window.attributes.layoutInDisplayCutoutMode else 0,
                 lightAppearance = light,
                 wasVisible = visible,
             )
