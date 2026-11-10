@@ -53,6 +53,8 @@ object Hooks {
     private val gHiddenGestureBars = java.util.Collections.synchronizedMap(
         java.util.WeakHashMap<Activity, Boolean>()
     )
+    // View hierarchy scans run often; never read Settings.Secure per View.
+    @Volatile private var gGestureNavigationCache: Boolean? = null
 
 
     private var gMasterOn = false
@@ -2230,6 +2232,7 @@ object Hooks {
      * buttons, preserve the button bar. Unknown modes are treated as buttons.
      */
     private fun isGestureNavigation(ctx: Context?): Boolean {
+        gGestureNavigationCache?.let { return it }
         if (ctx == null) return false
         val secureMode = try {
             android.provider.Settings.Secure.getInt(ctx.contentResolver, "navigation_mode", -1)
@@ -2238,8 +2241,11 @@ object Hooks {
             val resId = ctx.resources.getIdentifier("config_navBarInteractionMode", "integer", "android")
             if (resId != 0) ctx.resources.getInteger(resId) else -1
         } catch (_: Throwable) { -1 }
-        if (secureMode == 0 || secureMode == 1 || overlayMode == 0 || overlayMode == 1) return false
-        return secureMode == 2 || overlayMode == 2
+        val gestural = if (secureMode == 0 || secureMode == 1 ||
+            overlayMode == 0 || overlayMode == 1) false
+        else secureMode == 2 || overlayMode == 2
+        gGestureNavigationCache = gestural
+        return gestural
     }
 
     private fun hasVerifiedUiProfile(): Boolean =
@@ -3892,6 +3898,7 @@ object Hooks {
         gProgressIdSet.clear()
         gPauseRestoreIdSet.clear()
         gPkg = pkg
+        gGestureNavigationCache = null
 
         try {
             val processCtx = try {
@@ -5002,6 +5009,8 @@ object Hooks {
                 } catch (_: Exception) {}
                 try {
                     if (a != null) {
+                        // Navigation style may change in Android Settings while paused.
+                        gGestureNavigationCache = null
                         initPrefs(a.applicationContext)
                         appCtx = a.applicationContext
                         ensureReceiver(a.applicationContext)
