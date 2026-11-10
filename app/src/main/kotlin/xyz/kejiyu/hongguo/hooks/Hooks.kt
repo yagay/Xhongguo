@@ -1271,22 +1271,21 @@ object Hooks {
     }
 
     private fun findShoppingTabView(root: ViewGroup): View? {
-        val label = fun(view: View?, depth: Int, found: MutableList<TextView>) {
-            if (view == null || depth > 15 || found.size >= 3) return
+        val matches = mutableListOf<TextView>()
+        fun collectMallLabels(view: View?, depth: Int) {
+            if (view == null || depth > 15 || matches.size >= 3) return
             if (view is TextView &&
                 view.text?.toString()?.trim()?.replace(" ", "") == "商城") {
-                found.add(view)
+                matches.add(view)
                 return
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) {
-                    // Do not scan huge page content: root is the native bottom bar.
-                    label(view.getChildAt(i), depth + 1, found)
+                    collectMallLabels(view.getChildAt(i), depth + 1)
                 }
             }
         }
-        val matches = mutableListOf<TextView>()
-        label(root, 0, matches)
+        collectMallLabels(root, 0)
         if (matches.isEmpty()) return null
 
         val otherNames = setOf("首页", "剧场", "我的", "赚钱")
@@ -1296,8 +1295,8 @@ object Hooks {
             if (location[1] < match.resources.displayMetrics.heightPixels * 0.68f) continue
 
             var item: View = match
-            repeat(8) {
-                val parent = item.parent as? ViewGroup ?: return@repeat
+            for (level in 0 until 8) {
+                val parent = item.parent as? ViewGroup ?: break
                 val siblings = (0 until parent.childCount).mapNotNull { parent.getChildAt(it) }
                 if (siblings.size in 3..7 &&
                     siblings.count { child -> otherNames.any { hasExactText(child, it) } } >= 2 &&
@@ -1305,7 +1304,7 @@ object Hooks {
                     // The item contains only "商城"; the siblings contain other tabs.
                     return item
                 }
-                if (parent === root) return@repeat
+                if (parent === root) break
                 item = parent
             }
         }
