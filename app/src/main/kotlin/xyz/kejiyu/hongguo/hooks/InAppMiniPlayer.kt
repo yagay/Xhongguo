@@ -100,19 +100,56 @@ internal object InAppMiniPlayer {
      * Use a stable native host View; moving a bare TextureView or SurfaceView
      * tears down its surface on many OS builds, so neither is directly moved.
      */
+    /** Returns true only for a real video renderer, never a static cover image. */
+    fun hasVideoRenderer(root: View?, maxDepth: Int = 9): Boolean {
+        if (root == null || maxDepth < 0) return false
+        if (root is android.view.TextureView || root is android.view.SurfaceView) return true
+        if (root.javaClass.name == "com.ss.android.videoshop.mediaview.LayerHostMediaLayout")
+            return true
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                if (hasVideoRenderer(root.getChildAt(i), maxDepth - 1)) return true
+            }
+        }
+        return false
+    }
+
     fun dock(activity: Activity, videoHost: View?): Boolean {
-        if (!enabled || activity.isFinishing) return false
-        if (session != null) return session?.activity === activity
-        val video = videoHost ?: return false
-        if (!video.isShown || !video.isAttachedToWindow || video.width < dp(activity, 80f) ||
-            video.height < dp(activity, 100f)) return false
-        if (video.javaClass.name != "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+        if (!enabled || activity.isFinishing) {
+            LogUtil.info("应用内小窗跳过: 模块开关未启用或 Activity 已关闭")
             return false
         }
-        val parent = video.parent as? ViewGroup ?: return false
+        if (session != null) return session?.activity === activity
+        val video = videoHost
+        if (video == null) {
+            LogUtil.warn("应用内小窗跳过: 未找到可复用的视频渲染容器")
+            LogUtil.incr("inAppMiniNoRenderer")
+            return false
+        }
+        if (!video.isShown || !video.isAttachedToWindow || video.width < dp(activity, 80f) ||
+            video.height < dp(activity, 100f)) {
+            LogUtil.warn("应用内小窗跳过: 候选视频容器未显示 " +
+                video.javaClass.name + " " + video.width + "x" + video.height)
+            return false
+        }
+        if (!hasVideoRenderer(video)) {
+            LogUtil.warn("应用内小窗跳过: 候选容器没有原生视频渲染节点 " +
+                video.javaClass.name)
+            return false
+        }
+        val parent = video.parent as? ViewGroup ?: run {
+            LogUtil.warn("应用内小窗跳过: 视频容器没有可复用的父布局")
+            return false
+        }
         val content = activity.findViewById<ViewGroup>(android.R.id.content) as? FrameLayout
-            ?: return false
-        if (parent === content) return false
+            ?: run {
+                LogUtil.warn("应用内小窗跳过: Activity content 非 FrameLayout")
+                return false
+            }
+        if (parent === content) {
+            LogUtil.warn("应用内小窗跳过: 视频容器直接属于 Activity 主内容，避免破坏主页面")
+            return false
+        }
         val index = parent.indexOfChild(video)
         if (index < 0) return false
         val originalParams = video.layoutParams ?: return false
@@ -145,11 +182,13 @@ internal object InAppMiniPlayer {
             ))
             content.addView(container, lp)
             addControls(current)
-            LogUtil.info("应用内小窗：已移动原生播放器到悬浮容器")
+            LogUtil.info("应用内小窗：已移动原生播放器到悬浮容器 " +
+                video.javaClass.name + " / parent=" + parent.javaClass.name)
             LogUtil.incr("inAppMiniDock")
             return true
         } catch (e: Throwable) {
-            LogUtil.warn("应用内小窗：移动播放器失败 " + e.message)
+            LogUtil.warn("应用内小窗：移动播放器失败 " + e.javaClass.simpleName +
+                ": " + e.message)
             restore()
             return false
         }

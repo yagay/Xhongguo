@@ -1394,34 +1394,151 @@ object Hooks {
     // Mini-player activation uses only a confirmed native video rendering host.
     // Never remove or resize the whole feed holder or the bottom tabs.
     private fun findLiveVideoHost(act: Activity): View? {
-        if (act.javaClass.name != MAIN_TAB_ACTIVITY || gVideoPaused) return null
-        val candidates = mutableListOf<View>()
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        val candidates = ArrayList<View>()
+        val inspected = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<View, Boolean>()
+        )
+        var visibleRenderers = 0
+        var nativeHosts = 0
+
+        fun selectRendererHost(renderer: View) {
+            visibleRenderers++
+            var host = renderer.parent as? ViewGroup ?: return
+            // A renderer itself cannot be reparented safely. Prefer its
+            // existing direct video frame and keep the same player instance.
+            if (!host.isShown || host.width < dp(act, 80f) ||
+                host.height < dp(act, 110f)) return
+            if (host === act.window.decorView || host.id == android.R.id.content) return
+            val grandParent = host.parent as? ViewGroup
+            // Host names used by the native VideoShop player vary by build.
+            // If an ancestor IS the VideoShop host, prefer it.
+            for (i in 0 until 3) {
+                if (host.javaClass.name ==
+                    "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") break
+                if (grandParent?.javaClass?.name ==
+                    "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+                    host = grandParent
+                }
+                break
+            }
+            if (host.parent is ViewGroup && !candidates.contains(host)) candidates.add(host)
+        }
+
         fun find(view: View?, depth: Int) {
-            if (view == null || depth > 35 || !view.isShown) return
-            if (view.javaClass.name ==
-                "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
-                if (view.width >= dp(act, 160f) && view.height >= dp(act, 240f) &&
-                    view.parent is ViewGroup) candidates.add(view)
+            if (view == null || depth > 45 || !view.isShown ||
+                !inspected.add(view)) return
+            val className = view.javaClass.name
+            if (className == "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+                if (view.width >= dp(act, 80f) && view.height >= dp(act, 110f) &&
+                    view.parent is ViewGroup) {
+                    candidates.add(view)
+                    nativeHosts++
+                }
+            }
+            if (view is android.view.TextureView || view is android.view.SurfaceView) {
+                selectRendererHost(view)
                 return
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) find(view.getChildAt(i), depth + 1)
             }
         }
-        // Prefer the currently playing short-video holder. On versions whose
-        // obfuscated holder cannot be found, scan the visible main feed only.
-        val holders = shortVideoHolderSnapshot().asReversed()
-        for ((holder, state) in holders) {
+
+        // Holder classes change between Hongguo versions. Treat the actual
+        // attached rendering tree as authoritative, not obfuscated holder IDs.
+        for ((holder, state) in shortVideoHolderSnapshot().asReversed()) {
             if (state == 2 || !isShortVideoHolderVisible(holder)) continue
-            val root = shortVideoHolderRoot(holder) ?: continue
-            find(root, 0)
+            find(shortVideoHolderRoot(holder), 0)
             if (candidates.isNotEmpty()) break
         }
         if (candidates.isEmpty()) {
-            // Conservative: a real native video host must be visible on screen.
             find(act.window.decorView, 0)
         }
-        return candidates.maxByOrNull { it.width.toLong() * it.height.toLong() }
+        val chosen = candidates
+            .filter { it.parent is ViewGroup && it.width >= dp(act, 80f) &&
+                it.height >= dp(act, 110f) }
+            .maxByOrNull { it.width.toLong() * it.height.toLong() }
+        LogUtil.info("应用内小窗扫描: nativeHosts=$nativeHosts" +
+            " renderers=$visibleRenderers candidates=${candidates.size}" +
+            " result=${chosen?.javaClass?.name ?: "none"}")
+        if (chosen == null) LogUtil.incr("inAppMiniNoVideoCandidate")
+        return chosen
+    }
+
+    private var gMiniTouchStartTab: String? = null
+    private var gMiniTouchStartAt: Long = -1L
+    private var gMiniTouchStartX: Float = 0f
+    private var gMiniTouchStartY: Float = 0f
+
+    /**
+     * Home tabs sometimes handle MotionEvent directly instead of calling
+     * View.performClick(). Observe Activity.dispatchTouchEvent before native
+     * handling and resolve the bottom tab from its exact on-screen labels.
+     */
+    private fun nativeTabFromTouch(act: Activity, rawX: Float, rawY: Float): String? {
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        val bar = findMallBottomBarRoot(act) ?: return null
+        val origin = IntArray(2)
+        try { bar.getLocationOnScreen(origin) } catch (_: Throwable) { return null }
+        if (bar.width < dp(act, 180f) || bar.height < dp(act, 32f) ||
+            rawX < origin[0] || rawX > origin[0] + bar.width ||
+            rawY < origin[1] || rawY > origin[1] + bar.height) return null
+
+        val names = setOf("首页", "剧场", "商城", "赚钱", "我的")
+        val labeled = ArrayList<Pair<String, Float>>()
+        fun scan(view: View?, depth: Int) {
+            if (view == null || depth > 16 || !view.isShown) return
+            val text = (view as? TextView)?.text?.toString()?.trim()
+                ?: view.contentDescription?.toString()?.trim()
+            if (text != null && text in names) {
+                val loc = IntArray(2)
+                try {
+                    view.getLocationOnScreen(loc)
+                    labeled.add(text to (loc[0] + view.width / 2f))
+                } catch (_: Throwable) {}
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) scan(view.getChildAt(i), depth + 1)
+            }
+        }
+        scan(bar, 0)
+        val closest = labeled.minByOrNull { kotlin.math.abs(it.second - rawX) } ?: return null
+        val slotWidth = bar.width.toFloat() / labeled.size.coerceAtLeast(3)
+        if (kotlin.math.abs(closest.second - rawX) > slotWidth * 0.8f) return null
+        return closest.first
+    }
+
+    private fun observeNativeTabTouch(
+        ev: android.view.MotionEvent?, act: Activity?,
+    ) {
+        val activity = act ?: return
+        if (!gMasterOn || !gMiniPlayerOn || ev == null ||
+            activity.javaClass.name != MAIN_TAB_ACTIVITY) return
+        when (ev.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                gMiniTouchStartTab = nativeTabFromTouch(activity, ev.rawX, ev.rawY)
+                gMiniTouchStartAt = ev.downTime
+                gMiniTouchStartX = ev.rawX
+                gMiniTouchStartY = ev.rawY
+                if (gMiniTouchStartTab != null) {
+                    LogUtil.info("应用内小窗: 底部 Tab 触摸开始=" + gMiniTouchStartTab)
+                    LogUtil.incr("inAppMiniTabTouchDown")
+                }
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                val tab = gMiniTouchStartTab
+                gMiniTouchStartTab = null
+                if (tab != null && ev.downTime == gMiniTouchStartAt &&
+                    kotlin.math.abs(ev.rawX - gMiniTouchStartX) < dp(activity, 24f) &&
+                    kotlin.math.abs(ev.rawY - gMiniTouchStartY) < dp(activity, 24f) &&
+                    nativeTabFromTouch(activity, ev.rawX, ev.rawY) == tab) {
+                    beforeNativeTabAction(activity, tab, "native-touch")
+                }
+            }
+            android.view.MotionEvent.ACTION_CANCEL,
+            android.view.MotionEvent.ACTION_POINTER_DOWN -> gMiniTouchStartTab = null
+        }
     }
 
     private fun nativeTabAction(view: View?): String? {
@@ -1476,24 +1593,40 @@ object Hooks {
 
     private fun beforeNativeTabClick(view: View?) {
         val act = gCurrentActivity ?: return
-        val tab = nativeTabAction(view) ?: return
+        val direct = nativeTabAction(view)
+        val centerTab = if (direct == null && view != null) {
+            val loc = IntArray(2)
+            try {
+                view.getLocationOnScreen(loc)
+                nativeTabFromTouch(act, loc[0] + view.width / 2f,
+                    loc[1] + view.height / 2f)
+            } catch (_: Throwable) { null }
+        } else direct
+        if (centerTab != null) beforeNativeTabAction(act, centerTab, "performClick")
+    }
+
+    private fun beforeNativeTabAction(act: Activity, tab: String, source: String) {
+        if (!gMasterOn || !gMiniPlayerOn) return
+        LogUtil.info("应用内小窗 Tab: $tab, event=$source, active=" +
+            InAppMiniPlayer.activeFor(act))
+        LogUtil.incr("inAppMiniTabRecognized")
         if (tab == "首页") {
             if (InAppMiniPlayer.activeFor(act)) InAppMiniPlayer.restore()
             return
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
-        if (!gMasterOn || !gMiniPlayerOn || InAppMiniPlayer.activeFor(act)) return
+        if (InAppMiniPlayer.activeFor(act)) return
         val player = findLiveVideoHost(act)
         if (player == null) {
-            LogUtil.info("应用内小窗：当前没有可复用的原生视频 View，保持默认切换")
+            LogUtil.warn("应用内小窗未启动: Tab 已识别，但找不到正在显示的视频渲染容器")
             return
         }
         if (InAppMiniPlayer.dock(act, player)) {
             mainHandler.postDelayed({
-                if (InAppMiniPlayer.activeFor(act) && gVideoPaused) {
+                if (InAppMiniPlayer.activeFor(act)) {
                     InAppMiniPlayer.resumeAfterTabSwitch()
                 }
-            }, 260L)
+            }, 320L)
         }
     }
 
@@ -5752,7 +5885,11 @@ object Hooks {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     val ev = chain.getArg(0) as? android.view.MotionEvent
-                    try { observeVideoLongPress(ev, chain.thisObject as? Activity) } catch (_: Throwable) {}
+                    val activity = chain.thisObject as? Activity
+                    try { observeNativeTabTouch(ev, activity) } catch (e: Throwable) {
+                        LogUtil.warn("应用内小窗触摸导航检测失败: " + e.message)
+                    }
+                    try { observeVideoLongPress(ev, activity) } catch (_: Throwable) {}
                     if (gMasterOn && gTopZoneOn && handleTopZoneEvent(ev)) true
                     else chain.proceed()
                 })
