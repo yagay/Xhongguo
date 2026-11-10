@@ -77,7 +77,7 @@ class SettingsActivity : Activity() {
         toggle("隐藏控件", "三键导航下保留首页底部栏和全集入口", "control_hide")
         toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
         toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
-        toggle("隐藏系统小白条", "隐藏手势导航提示条", "nav_bar_off")
+        toggle("隐藏系统小白条", "仅手势导航有效，三键导航始终保留按键", "nav_bar_off")
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")
