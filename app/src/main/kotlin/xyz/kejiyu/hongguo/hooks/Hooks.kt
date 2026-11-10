@@ -1394,34 +1394,76 @@ object Hooks {
     // Mini-player activation uses only a confirmed native video rendering host.
     // Never remove or resize the whole feed holder or the bottom tabs.
     private fun findLiveVideoHost(act: Activity): View? {
-        if (act.javaClass.name != MAIN_TAB_ACTIVITY || gVideoPaused) return null
-        val candidates = mutableListOf<View>()
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        val candidates = ArrayList<View>()
+        val inspected = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<View, Boolean>()
+        )
+        var visibleRenderers = 0
+        var nativeHosts = 0
+
+        fun selectRendererHost(renderer: View) {
+            visibleRenderers++
+            var host = renderer.parent as? ViewGroup ?: return
+            // A renderer itself cannot be reparented safely. Prefer its
+            // existing direct video frame and keep the same player instance.
+            if (!host.isShown || host.width < dp(act, 80f) ||
+                host.height < dp(act, 110f)) return
+            if (host === act.window.decorView || host.id == android.R.id.content) return
+            val grandParent = host.parent as? ViewGroup
+            // Host names used by the native VideoShop player vary by build.
+            // If an ancestor IS the VideoShop host, prefer it.
+            for (i in 0 until 3) {
+                if (host.javaClass.name ==
+                    "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") break
+                if (grandParent?.javaClass?.name ==
+                    "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+                    host = grandParent
+                }
+                break
+            }
+            if (host.parent is ViewGroup && !candidates.contains(host)) candidates.add(host)
+        }
+
         fun find(view: View?, depth: Int) {
-            if (view == null || depth > 35 || !view.isShown) return
-            if (view.javaClass.name ==
-                "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
-                if (view.width >= dp(act, 160f) && view.height >= dp(act, 240f) &&
-                    view.parent is ViewGroup) candidates.add(view)
+            if (view == null || depth > 45 || !view.isShown ||
+                !inspected.add(view)) return
+            val className = view.javaClass.name
+            if (className == "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+                if (view.width >= dp(act, 80f) && view.height >= dp(act, 110f) &&
+                    view.parent is ViewGroup) {
+                    candidates.add(view)
+                    nativeHosts++
+                }
+            }
+            if (view is android.view.TextureView || view is android.view.SurfaceView) {
+                selectRendererHost(view)
                 return
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) find(view.getChildAt(i), depth + 1)
             }
         }
-        // Prefer the currently playing short-video holder. On versions whose
-        // obfuscated holder cannot be found, scan the visible main feed only.
-        val holders = shortVideoHolderSnapshot().asReversed()
-        for ((holder, state) in holders) {
+
+        // Holder classes change between Hongguo versions. Treat the actual
+        // attached rendering tree as authoritative, not obfuscated holder IDs.
+        for ((holder, state) in shortVideoHolderSnapshot().asReversed()) {
             if (state == 2 || !isShortVideoHolderVisible(holder)) continue
-            val root = shortVideoHolderRoot(holder) ?: continue
-            find(root, 0)
+            find(shortVideoHolderRoot(holder), 0)
             if (candidates.isNotEmpty()) break
         }
         if (candidates.isEmpty()) {
-            // Conservative: a real native video host must be visible on screen.
             find(act.window.decorView, 0)
         }
-        return candidates.maxByOrNull { it.width.toLong() * it.height.toLong() }
+        val chosen = candidates
+            .filter { it.parent is ViewGroup && it.width >= dp(act, 80f) &&
+                it.height >= dp(act, 110f) }
+            .maxByOrNull { it.width.toLong() * it.height.toLong() }
+        LogUtil.info("应用内小窗扫描: nativeHosts=$nativeHosts" +
+            " renderers=$visibleRenderers candidates=${candidates.size}" +
+            " result=${chosen?.javaClass?.name ?: "none"}")
+        if (chosen == null) LogUtil.incr("inAppMiniNoVideoCandidate")
+        return chosen
     }
 
     private fun nativeTabAction(view: View?): String? {
