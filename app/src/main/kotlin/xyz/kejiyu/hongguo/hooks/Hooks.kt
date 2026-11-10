@@ -5004,9 +5004,11 @@ object Hooks {
                     try {
                         val dialog = chain.thisObject as? Dialog
                         if (dialog != null && isInLongPressMenuWindow()) {
-                            scheduleLongPressMenuInjection(dialog.window?.decorView) {
-                                dialog.dismiss()
-                            }
+                            scheduleLongPressMenuInjection(
+                                dialog.window?.decorView,
+                                { dialog.dismiss() },
+                                allowPopupOverlay = true,
+                            )
                         }
                     } catch (e: Throwable) { LogUtil.warn("长按菜单 Dialog 观察失败: " + e.message) }
                     result
@@ -5023,9 +5025,11 @@ object Hooks {
                     try {
                         val instance = chain.thisObject as? android.widget.PopupWindow
                         if (instance != null && isInLongPressMenuWindow()) {
-                            scheduleLongPressMenuInjection(instance.contentView) {
-                                instance.dismiss()
-                            }
+                            scheduleLongPressMenuInjection(
+                                instance.contentView,
+                                { instance.dismiss() },
+                                allowPopupOverlay = true,
+                            )
                         }
                     } catch (e: Throwable) { LogUtil.warn("长按菜单 Popup 观察失败: " + e.message) }
                     result
@@ -5754,6 +5758,48 @@ object Hooks {
                 })
             LogUtil.info("  ✓ dispatchTouch + native long-press menu observer")
         } catch (e: Exception) { LogUtil.error("tz2", e) }
+
+        // Full-series playback uses different Activity classes from the home feed.
+        // Some override dispatchTouchEvent without calling Activity.super, so the
+        // generic Activity observer never sees their long-press gestures.
+        try {
+            val candidates = listOf(
+                "com.dragon.read.pages.main.MainFragmentActivity",
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
+                "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
+                "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity",
+            )
+            val hooked = HashSet<Class<*>>()
+            for (className in candidates) {
+                val clazz = try { Class.forName(className, false, classLoader) }
+                    catch (_: Throwable) { continue }
+                val method = try {
+                    clazz.getMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)
+                } catch (_: Throwable) { null } ?: continue
+                if (method.declaringClass == Activity::class.java ||
+                    !hooked.add(method.declaringClass)) continue
+                try {
+                    module.hook(method)
+                        .setId("xh_fullseries_touch_" + hooked.size)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val activity = chain.thisObject as? Activity
+                            try {
+                                observeVideoLongPress(chain.getArg(0) as? android.view.MotionEvent,
+                                    activity)
+                            } catch (e: Throwable) {
+                                LogUtil.warn("全集长按触摸观察异常: " + e.message)
+                            }
+                            chain.proceed()
+                        })
+                    LogUtil.info("  ✓ fullscreen touch " + method.declaringClass.name)
+                } catch (e: Throwable) {
+                    LogUtil.warn("  fullscreen touch hook failed: " + e.message)
+                }
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("全集长按监听初始化失败: " + e.message)
+        }
 
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)
