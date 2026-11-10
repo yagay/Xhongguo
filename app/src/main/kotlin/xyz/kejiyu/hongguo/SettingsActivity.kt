@@ -97,6 +97,11 @@ class SettingsActivity : Activity() {
         toggle("VIP 状态 Hook", "启用现有的 VIP 适配逻辑", "vip_unlock")
         toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
 
+        section("诊断与日志")
+        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
+            ModuleDiagnostics.chooseDestination(this)
+        }
+
         section("工具及实验功能")
         toggle("OLED 亮度保护", "实验性亮度拦截", "oled_protect")
         toggle("通知栏快捷菜单", "红果需要授予通知权限", "notification_menu")
@@ -107,6 +112,12 @@ class SettingsActivity : Activity() {
             "原红果内设置首次启动红果后会尝试迁移。请在 LSPosed 中启用 Xhongguo 并选择相应的红果作用域。",
             12, R.color.text_secondary
         ).apply { setPadding(dp(4), dp(22), dp(4), 0) })
+    }
+
+    @Deprecated("Android document picker result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        if (ModuleDiagnostics.onActivityResult(this, requestCode, resultCode, data)) return
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     private fun section(name: String) {

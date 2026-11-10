@@ -45,6 +45,10 @@ class MainActivity : Activity() {
             else Toast.makeText(this, "未找到已安装的红果 App", Toast.LENGTH_SHORT).show()
         }
 
+        findViewById<View>(R.id.btn_export_diagnostics).setOnClickListener {
+            ModuleDiagnostics.chooseDestination(this)
+        }
+
         findViewById<View>(R.id.btn_check_update).setOnClickListener { manualCheck() }
         findViewById<View>(R.id.btn_github).setOnClickListener {
             UpdateChecker.openUrl(this, UpdateChecker.REPO_URL)
@@ -68,6 +72,12 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         openSettingsFromMenuIntent(intent)
+    }
+
+    @Deprecated("Android document picker result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (ModuleDiagnostics.onActivityResult(this, requestCode, resultCode, data)) return
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onResume() {
