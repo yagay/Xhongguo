@@ -3509,6 +3509,11 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
+            addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
+                gDisableShoppingMall = it
+                if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
+                else restoreShoppingTabViews()
+            }, "disable_shopping_mall")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
