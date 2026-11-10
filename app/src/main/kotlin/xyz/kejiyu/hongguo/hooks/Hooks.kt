@@ -64,6 +64,7 @@ object Hooks {
     private var gVideoLongPressSettingsOn = true
     // Keep the app's other tabs and Android three-button navigation untouched.
     private var gDisableShoppingMall = true
+    private var gMiniPlayerOn = false
     private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
@@ -273,6 +274,8 @@ object Hooks {
         gControlOn = prefs.getBoolean("control_hide", false)
         gVideoLongPressSettingsOn = prefs.getBoolean("video_longpress_settings", true)
         gDisableShoppingMall = prefs.getBoolean("disable_shopping_mall", true)
+        gMiniPlayerOn = prefs.getBoolean("in_app_mini_player", false)
+        InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -312,6 +315,7 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
+                        if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
                         if (isShoppingMallDisabled()) {
                             gNextShoppingTabScanAt = 0L
                             mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
@@ -1386,6 +1390,112 @@ object Hooks {
 
     private fun isShoppingActivityIntent(intent: Intent?): Boolean =
         intent?.component?.className == SHOP_ACTIVITY
+
+    // Mini-player activation uses only a confirmed native video rendering host.
+    // Never remove or resize the whole feed holder or the bottom tabs.
+    private fun findLiveVideoHost(act: Activity): View? {
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY || gVideoPaused) return null
+        val candidates = mutableListOf<View>()
+        fun find(view: View?, depth: Int) {
+            if (view == null || depth > 35 || !view.isShown) return
+            if (view.javaClass.name ==
+                "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
+                if (view.width >= dp(act, 160f) && view.height >= dp(act, 240f) &&
+                    view.parent is ViewGroup) candidates.add(view)
+                return
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) find(view.getChildAt(i), depth + 1)
+            }
+        }
+        // Prefer the currently playing short-video holder. On versions whose
+        // obfuscated holder cannot be found, scan the visible main feed only.
+        val holders = shortVideoHolderSnapshot().asReversed()
+        for ((holder, state) in holders) {
+            if (state == 2 || !isShortVideoHolderVisible(holder)) continue
+            val root = shortVideoHolderRoot(holder) ?: continue
+            find(root, 0)
+            if (candidates.isNotEmpty()) break
+        }
+        if (candidates.isEmpty()) {
+            // Conservative: a real native video host must be visible on screen.
+            find(act.window.decorView, 0)
+        }
+        return candidates.maxByOrNull { it.width.toLong() * it.height.toLong() }
+    }
+
+    private fun nativeTabAction(view: View?): String? {
+        val act = gCurrentActivity ?: return null
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY || view == null) return null
+        val bottom = findMallBottomBarRoot(act) ?: return null
+        val labels = listOf("首页", "剧场", "商城", "赚钱", "我的")
+        var current: View = view
+        var depth = 0
+        while (current !== bottom && depth++ < 16) {
+            val parent = current.parent as? ViewGroup ?: break
+            if (parent.childCount in 3..7) {
+                val distinctLabels = labels.count { name ->
+                    (0 until parent.childCount).any { idx ->
+                        hasExactText(parent.getChildAt(idx), name)
+                    }
+                }
+                if (distinctLabels >= 2) {
+                    return labels.firstOrNull { hasExactText(current, it) }
+                }
+            }
+            current = parent
+        }
+        return null
+    }
+
+    private fun nativeTabClickForLabel(act: Activity, label: String): View? {
+        val root = findMallBottomBarRoot(act) ?: return null
+        val match = mutableListOf<View>()
+        fun scan(view: View?, depth: Int) {
+            if (view == null || depth > 15) return
+            if (view is TextView && view.text?.toString()?.trim() == label) {
+                match.add(view)
+                return
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                scan(view.getChildAt(i), depth + 1)
+            }
+        }
+        scan(root, 0)
+        for (labelView in match) {
+            var target: View = labelView
+            repeat(7) {
+                if (target.isClickable && target !== root) return target
+                val parent = target.parent as? View ?: return@repeat
+                if (parent === root) return@repeat
+                target = parent
+            }
+        }
+        return null
+    }
+
+    private fun beforeNativeTabClick(view: View?) {
+        val act = gCurrentActivity ?: return
+        val tab = nativeTabAction(view) ?: return
+        if (tab == "首页") {
+            if (InAppMiniPlayer.activeFor(act)) InAppMiniPlayer.restore()
+            return
+        }
+        if (tab == "商城" && isShoppingMallDisabled()) return
+        if (!gMasterOn || !gMiniPlayerOn || InAppMiniPlayer.activeFor(act)) return
+        val player = findLiveVideoHost(act)
+        if (player == null) {
+            LogUtil.info("应用内小窗：当前没有可复用的原生视频 View，保持默认切换")
+            return
+        }
+        if (InAppMiniPlayer.dock(act, player)) {
+            mainHandler.postDelayed({
+                if (InAppMiniPlayer.activeFor(act) && gVideoPaused) {
+                    InAppMiniPlayer.resumeAfterTabSwitch()
+                }
+            }, 260L)
+        }
+    }
 
     private val mainBottomNavLabels = setOf("首页", "剧场", "商城", "赚钱", "我的")
 
@@ -3499,7 +3609,9 @@ object Hooks {
             content.addView(sectionTitle(act, "核心", p))
             addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
                 gMasterOn = it
+                InAppMiniPlayer.enabled = it && gMiniPlayerOn
                 if (!it) {
+                    InAppMiniPlayer.restore()
                     restoreAllSavedViews()
                     restoreShortVideoNativeControls()
                     restoreNativeBottomWindowColor(gCurrentActivity)
@@ -3509,6 +3621,11 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
+            addSwitch("应用内小窗继续播放", "实验功能：切换底部页面时复用原视频并显示可拖动小窗；默认关闭", { gMiniPlayerOn }, {
+                gMiniPlayerOn = it
+                InAppMiniPlayer.enabled = it && gMasterOn
+                if (!it) InAppMiniPlayer.restore()
+            }, "in_app_mini_player")
             addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
                 gDisableShoppingMall = it
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
@@ -4310,6 +4427,11 @@ object Hooks {
 
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
         LogUtil.info("── installBusinessHooks ── pkg=$pkg")
+        InAppMiniPlayer.openHomeTab = { activity ->
+            val tab = nativeTabClickForLabel(activity, "首页")
+            if (tab != null) tab.performClick()
+            else LogUtil.warn("应用内小窗：未找到首页导航点击控件")
+        }
         gTargetIdSet.clear()
         gProgressIdSet.clear()
         gPauseRestoreIdSet.clear()
@@ -5043,6 +5165,9 @@ object Hooks {
                         val state = chain.args.lastOrNull { it is Int } as? Int
                         when (state) {
                             1 -> {
+                                if (className == "com.ss.android.videoshop.controller.VideoController") {
+                                    InAppMiniPlayer.rememberPlayingController(chain.thisObject)
+                                }
                                 setVideoPaused(false, "$className#state=1")
                                 scheduleDefaultSpeedApply("$className#state=1")
                             }
@@ -5058,6 +5183,27 @@ object Hooks {
 
         hookPlaybackState("com.ss.android.videoshop.controller.VideoController", "vcState")
         hookPlaybackState(gNames.playbackState, "nsState")
+
+        try {
+            val controller = Class.forName("com.ss.android.videoshop.controller.VideoController", false, classLoader)
+            val pausingMethods = controller.declaredMethods.filter { method ->
+                method.name in setOf("pause", "pauseVideo") &&
+                    method.returnType == Void.TYPE
+            }
+            for ((index, method) in pausingMethods.withIndex()) {
+                module.hook(method).setId("miniHoldPause_" + index)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
+                            LogUtil.incr("inAppMiniPauseIntercept")
+                            null
+                        } else chain.proceed()
+                    })
+            }
+            LogUtil.info("  ✓ mini player native pause guards: " + pausingMethods.size)
+        } catch (e: Throwable) {
+            LogUtil.warn("  mini player pause guard unavailable: " + e.message)
+        }
 
         val shortVideoHolderClasses = listOf(gNames.holderBaseS1)
         var shortPlaybackHookCount = 0
@@ -5412,13 +5558,21 @@ object Hooks {
                 if (isShoppingMallDisabled() &&
                     isWithinShoppingTab(chain.thisObject as? View)) {
                     false
-                } else chain.proceed()
+                } else {
+                    try { beforeNativeTabClick(chain.thisObject as? View) } catch (e: Throwable) {
+                        LogUtil.warn("应用内小窗：点击触发失败 " + e.message)
+                    }
+                    chain.proceed()
+                }
             }
             ham(c, "callOnClick", "shoppingTabCallOnClick") { chain ->
                 if (isShoppingMallDisabled() &&
                     isWithinShoppingTab(chain.thisObject as? View)) {
                     false
-                } else chain.proceed()
+                } else {
+                    try { beforeNativeTabClick(chain.thisObject as? View) } catch (_: Throwable) {}
+                    chain.proceed()
+                }
             }
         } catch (e: Exception) { LogUtil.error("setVis", e) }
         try {
@@ -5560,6 +5714,19 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onPause")
+            try {
+                module.hook(c.getDeclaredMethod("onDestroy"))
+                    .setId("inAppMiniActivityDestroy")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        (chain.thisObject as? Activity)?.let { activity ->
+                            InAppMiniPlayer.onActivityClosed(activity)
+                        }
+                        chain.proceed()
+                    })
+            } catch (e: Throwable) {
+                LogUtil.warn("应用内小窗生命周期清理 Hook 未命中: " + e.message)
+            }
             // Reject only the dedicated shopping-mall Activity intent.
             // Shopping-related short-drama classes are deliberately not blocked.
             ham(c, "startActivity", "shoppingStartActivity") { chain ->
