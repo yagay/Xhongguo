@@ -1466,6 +1466,81 @@ object Hooks {
         return chosen
     }
 
+    private var gMiniTouchStartTab: String? = null
+    private var gMiniTouchStartAt: Long = -1L
+    private var gMiniTouchStartX: Float = 0f
+    private var gMiniTouchStartY: Float = 0f
+
+    /**
+     * Home tabs sometimes handle MotionEvent directly instead of calling
+     * View.performClick(). Observe Activity.dispatchTouchEvent before native
+     * handling and resolve the bottom tab from its exact on-screen labels.
+     */
+    private fun nativeTabFromTouch(act: Activity, rawX: Float, rawY: Float): String? {
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        val bar = findMallBottomBarRoot(act) ?: return null
+        val origin = IntArray(2)
+        try { bar.getLocationOnScreen(origin) } catch (_: Throwable) { return null }
+        if (bar.width < dp(act, 180f) || bar.height < dp(act, 32f) ||
+            rawX < origin[0] || rawX > origin[0] + bar.width ||
+            rawY < origin[1] || rawY > origin[1] + bar.height) return null
+
+        val names = setOf("首页", "剧场", "商城", "赚钱", "我的")
+        val labeled = ArrayList<Pair<String, Float>>()
+        fun scan(view: View?, depth: Int) {
+            if (view == null || depth > 16 || !view.isShown) return
+            val text = (view as? TextView)?.text?.toString()?.trim()
+                ?: view.contentDescription?.toString()?.trim()
+            if (text != null && text in names) {
+                val loc = IntArray(2)
+                try {
+                    view.getLocationOnScreen(loc)
+                    labeled.add(text to (loc[0] + view.width / 2f))
+                } catch (_: Throwable) {}
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) scan(view.getChildAt(i), depth + 1)
+            }
+        }
+        scan(bar, 0)
+        val closest = labeled.minByOrNull { kotlin.math.abs(it.second - rawX) } ?: return null
+        val slotWidth = bar.width.toFloat() / labeled.size.coerceAtLeast(3)
+        if (kotlin.math.abs(closest.second - rawX) > slotWidth * 0.8f) return null
+        return closest.first
+    }
+
+    private fun observeNativeTabTouch(
+        ev: android.view.MotionEvent?, act: Activity?,
+    ) {
+        val activity = act ?: return
+        if (!gMasterOn || !gMiniPlayerOn || ev == null ||
+            activity.javaClass.name != MAIN_TAB_ACTIVITY) return
+        when (ev.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                gMiniTouchStartTab = nativeTabFromTouch(activity, ev.rawX, ev.rawY)
+                gMiniTouchStartAt = ev.downTime
+                gMiniTouchStartX = ev.rawX
+                gMiniTouchStartY = ev.rawY
+                if (gMiniTouchStartTab != null) {
+                    LogUtil.info("应用内小窗: 底部 Tab 触摸开始=" + gMiniTouchStartTab)
+                    LogUtil.incr("inAppMiniTabTouchDown")
+                }
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                val tab = gMiniTouchStartTab
+                gMiniTouchStartTab = null
+                if (tab != null && ev.downTime == gMiniTouchStartAt &&
+                    kotlin.math.abs(ev.rawX - gMiniTouchStartX) < dp(activity, 24f) &&
+                    kotlin.math.abs(ev.rawY - gMiniTouchStartY) < dp(activity, 24f) &&
+                    nativeTabFromTouch(activity, ev.rawX, ev.rawY) == tab) {
+                    beforeNativeTabAction(activity, tab, "native-touch")
+                }
+            }
+            android.view.MotionEvent.ACTION_CANCEL,
+            android.view.MotionEvent.ACTION_POINTER_DOWN -> gMiniTouchStartTab = null
+        }
+    }
+
     private fun nativeTabAction(view: View?): String? {
         val act = gCurrentActivity ?: return null
         if (act.javaClass.name != MAIN_TAB_ACTIVITY || view == null) return null
@@ -1518,24 +1593,40 @@ object Hooks {
 
     private fun beforeNativeTabClick(view: View?) {
         val act = gCurrentActivity ?: return
-        val tab = nativeTabAction(view) ?: return
+        val direct = nativeTabAction(view)
+        val centerTab = if (direct == null && view != null) {
+            val loc = IntArray(2)
+            try {
+                view.getLocationOnScreen(loc)
+                nativeTabFromTouch(act, loc[0] + view.width / 2f,
+                    loc[1] + view.height / 2f)
+            } catch (_: Throwable) { null }
+        } else direct
+        if (centerTab != null) beforeNativeTabAction(act, centerTab, "performClick")
+    }
+
+    private fun beforeNativeTabAction(act: Activity, tab: String, source: String) {
+        if (!gMasterOn || !gMiniPlayerOn) return
+        LogUtil.info("应用内小窗 Tab: $tab, event=$source, active=" +
+            InAppMiniPlayer.activeFor(act))
+        LogUtil.incr("inAppMiniTabRecognized")
         if (tab == "首页") {
             if (InAppMiniPlayer.activeFor(act)) InAppMiniPlayer.restore()
             return
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
-        if (!gMasterOn || !gMiniPlayerOn || InAppMiniPlayer.activeFor(act)) return
+        if (InAppMiniPlayer.activeFor(act)) return
         val player = findLiveVideoHost(act)
         if (player == null) {
-            LogUtil.info("应用内小窗：当前没有可复用的原生视频 View，保持默认切换")
+            LogUtil.warn("应用内小窗未启动: Tab 已识别，但找不到正在显示的视频渲染容器")
             return
         }
         if (InAppMiniPlayer.dock(act, player)) {
             mainHandler.postDelayed({
-                if (InAppMiniPlayer.activeFor(act) && gVideoPaused) {
+                if (InAppMiniPlayer.activeFor(act)) {
                     InAppMiniPlayer.resumeAfterTabSwitch()
                 }
-            }, 260L)
+            }, 320L)
         }
     }
 
@@ -5794,7 +5885,11 @@ object Hooks {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     val ev = chain.getArg(0) as? android.view.MotionEvent
-                    try { observeVideoLongPress(ev, chain.thisObject as? Activity) } catch (_: Throwable) {}
+                    val activity = chain.thisObject as? Activity
+                    try { observeNativeTabTouch(ev, activity) } catch (e: Throwable) {
+                        LogUtil.warn("应用内小窗触摸导航检测失败: " + e.message)
+                    }
+                    try { observeVideoLongPress(ev, activity) } catch (_: Throwable) {}
                     if (gMasterOn && gTopZoneOn && handleTopZoneEvent(ev)) true
                     else chain.proceed()
                 })
