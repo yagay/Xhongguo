@@ -3783,7 +3783,8 @@ object Hooks {
     }
 
     private fun observeVideoLongPress(ev: android.view.MotionEvent?, act: Activity?) {
-        if (!gVideoLongPressSettingsOn || ev == null || !isLikelyVideoScreen(act)) return
+        val activity = act ?: return
+        if (!gVideoLongPressSettingsOn || ev == null || !isLikelyVideoScreen(activity)) return
         val now = android.os.SystemClock.uptimeMillis()
         when (ev.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
@@ -3802,7 +3803,7 @@ object Hooks {
             }
             android.view.MotionEvent.ACTION_MOVE -> {
                 val slop = try {
-                    android.view.ViewConfiguration.get(act).scaledTouchSlop * 1.4f
+                    android.view.ViewConfiguration.get(activity).scaledTouchSlop * 1.4f
                 } catch (_: Throwable) { 24f }
                 if (ev.pointerCount > 1 ||
                     kotlin.math.abs(ev.x - gVideoPressX) > slop ||
