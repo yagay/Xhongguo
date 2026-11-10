@@ -60,6 +60,8 @@ object Hooks {
     private var gMasterOn = false
     private var gStatusOn = false
     private var gControlOn = false
+    // Independent of the master switch, so a disabled module can still be opened.
+    private var gVideoLongPressSettingsOn = true
     private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
@@ -267,6 +269,7 @@ object Hooks {
         gMasterOn = prefs.getBoolean("master_on", false)
         gStatusOn = prefs.getBoolean("status_bar", false)
         gControlOn = prefs.getBoolean("control_hide", false)
+        gVideoLongPressSettingsOn = prefs.getBoolean("video_longpress_settings", true)
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -3749,6 +3752,232 @@ object Hooks {
         }
         if (root is ViewGroup) for (i in 0 until root.childCount) if (containsKejiyuEntry(root.getChildAt(i))) return true
         return false
+    }
+
+
+    // --- Native video long-press menu entry ---
+    // Observe the original touch handling and native popup; never consume a gesture.
+    private const val VIDEO_LONG_PRESS_SETTINGS_TAG = "XHONGGUO_VIDEO_MENU_SETTINGS"
+    private var gVideoPressActive = false
+    private var gVideoPressDownAt = 0L
+    private var gVideoPressX = 0f
+    private var gVideoPressY = 0f
+    private var gVideoLongPressMenuUntil = 0L
+    private val gVideoMenuInjected = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<View, Boolean>()
+    )
+    private val gVideoMenuStrongLabels = listOf(
+        "不感兴趣", "举报", "播放设置", "画质", "清晰度", "倍速", "弹幕", "静音",
+    )
+    private val gVideoMenuOtherLabels = listOf(
+        "收藏", "分享", "下载", "缓存", "投屏", "复制链接", "反馈", "更多操作",
+    )
+
+    private fun isLikelyVideoScreen(act: Activity?): Boolean {
+        val name = act?.javaClass?.name ?: return false
+        if (!name.startsWith("com.dragon.read.")) return false
+        if (isLikelySettingsActivity(act)) return false
+        return name.contains("MainFragmentActivity") ||
+            name.contains("ShortSeries") || name.contains("Video") ||
+            name.contains("FeedActivity")
+    }
+
+    private fun observeVideoLongPress(ev: android.view.MotionEvent?, act: Activity?) {
+        if (!gVideoLongPressSettingsOn || ev == null || !isLikelyVideoScreen(act)) return
+        val now = android.os.SystemClock.uptimeMillis()
+        when (ev.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                gVideoPressActive = true
+                gVideoPressDownAt = now
+                gVideoPressX = ev.x
+                gVideoPressY = ev.y
+                val captured = gVideoPressDownAt
+                mainHandler.postDelayed({
+                    if (gVideoPressActive && gVideoPressDownAt == captured &&
+                        gVideoLongPressSettingsOn && isLikelyVideoScreen(gCurrentActivity)) {
+                        gVideoLongPressMenuUntil = android.os.SystemClock.uptimeMillis() + 2500L
+                        scheduleLongPressMenuInjection()
+                    }
+                }, android.view.ViewConfiguration.getLongPressTimeout().toLong() + 60L)
+            }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                val slop = try {
+                    android.view.ViewConfiguration.get(act).scaledTouchSlop * 1.4f
+                } catch (_: Throwable) { 24f }
+                if (ev.pointerCount > 1 ||
+                    kotlin.math.abs(ev.x - gVideoPressX) > slop ||
+                    kotlin.math.abs(ev.y - gVideoPressY) > slop) {
+                    gVideoPressActive = false
+                }
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                if (gVideoPressActive &&
+                    now - gVideoPressDownAt >= android.view.ViewConfiguration.getLongPressTimeout()) {
+                    gVideoLongPressMenuUntil = now + 2500L
+                    scheduleLongPressMenuInjection()
+                }
+                gVideoPressActive = false
+            }
+            android.view.MotionEvent.ACTION_CANCEL, android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                gVideoPressActive = false
+            }
+        }
+    }
+
+    private fun isInLongPressMenuWindow(): Boolean =
+        gVideoLongPressSettingsOn && isLikelyVideoScreen(gCurrentActivity) &&
+            android.os.SystemClock.uptimeMillis() <= gVideoLongPressMenuUntil
+
+    private fun nativeMenuLabels(root: View): Pair<Int, Int> {
+        val texts = collectUiTexts(root, 8).map { it.trim().replace(" ", "") }
+        val strong = gVideoMenuStrongLabels.count { label ->
+            texts.any { it == label || it.startsWith(label + "：") }
+        }
+        val other = gVideoMenuOtherLabels.count { label ->
+            texts.any { it == label || it.startsWith(label + "：") }
+        }
+        return strong to other
+    }
+
+    private fun containsVideoMenuEntry(root: View?): Boolean {
+        if (root == null) return false
+        if (root.tag == VIDEO_LONG_PRESS_SETTINGS_TAG) return true
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                if (containsVideoMenuEntry(root.getChildAt(i))) return true
+            }
+        }
+        return false
+    }
+
+    private fun isNativeVideoMenuPanel(v: ViewGroup): Boolean {
+        if (v.visibility != View.VISIBLE || v.alpha < 0.2f || v.childCount < 2) return false
+        val dm = v.resources.displayMetrics
+        val density = dm.density.coerceAtLeast(0.1f)
+        val width = if (v.width > 0) v.width else v.measuredWidth
+        val height = if (v.height > 0) v.height else v.measuredHeight
+        if (width < dm.widthPixels * 0.35f ||
+            height < 70f * density || height > dm.heightPixels * 0.85f) return false
+        val (strong, other) = nativeMenuLabels(v)
+        // Require at least two native video commands. A single Share or Like
+        // icon on the player is never enough to inject into the video itself.
+        return strong >= 2 || (strong >= 1 && other >= 1)
+    }
+
+    private fun openLongPressModuleSettings(act: Activity) {
+        try {
+            val intent = Intent().apply {
+                setClassName("xyz.kejiyu.hongguo", "xyz.kejiyu.hongguo.MainActivity")
+                putExtra("xhongguo_open_settings", true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            act.startActivity(intent)
+            LogUtil.info("视频长按菜单：打开 Xhongguo 独立设置")
+        } catch (e: Throwable) {
+            LogUtil.warn("视频长按菜单：独立设置启动失败，使用原有面板: " + e.message)
+            showPanel(act)
+        }
+    }
+
+    private fun createLongPressSettingsRow(
+        act: Activity, parent: ViewGroup, dismissMenu: () -> Unit,
+    ): View {
+        val palette = panelPalette(act)
+        val textColor = nearestSettingsTextColor(parent, palette.text)
+        return LinearLayout(act).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(act, 16f), 0, dp(act, 16f), 0)
+            minimumHeight = dp(act, 48f)
+            tag = VIDEO_LONG_PRESS_SETTINGS_TAG
+            isClickable = true
+            isFocusable = true
+            try {
+                val attr = android.util.TypedValue()
+                if (act.theme.resolveAttribute(android.R.attr.selectableItemBackground, attr, true)
+                    && attr.resourceId != 0) setBackgroundResource(attr.resourceId)
+            } catch (_: Throwable) {}
+            addView(TextView(act).apply {
+                text = "⚙"
+                textSize = 19f
+                setTextColor(textColor)
+                gravity = Gravity.CENTER_VERTICAL
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(dp(act, 32f), ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(TextView(act).apply {
+                text = "Xhongguo 设置"
+                textSize = 15f
+                setTextColor(textColor)
+                gravity = Gravity.CENTER_VERTICAL
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            setOnClickListener {
+                try { dismissMenu() } catch (_: Throwable) {}
+                openLongPressModuleSettings(act)
+            }
+        }
+    }
+
+    /**
+     * Prefer append-only injection into the native vertical command container.
+     * Other RecyclerView/ConstraintLayout menus are left untouched rather than
+     * shifting the series selector or modifying system bars to make room.
+     */
+    private fun injectLongPressMenuRoot(root: View?, dismissMenu: () -> Unit = {}): Boolean {
+        if (root == null || !isInLongPressMenuWindow()) return false
+        val act = gCurrentActivity ?: return false
+        if (containsVideoMenuEntry(root)) return true
+        var best: LinearLayout? = null
+        var bestDepth = -1
+        fun find(v: View?, depth: Int) {
+            if (v == null || depth > 13) return
+            if (v is LinearLayout && v.orientation == LinearLayout.VERTICAL &&
+                isNativeVideoMenuPanel(v) && depth > bestDepth) {
+                best = v
+                bestDepth = depth
+            }
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) find(v.getChildAt(i), depth + 1)
+            }
+        }
+        find(root, 0)
+        val menu = best ?: return false
+        if (containsVideoMenuEntry(menu)) return true
+        synchronized(gVideoMenuInjected) {
+            if (gVideoMenuInjected.containsKey(menu)) return true
+            gVideoMenuInjected[menu] = true
+        }
+        return try {
+            val row = createLongPressSettingsRow(act, menu, dismissMenu)
+            // Append as a native menu row; do not wrap/replace the existing children.
+            menu.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(act, 48f),
+            ))
+            LogUtil.info("视频长按菜单：已添加 Xhongguo 设置 | " + menu.javaClass.name)
+            LogUtil.incr("videoLongPressMenuInjected")
+            true
+        } catch (e: Throwable) {
+            synchronized(gVideoMenuInjected) { gVideoMenuInjected.remove(menu) }
+            LogUtil.warn("视频长按菜单入口注入失败：" + e.message)
+            false
+        }
+    }
+
+    private fun scheduleLongPressMenuInjection(
+        preferredRoot: View? = null, dismissMenu: () -> Unit = {},
+    ) {
+        if (!isInLongPressMenuWindow()) return
+        for (delay in longArrayOf(0L, 70L, 190L, 420L)) {
+            mainHandler.postDelayed({
+                if (!isInLongPressMenuWindow()) return@postDelayed
+                if (preferredRoot != null &&
+                    injectLongPressMenuRoot(preferredRoot, dismissMenu)) return@postDelayed
+                for (root in collectAllWindows()) {
+                    if (injectLongPressMenuRoot(root, dismissMenu)) break
+                }
+            }, delay)
+        }
     }
 
     private fun isLikelySettingsActivity(act: Activity?): Boolean {
