@@ -62,6 +62,36 @@ internal object InAppMiniPlayer {
         return android.os.SystemClock.uptimeMillis() <= suppressPauseUntil
     }
 
+    private var lastResumeAttemptAt = 0L
+
+    /**
+     * Some target builds call native pause when the Home fragment loses focus.
+     * Retry only once after the page switch, never create another media player.
+     * Reflection is deliberately limited to the tracked playing controller.
+     */
+    fun resumeAfterTabSwitch() {
+        val active = session ?: return
+        if (!enabled || active.activity.isFinishing) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastResumeAttemptAt < 1000L) return
+        lastResumeAttemptAt = now
+        val controller = lastPlayingController ?: return
+        for (name in listOf("resume", "resumeVideo", "play")) {
+            try {
+                val method = controller.javaClass.methods.firstOrNull { m ->
+                    m.name == name && m.parameterCount == 0
+                } ?: continue
+                method.invoke(controller)
+                LogUtil.info("应用内小窗：原播放器尝试继续播放，method=" + name)
+                LogUtil.incr("inAppMiniResumeAttempt")
+                return
+            } catch (e: Throwable) {
+                LogUtil.warn("应用内小窗：恢复播放方法 " + name + " 不可用: " + e.message)
+            }
+        }
+        LogUtil.warn("应用内小窗：播放器没有找到无参 resume/play 方法")
+    }
+
     fun hasWindow(): Boolean = session != null
 
     fun activeFor(activity: Activity): Boolean = session?.activity === activity
