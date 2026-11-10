@@ -153,18 +153,18 @@ class ModuleSettingsProvider : ContentProvider() {
             "import" -> {
                 val editor = prefs.edit()
                 var count = 0
-                if (prefs.all.isEmpty() && extras != null) {
+                if (extras != null) {
                     ModuleSettingsStore.BOOLEANS.forEach { key ->
-                        if (extras.containsKey(key)) { editor.putBoolean(key, extras.getBoolean(key)); count++ }
+                        if (extras.containsKey(key) && !prefs.contains(key)) { editor.putBoolean(key, extras.getBoolean(key)); count++ }
                     }
                     ModuleSettingsStore.FLOATS.forEach { key ->
-                        if (extras.containsKey(key) && extras.getFloat(key).isFinite()) {
+                        if (extras.containsKey(key) && !prefs.contains(key) && extras.getFloat(key).isFinite()) {
                             editor.putFloat(key, extras.getFloat(key)); count++
                         }
                     }
                     ModuleSettingsStore.INTS.forEach { key ->
                         val v = extras.getInt(key, -1)
-                        if (extras.containsKey(key) && v in 1..999_999_999) {
+                        if (extras.containsKey(key) && !prefs.contains(key) && v in 1..999_999_999) {
                             editor.putInt(key, v); count++
                         }
                     }
