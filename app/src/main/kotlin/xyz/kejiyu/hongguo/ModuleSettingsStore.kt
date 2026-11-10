@@ -18,7 +18,7 @@ object ModuleSettingsStore {
         "pull_refresh", "top_zone", "nav_bar_off", "progress_off",
         "restore_controls_pause", "vip_unlock", "vip_icon", "max_quality",
         "default_speed", "double_tap_comment", "oled_protect",
-        "notification_menu", "download_limit_unlimit"
+        "notification_menu", "download_limit_unlimit", "video_longpress_settings"
     )
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(
