@@ -64,7 +64,8 @@
 | **实验性与工具** | OLED 屏幕亮度防烧屏拦截 |
 | | 系统通知栏快捷控制菜单（总开关、配置面板、重启应用） |
 | | 自定义下载数量限制（单日集数、单日剧数、总缓存上限） |
-| | 自动注入红果原生设置页模块快捷入口\n| | 支持从 Xhongguo 模块 App 的“模块设置”页面直接配置全部功能（与原设置共用配置） | |
+| | 自动注入红果原生设置页模块快捷入口
+| | 支持从 Xhongguo 模块 App 的“模块设置”页面直接配置全部功能（与原设置共用配置） | |
 
 ---
 
@@ -78,7 +79,9 @@
 │       ├── assets/                    # Xposed / LSPosed 属性配置 (module.prop, xposed_init)
 │       ├── resources/META-INF/xposed/ # libxposed 接口及 Scope 配置文件
 │       └── kotlin/xyz/kejiyu/hongguo/
-│           ├── MainActivity.kt        # 模块主界面 Activity\n│           ├── SettingsActivity.kt    # 模块内独立设置页面\n│           ├── ModuleSettingsStore.kt # 跨进程同步与配置迁移
+│           ├── MainActivity.kt        # 模块主界面 Activity
+│           ├── SettingsActivity.kt    # 模块内独立设置页面
+│           ├── ModuleSettingsStore.kt # 跨进程同步与配置迁移
 │           ├── MainHook.kt            # Xposed Hook 入口类
 │           ├── LogUtil.kt             # 日志记录与统计辅助类
 │           ├── UpdateChecker.kt       # 模块更新检测服务
