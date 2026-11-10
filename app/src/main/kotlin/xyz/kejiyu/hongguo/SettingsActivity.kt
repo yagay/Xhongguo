@@ -78,6 +78,7 @@ class SettingsActivity : Activity() {
         toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
         toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
         toggle("隐藏系统小白条", "仅手势导航有效，三键导航始终保留按键", "nav_bar_off")
+        toggle("视频长按菜单入口", "在原生视频长按菜单中添加 Xhongguo 设置", "video_longpress_settings", true)
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")
@@ -139,11 +140,11 @@ class SettingsActivity : Activity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun toggle(name: String, sub: String, key: String): Switch {
+    private fun toggle(name: String, sub: String, key: String, defaultValue: Boolean = false): Switch {
         val row = row()
         addText(row, name, sub)
         val toggle = Switch(this).apply {
-            isChecked = prefs.getBoolean(key, false)
+            isChecked = prefs.getBoolean(key, defaultValue)
             setOnCheckedChangeListener { _, checked ->
                 if (!ModuleSettingsStore.save(this@SettingsActivity, key, checked)) {
                     Toast.makeText(this@SettingsActivity, "保存设置失败", Toast.LENGTH_SHORT).show()

@@ -55,6 +55,19 @@ class MainActivity : Activity() {
 
         UpdateChecker.resetShown()
         silentCheck()
+        openSettingsFromMenuIntent(intent)
+    }
+
+    private fun openSettingsFromMenuIntent(source: Intent?) {
+        if (source?.getBooleanExtra("xhongguo_open_settings", false) != true) return
+        source.removeExtra("xhongguo_open_settings")
+        startActivity(Intent(this, SettingsActivity::class.java))
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openSettingsFromMenuIntent(intent)
     }
 
     override fun onResume() {
