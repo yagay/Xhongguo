@@ -3858,7 +3858,7 @@ object Hooks {
                 gSystemMediaOn = it
                 SystemMediaBridge.configure(act, it && gMasterOn)
             }, "system_media_playback")
-            addSwitch("应用内小窗继续播放", "实验功能：切换底部页面时复用原视频并显示可拖动小窗；默认关闭", { gMiniPlayerOn }, {
+            addSwitch("应用内小窗继续播放", "实验功能：切换底部页面继续播放；点击画面返回、拖动吸边、关闭暂停、播放/暂停；默认关闭", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
                 if (!it) InAppMiniPlayer.restore()
