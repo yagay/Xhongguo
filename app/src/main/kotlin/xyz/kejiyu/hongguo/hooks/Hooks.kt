@@ -28,6 +28,7 @@ import android.widget.*
 import xyz.kejiyu.hongguo.ModuleSettingsStore
 import xyz.kejiyu.hongguo.SettingsCatalog
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 import xyz.kejiyu.hongguo.MainHook
 import xyz.kejiyu.hongguo.BuildConfig
 import xyz.kejiyu.hongguo.UpdateChecker
@@ -271,6 +272,7 @@ object Hooks {
             ensureSettingsObserver(ctx)
         }
 
+        FeatureTrace.configure(prefs.getBoolean("diagnostic_verbose", false))
         gMasterOn = prefs.getBoolean("master_on", false)
         MinePageCleaner.configure(prefs, gMasterOn)
         gStatusOn = prefs.getBoolean("status_bar", false)
@@ -362,7 +364,10 @@ object Hooks {
 
         if (key == DOWNLOAD_LIMIT_PREF || key == "master_on") editor.commit()
         else editor.apply()
-        appCtx?.let { ModuleSettingsStore.pushFromTarget(it, key, value) }
+        val synced = appCtx?.let {
+            ModuleSettingsStore.pushFromTarget(it, key, value)
+        } ?: false
+        FeatureTrace.setting(key, value, "in_host", synced)
     }
 
     private fun normalizeDefaultSpeed(value: Float): Float {
@@ -3900,6 +3905,7 @@ object Hooks {
             "vip_unlock" -> gVipOn = value
             "vip_icon" -> gVipIconOn = value
             "oled_protect" -> gOledProtectOn = value
+            "diagnostic_verbose" -> FeatureTrace.configure(value)
             "notification_menu" -> {
                 gNotificationMenuOn = value
                 createNotification(act.applicationContext)
