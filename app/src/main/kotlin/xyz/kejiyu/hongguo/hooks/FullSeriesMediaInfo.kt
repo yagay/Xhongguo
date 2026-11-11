@@ -256,9 +256,10 @@ internal object FullSeriesMediaInfo {
         val fragmentTotal = number(field(model, "episodesCount"))
             ?.takeIf { it in 1..5000L }
         val modelTitle = str(field(model, "seriesName"))
-        val fragmentCover = listOf("cover", "episodeCover")
-            .mapNotNull { field(model, it) as? String }
-            .firstOrNull { it.isNotBlank() }
+        // SaasVideoData.cover / episodeCover are VIDEO-level thumbnails;
+        // they can be still frames of an episode, not its series poster.
+        // Never use them for Android MediaSession artwork.
+        val fragmentCover: String? = null
         val matchedEpisode = if (current != null && current >= 1 &&
             (total == null || current <= total)) {
             "第" + current + "集" +
@@ -421,14 +422,12 @@ internal object FullSeriesMediaInfo {
         // 7.3.5.32's official Saas model has URL strings for both full-sized
         // and compact series posters. The detail is a transient Runnable
         // payload, so preserve its URL for the currently displayed series.
+        // The series-level poster exists in SaasVideoDetailModel.
+        // The episode's own cover/episodeCover often points to an
+        // individual video frame and must NOT overwrite the poster.
         val freshCoverUrl = listOfNotNull(
             field(detail, "episodesCover") as? String,
-            field(detail, "smallEpisodesCover") as? String,
-            field(active, "cover") as? String,
-            field(active, "episodeCover") as? String,
-            field(current.firstOrNull(), "cover") as? String,
-            field(current.firstOrNull(), "episodeCover") as? String,
-            fragment.artworkUrl
+            field(detail, "smallEpisodesCover") as? String
         ).firstOrNull { it.isNotBlank() }
         val retained = preserveCurrentSeries(activity, seriesKey,
             latestTitle, freshTotal, freshCoverUrl)
