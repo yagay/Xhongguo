@@ -49,7 +49,10 @@ object ModuleSettingsStore {
         }
         val ok = editor.commit()
         if (ok) {
-            FeatureTrace.setting(key, value as? Boolean ?: true, "module", true)
+            if (value is Boolean) FeatureTrace.setting(key, value, "module")
+            else FeatureTrace.event(
+                FeatureTraceCatalog.forSetting(key),
+                "setting", "changed", "key=" + key + ",kind=number")
             notifyChanged(ctx)
         } else {
             FeatureTrace.event("settings", "save", "fail", "key=" + key)
