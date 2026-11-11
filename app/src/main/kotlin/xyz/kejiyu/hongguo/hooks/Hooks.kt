@@ -5116,21 +5116,29 @@ object Hooks {
         // KMP main-page state: the official model's direct List fields
         // contain gr5.g cells with a stable semantic JgZoneItemId enum.
         try {
-            val stateClass = Class.forName("gr5.t", false, classLoader)
-            stateClass.declaredConstructors.forEachIndexed { index, ctor ->
-                try {
-                    module.hook(ctor)
-                        .setId("xhMineKmpState_$index")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            val result = chain.proceed()
-                            MinePageCleaner.filterKmpMineState(
-                                chain.thisObject, "mine-main-compose")
-                            result
-                        })
-                } catch (_: Throwable) {}
+            var stateHooks = 0
+            // Both the page wrapper and its nested quick-access state hold
+            // List<gr5.g> cells; the filter itself validates each element's
+            // semantic JgZoneItemId, avoiding unrelated lists.
+            for (stateName in listOf("gr5.t", "gr5.i")) {
+                val stateClass = try { Class.forName(stateName, false, classLoader) }
+                    catch (_: Throwable) { continue }
+                stateClass.declaredConstructors.forEachIndexed { index, ctor ->
+                    try {
+                        module.hook(ctor)
+                            .setId("xhMineKmpState_${stateName.substringAfterLast('.')}_$index")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val result = chain.proceed()
+                                MinePageCleaner.filterKmpMineState(
+                                    chain.thisObject, "mine-main-compose")
+                                result
+                            })
+                        stateHooks++
+                    } catch (_: Throwable) {}
+                }
             }
-            LogUtil.info("  ✓ mine KMP typed JgZoneItemId state observers")
+            LogUtil.info("  ✓ mine KMP typed JgZoneItemId state observers=$stateHooks")
         } catch (e: Throwable) {
             LogUtil.warn("  mine KMP typed state unavailable: " + e.message)
         }
