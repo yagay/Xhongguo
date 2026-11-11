@@ -40,9 +40,9 @@ jobs:
           build_code=${PIPESTATUS[0]}
           {
             echo "### Debug APK compile: $([ "$build_code" -eq 0 ] && echo PASS || echo FAIL)"
-            echo '\`\`\`text'
+            echo '```text'
             grep -E '(^(e:|error:)|^FAILURE:|^Execution failed for task|^> Task.*FAILED|^\* What went wrong:|^> .*not found|^> .*Unresolved reference)' debug-build.log | tail -n 45 || true
-            echo '\`\`\`'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$build_code"
       - name: Run beta unit tests
@@ -54,9 +54,9 @@ jobs:
           test_code=${PIPESTATUS[0]}
           {
             echo "### Debug unit tests: $([ "$test_code" -eq 0 ] && echo PASS || echo FAIL)"
-            echo '\`\`\`text'
+            echo '```text'
             grep -E '(^(e:|error:)|^FAILURE:|^Execution failed for task|^> Task.*FAILED|^There were failing tests)' debug-unit-tests.log | tail -n 25 || true
-            echo '\`\`\`'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$test_code"
       - name: Upload build diagnostic logs even when Gradle fails
