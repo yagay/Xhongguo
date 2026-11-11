@@ -409,7 +409,10 @@ internal object SystemMediaBridge {
     private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
-        val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
+        // The transitional subtitle also belongs to the publication key:
+        // otherwise resolving a title without a new episode can be skipped.
+        val signature = mediaPresentation.title(seriesTitle) + "|" +
+            mediaPresentation.subtitle(episodeTitle, knownPlaying) +
             "|" + durationMs
         if (!force && signature == lastMetadataSignature &&
             artwork === lastMetadataArt) return
