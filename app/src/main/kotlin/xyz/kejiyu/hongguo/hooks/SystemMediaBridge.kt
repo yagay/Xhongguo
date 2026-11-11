@@ -128,6 +128,21 @@ internal object SystemMediaBridge {
     private var coverArt: Bitmap? = null
     private var lastMetadataSignature: String? = null
     private var lastMetadataArt: Bitmap? = null
+    private var lastNotifiedMetadataSignature: String? = null
+    private var metadataRevision = 0L
+    private var lastDeliveryDiagnosticAt = 0L
+    private val delayedMetadataSync = object : Runnable {
+        override fun run() {
+            if (!enabled || session == null ||
+                seriesTitle == null && episodeTitle == null) return
+            // Re-apply the latest Saas model once after the media UI
+            // finishes attaching. Never recreate the engine or session.
+            updateSessionMetadata(force = true)
+            updateSessionState(knownPlaying)
+            updateMediaNotification(knownPlaying)
+            verifyMediaCardDelivery("delayed-metadata-sync")
+        }
+    }
     private var progressPolling = false
     private var lastProgressDiagnosticAt = 0L
 
@@ -226,12 +241,13 @@ internal object SystemMediaBridge {
         }
     }
 
-    private fun updateSessionMetadata() {
+    private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
         val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
             "|" + durationMs
-        if (signature == lastMetadataSignature && artwork === lastMetadataArt) return
+        if (!force && signature == lastMetadataSignature &&
+            artwork === lastMetadataArt) return
         try {
             val title = seriesTitle ?: "红果短剧"
             val subtitle = episodeTitle ?: "正在播放的视频"
@@ -240,6 +256,7 @@ internal object SystemMediaBridge {
                 .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
                 .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION, "红果短剧")
                 .putString(MediaMetadata.METADATA_KEY_ALBUM, "红果短剧")
             if (durationMs > 0) builder.putLong(
                 MediaMetadata.METADATA_KEY_DURATION, durationMs)
@@ -250,10 +267,18 @@ internal object SystemMediaBridge {
             media.setMetadata(builder.build())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
+            if (!force) {
+                metadataRevision++
+                handler.removeCallbacks(delayedMetadataSync)
+                if (seriesTitle != null || episodeTitle != null) {
+                    handler.postDelayed(delayedMetadataSync, 750L)
+                }
+            }
             LogUtil.info("系统媒体: 媒体信息已更新 title=" +
                 (seriesTitle != null) + " episode=" + (episodeTitle != null) +
-                " cover=" + (artwork != null) + " durationMs=$durationMs")
-            LogUtil.incr("systemMediaMetadataUpdate")
+                " cover=" + (artwork != null) + " durationMs=$durationMs" +
+                " force=$force revision=$metadataRevision")
+            if (!force) LogUtil.incr("systemMediaMetadataUpdate")
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 更新媒体信息失败: " + e.message)
         }
@@ -485,6 +510,9 @@ internal object SystemMediaBridge {
                 coverArt = null
                 lastMetadataSignature = null
                 lastMetadataArt = null
+                lastNotifiedMetadataSignature = null
+                handler.removeCallbacks(delayedMetadataSync)
+                metadataRevision++
                 lastProgressDiagnosticAt = 0L
                 lastVisibleInfoAt = 0L
                 lastVisibleInfoIdentity = ""
@@ -1148,6 +1176,7 @@ internal object SystemMediaBridge {
         }
         receiver = null
         handler.removeCallbacks(timelineTicker)
+        handler.removeCallbacks(delayedMetadataSync)
         progressPolling = false
         durationMs = -1L
         positionMs = -1L
