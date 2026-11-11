@@ -284,7 +284,9 @@ internal object FullSeriesMediaInfo {
     ): Pair<String?, Long?> {
         if (cachedActivity.get() !== activity ||
             seriesKey != null && cachedSeriesKey != null &&
-                cachedSeriesKey != seriesKey) {
+                cachedSeriesKey != seriesKey ||
+            newTitle != null && cachedSeriesTitle != null &&
+                newTitle != cachedSeriesTitle) {
             cachedActivity = WeakReference(activity)
             cachedSeriesTitle = null
             cachedTotal = null
