@@ -18,7 +18,8 @@ internal object FullSeriesMediaInfo {
     data class Info(
         val title: String? = null,
         val episode: String? = null,
-        val source: String = "none"
+        val source: String = "none",
+        val artworkUrl: String? = null
     )
 
     private const val ACTIVITY =
@@ -36,6 +37,7 @@ internal object FullSeriesMediaInfo {
     private var cachedSeriesKey: String? = null
     private var cachedSeriesTitle: String? = null
     private var cachedTotal: Long? = null
+    private var cachedCoverUrl: String? = null
 
     private data class PagerState(
         val currentItem: Int? = null,
@@ -249,7 +251,7 @@ internal object FullSeriesMediaInfo {
 
     private fun preserveCurrentSeries(
         activity: Activity, seriesKey: String?, newTitle: String?,
-        newTotal: Long?
+        newTotal: Long?, newCover: String?
     ): Pair<String?, Long?> {
         if (cachedActivity.get() !== activity ||
             seriesKey != null && cachedSeriesKey != null &&
@@ -257,11 +259,13 @@ internal object FullSeriesMediaInfo {
             cachedActivity = WeakReference(activity)
             cachedSeriesTitle = null
             cachedTotal = null
+            cachedCoverUrl = null
             cachedSeriesKey = seriesKey
         }
         if (seriesKey != null) cachedSeriesKey = seriesKey
         if (newTitle != null) cachedSeriesTitle = newTitle
         if (newTotal != null && newTotal in 1..5000L) cachedTotal = newTotal
+        if (!newCover.isNullOrBlank()) cachedCoverUrl = newCover
         return cachedSeriesTitle to cachedTotal
     }
 
@@ -380,8 +384,19 @@ internal object FullSeriesMediaInfo {
             str(field(current.firstOrNull(), "seriesName"))
         val seriesKey = str(field(detail, "episodesId")) ?:
             str(field(current.firstOrNull(), "episodesId"))
+        // 7.3.5.32's official Saas model has URL strings for both full-sized
+        // and compact series posters. The detail is a transient Runnable
+        // payload, so preserve its URL for the currently displayed series.
+        val freshCoverUrl = listOfNotNull(
+            field(detail, "episodesCover") as? String,
+            field(detail, "smallEpisodesCover") as? String,
+            field(active, "cover") as? String,
+            field(active, "episodeCover") as? String,
+            field(current.firstOrNull(), "cover") as? String,
+            field(current.firstOrNull(), "episodeCover") as? String
+        ).firstOrNull { it.isNotBlank() }
         val retained = preserveCurrentSeries(activity, seriesKey,
-            latestTitle, freshTotal)
+            latestTitle, freshTotal, freshCoverUrl)
         val seriesTitle = retained.first
         val total = retained.second
         val pager = pagerState(presenter, detail, total)
@@ -410,6 +425,7 @@ internal object FullSeriesMediaInfo {
                 " candidateCount=" + current.size +
                 " videoMatched=" + (active != null) +
                 " title=" + (seriesTitle != null) +
+                " coverUrl=" + (cachedCoverUrl != null) +
                 " episode=" + (episode != null) +
                 " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
                 " total=" + (total != null) +
@@ -424,6 +440,7 @@ internal object FullSeriesMediaInfo {
             if (active != null) "saas-current-video"
             else if (pager.pageAligned) "saas-fullseries-pager"
             else if (seriesTitle != null || total != null) "saas-series-detail"
-            else "none")
+            else "none",
+            cachedCoverUrl)
     }
 }
