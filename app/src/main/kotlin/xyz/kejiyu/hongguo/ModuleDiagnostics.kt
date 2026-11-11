@@ -99,9 +99,18 @@ object ModuleDiagnostics {
         files["root/status.txt"] = "ROOT GRANTED"
         for (pkg in targets) {
             val dir = "/storage/emulated/0/Android/media/" + pkg + "/K_红果logs"
+            // Avoid blending months-old international-build logs into a current
+            // diagnosis; retain today and yesterday across midnight.
+            val recentDates = setOf(
+                SimpleDateFormat("yyyyMMdd", Locale.US).format(Date()),
+                SimpleDateFormat("yyyyMMdd", Locale.US).format(
+                    Date(System.currentTimeMillis() - 24L * 60L * 60L * 1000L))
+            )
             val names = asRoot(ctx, "ls -1t '" + dir + "'").orEmpty().lines()
                 .map { it.trim() }
-                .filter { it.matches(Regex("[A-Za-z0-9._-]+\\.log")) }.take(5)
+                .filter { it.matches(Regex("[A-Za-z0-9._-]+\\.log")) }
+                .filter { it.take(8) in recentDates }
+                .take(5)
             if (names.isEmpty()) files["status/" + pkg + ".txt"] =
                 "No module log. Check LSPosed scope, Root and log initialization."
             for (name in names) {
@@ -116,8 +125,15 @@ object ModuleDiagnostics {
             if (pids.isEmpty()) files["status/" + pkg + "-process.txt"] =
                 "Main process not running. Reproduce issue before exporting."
             for (pid in pids) {
-                val raw = asRoot(ctx, "logcat -d -v threadtime -t 2500 --pid=" + pid, 8)
-                    ?: continue
+                val raw = asRoot(ctx,
+                    "logcat -b all -d -v threadtime -t 2500 --pid=" + pid, 8)
+                    ?: asRoot(ctx, "logcat -d -v threadtime -t 2500 --pid=" + pid, 8)
+                if (raw == null) {
+                    files["status/" + pkg + "-logcat-" + pid + ".txt"] =
+                        "Root is granted, but logcat --pid returned no readable output. " +
+                        "Check Android log buffer availability and process lifetime."
+                    continue
+                }
                 val terms = listOf("ZongHe", "Xhongguo", "MediaSession",
                     "MediaCodec", "AudioTrack", "VideoController", "TTVideo",
                     "ExoPlayer", "videoshop", "AndroidRuntime", "FATAL EXCEPTION",
@@ -125,8 +141,13 @@ object ModuleDiagnostics {
                 val filtered = raw.lineSequence().filter { line ->
                     terms.any { line.contains(it, true) }
                 }.take(1600).joinToString("\n")
-                if (filtered.isNotBlank())
+                if (filtered.isNotBlank()) {
                     files["logcat/" + pkg + "-" + pid + ".txt"] = redact(filtered)
+                } else {
+                    files["status/" + pkg + "-logcat-" + pid + ".txt"] =
+                        "Logcat read succeeded but matched zero media/Hook log entries." +
+                        " rawBytes=" + raw.length
+                }
             }
         }
         return files

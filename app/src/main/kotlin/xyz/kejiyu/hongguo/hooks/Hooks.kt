@@ -5606,6 +5606,43 @@ object Hooks {
             LogUtil.warn("  system media VideoContext hooks missing: " + e)
         }
 
+        // The real 7.3.5.x player can reach the low-level TTVideoEngine
+        // without calling VideoContext.onVideoPlay, as confirmed by the new
+        // diagnostic ZIP. Observe actual engine commands, not just installation.
+        try {
+            val engine = Class.forName(
+                "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
+            var installed = 0
+            for ((index, method) in engine.declaredMethods.filter {
+                it.name in setOf("play", "pause", "stop", "releaseAsync") &&
+                    it.parameterCount == 0
+            }.withIndex()) {
+                try {
+                    module.hook(method)
+                        .setId("xhSystemMediaTTVideoEngine_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                SystemMediaBridge.onNativeEngineCommand(
+                                    chain.thisObject, method.name)
+                            } catch (e: Throwable) {
+                                LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " +
+                                    method.name + ": " + e.message)
+                            }
+                            result
+                        })
+                    installed++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: TTVideoEngine " +
+                        method.name + " Hook 失败: " + e.message)
+                }
+            }
+            LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
+        }
+
         try {
             val controller = Class.forName(
                 "com.ss.android.videoshop.controller.VideoController", false, classLoader
@@ -6231,6 +6268,10 @@ object Hooks {
             LogUtil.info("  ✓ onResume")
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
+                // Probe before native onPause can detach the video engine.
+                try { SystemMediaBridge.onActivityPaused(a) } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: Activity.onPause 诊断失败: " + e.message)
+                }
                 stopPeriodicScan()
                 val result = chain.proceed()
                 mainHandler.postDelayed({
@@ -6242,6 +6283,22 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onPause")
+            try {
+                module.hook(c.getDeclaredMethod("onStop"))
+                    .setId("xhSystemMediaActivityStop")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        try {
+                            SystemMediaBridge.onActivityStopped(chain.thisObject as? Activity)
+                        } catch (e: Throwable) {
+                            LogUtil.warn("系统媒体: Activity.onStop 诊断失败: " + e.message)
+                        }
+                        chain.proceed()
+                    })
+                LogUtil.info("  ✓ system media Activity.onStop observer")
+            } catch (e: Throwable) {
+                LogUtil.warn("  system media Activity.onStop Hook failed: " + e.message)
+            }
             try {
                 module.hook(c.getDeclaredMethod("onUserLeaveHint"))
                     .setId("systemMediaUserLeave")
