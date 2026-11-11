@@ -152,7 +152,8 @@ internal object FullSeriesMediaInfo {
                                 val sameSeries = seriesKey == null ||
                                     modelId == null || seriesKey == modelId
                                 val sameTotal = total == null ||
-                                    modelTotal == null || modelTotal == total
+                                    modelTotal == null || modelTotal <= 0L ||
+                                    modelTotal == total
                                 if (sameSeries && sameTotal) {
                                     val bounds = android.graphics.Rect()
                                     val area = if (shown &&
@@ -219,7 +220,7 @@ internal object FullSeriesMediaInfo {
             indexFromVid != null && listIndex == vidIndex ->
                 indexFromList
             indexFromVid != null && listIndex == 0L &&
-                vidIndex > 1L -> indexFromVid
+                indexFromVid > 1L -> indexFromVid
             indexFromVid != null && indexFromList == null -> indexFromVid
             indexFromList != null && vidIndex == null -> indexFromList
             indexFromList != null && vidIndex == 0L -> indexFromList
