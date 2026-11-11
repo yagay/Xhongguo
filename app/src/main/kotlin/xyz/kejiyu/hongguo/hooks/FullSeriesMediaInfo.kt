@@ -514,9 +514,12 @@ internal object FullSeriesMediaInfo {
             } catch (_: Throwable) { false }
         } ?: return direct
         return try {
+            // Kotlin delegate getter is identified by its semantic
+            // KProperty argument/return shape, never by obfuscated name.
             val getter = delegate.javaClass.declaredMethods.firstOrNull {
-                it.name == "a" && it.parameterCount == 1 &&
-                    it.parameterTypes[0].name == "kotlin.reflect.KProperty"
+                it.parameterCount == 1 &&
+                    it.parameterTypes[0].name == "kotlin.reflect.KProperty" &&
+                    it.returnType != Void.TYPE
             } ?: return direct
             getter.isAccessible = true
             getter.invoke(delegate, prop) ?: direct
