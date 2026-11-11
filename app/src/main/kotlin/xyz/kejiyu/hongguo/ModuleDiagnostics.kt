@@ -174,7 +174,7 @@ object ModuleDiagnostics {
         files["settings.txt"] = buildString {
             for (key in ModuleSettingsStore.BOOLEANS.sorted()) {
                 appendLine(key + "=" + prefs.getBoolean(key,
-                    key == "video_longpress_settings" || key == "disable_shopping_mall"))
+                    SettingsCatalog.switchItem(key)?.defaultValue ?: false))
             }
         }
         files.putAll(collectRoot(ctx))
@@ -182,6 +182,21 @@ object ModuleDiagnostics {
             .values.joinToString("\n").takeLast(3_000_000)
         val trace = FeatureTraceReport.analyze(evidence)
         files["feature/TRACE_SUMMARY.txt"] = trace.summary
+        files["feature/FEATURE_MATRIX.txt"] = buildString {
+            val master = prefs.getBoolean("master_on", false)
+            appendLine("Xhongguo feature switches & observed trace categories")
+            appendLine("Note: group evidence never proves an individual feature worked.")
+            appendLine("Master enabled=" + master)
+            for (item in SettingsCatalog.allItems) {
+                if (item.kind != SettingsCatalog.Kind.SWITCH) continue
+                val configured = prefs.getBoolean(item.key, item.defaultValue)
+                val category = FeatureTraceCatalog.forSetting(item.key)
+                val observed = trace.events.contains("feature=" + category + " ")
+                appendLine(item.key + " configured=" + configured +
+                    " effective=" + (master && configured) +
+                    " category=" + category + " categoryObserved=" + observed)
+            }
+        }
         files["feature/TRACE_EVENTS.log"] = trace.events
         files["feature/TRACE_ERRORS.log"] = trace.errors
         files["feature/README.txt"] = (
