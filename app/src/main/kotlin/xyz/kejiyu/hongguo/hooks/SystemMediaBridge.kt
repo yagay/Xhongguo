@@ -70,6 +70,10 @@ internal object SystemMediaBridge {
     private var backgroundPauseGuardUntil = 0L
     private var backgroundPauseSuppressed = 0
 
+    /** Explicit notification/media-control pause must never be swallowed by
+     * the in-app mini player's short navigation guard. */
+    fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
+
     /** Both home and full-series: protect ONLY the active native engine after
      * process importance confirms a genuine background transition. Never
      * suppress user-requested pause, foreground pause or a preload engine.
