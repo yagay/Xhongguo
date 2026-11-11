@@ -572,7 +572,9 @@ object Hooks {
     }
 
     private fun overwriteDownloadLimitObject(obj: Any?): Boolean {
-        if (obj == null) return false
+        // a/b/c are old obfuscated data fields; never alter an unknown
+        // class layout simply because the fields happen to be integers.
+        if (TargetNames.isUniversal(gNames) || obj == null) return false
         val (episode, series, total) = currentDownloadLimitValues()
         val values = mapOf("a" to episode, "b" to series, "c" to total)
         return try {
@@ -6245,7 +6247,7 @@ object Hooks {
             LogUtil.warn("  下载数量限制 AB Hook 失败: $e")
         }
 
-        try {
+        if (!TargetNames.isUniversal(gNames)) try {
             val svcClass = Class.forName("s93.q", false, classLoader)
             val a7Methods = svcClass.declaredMethods.filter { it.name == "A7" && it.parameterCount >= 1 }
             a7Methods.forEachIndexed { index, method ->
@@ -6264,7 +6266,7 @@ object Hooks {
             if (a7Methods.isNotEmpty()) LogUtil.info("  ✓ 下载数量限制 KMP Hook s93.q.A7")
         } catch (_: Throwable) {}
 
-        try {
+        if (!TargetNames.isUniversal(gNames)) try {
             val configClass = Class.forName("xh5.f", false, classLoader)
             hac(configClass, "downloadLimitConfigCtor") { chain ->
                 val result = chain.proceed()
@@ -6293,7 +6295,10 @@ object Hooks {
 
         try { var rc: Class<*>? = null; try { rc = Class.forName("com.dragon.read.component.biz.impl.bookmall.holder.video.VideoRedPacketHolder", false, classLoader) } catch (_: Exception) {}; if (rc != null) { hac(rc, "rp") { chain -> if (!gMasterOn || !gAdOn) chain.proceed() else { val r = chain.proceed(); try { val iv = chain.thisObject.javaClass.getField("itemView").get(chain.thisObject) as? View; iv?.visibility = View.GONE; iv?.layoutParams = ViewGroup.LayoutParams(0, 0) } catch (_: Exception) {}; r } }; LogUtil.info("  ✓ redPack") } } catch (e: Exception) { LogUtil.warn("redPack: $e") }
 
-        try { val c = Class.forName(gNames.shortHolder, false, classLoader); module.hook(c.getDeclaredMethod(gNames.shortLandscapeMethod, Boolean::class.java)).setId("fb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { val na = (chain.args as Array<Any?>).copyOf(); na[0] = false; chain.proceed(na) } else chain.proceed() } catch (_: Exception) { chain.proceed() } }); LogUtil.info("  ✓ ${gNames.shortHolder}.${gNames.shortLandscapeMethod}") } catch (e: Exception) { LogUtil.warn("  ${gNames.shortHolder} 未找到") }
+        if (gNames.shortHolder.isNotBlank() &&
+            gNames.shortLandscapeMethod.isNotBlank()) try {
+            val c = Class.forName(gNames.shortHolder, false, classLoader);
+            module.hook(c.getDeclaredMethod(gNames.shortLandscapeMethod, Boolean::class.java)).setId("fb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { val na = (chain.args as Array<Any?>).copyOf(); na[0] = false; chain.proceed(na) } else chain.proceed() } catch (_: Exception) { chain.proceed() } }); LogUtil.info("  ✓ ${gNames.shortHolder}.${gNames.shortLandscapeMethod}") } catch (e: Exception) { LogUtil.warn("  ${gNames.shortHolder} 未找到") }
 
         try {
             val c = Class.forName("android.view.LayoutInflater", false, classLoader)
