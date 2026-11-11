@@ -99,6 +99,29 @@ object FeatureTrace {
     }
 
     /**
+     * Optional targeted Hook hit counters. This records that the callback
+     * actually ran; it does NOT assert that user-visible behavior succeeded.
+     */
+    fun hookHit(id: String) {
+        val feature = FeatureTraceCatalog.forHookId(id) ?: return
+        val signal = "hook:" + id.take(80)
+        val now = SystemClock.elapsedRealtime()
+        val window = counterWindows.computeIfAbsent(signal) { CounterWindow() }
+        var total: Long? = null
+        synchronized(window) {
+            window.count++
+            val interval = if (verbose) 3000L else 15000L
+            if (window.count == 1L || now - window.lastLogAt >= interval) {
+                window.lastLogAt = now
+                total = window.count
+            }
+        }
+        val observed = total ?: return
+        event(feature, "hook_hit", "observed",
+            "hook=" + id.take(70) + ",count=" + observed)
+    }
+
+    /**
      * Diagnostic settings are boolean feature switches, never personally
      * identifying configuration values.
      */
