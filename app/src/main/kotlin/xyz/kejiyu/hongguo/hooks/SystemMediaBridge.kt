@@ -125,6 +125,10 @@ internal object SystemMediaBridge {
     private var actualPlaybackSpeed = 1f
     private var seriesTitle: String? = null
     private var episodeTitle: String? = null
+    // One logical metadata identity for both feed and full-series playback.
+    // Keep artwork/title across episodes only if the native series ID matches.
+    private var currentSeriesIdentity: String? = null
+    private var currentMetadataPage: String? = null
     private var coverArt: Bitmap? = null
     private var artworkRequestUrl: String? = null
     private var artworkRequestedAt = 0L
@@ -369,42 +373,46 @@ internal object SystemMediaBridge {
         return fullSeries
     }
 
-    private fun captureNativePlayEntity(reason: String) {
-        if (!enabled) return
-        val engine = videoEngine.get() ?: return
-        val now = SystemClock.uptimeMillis()
-        if (reason == "periodic" && now - lastNativeMetaProbeAt < 4000L) return
-        lastNativeMetaProbeAt = now
-
-        val videoId = try {
-            engine.javaClass.getMethod("getVideoID").invoke(engine)?.toString()
-                ?.takeIf { it.isNotBlank() }
-        } catch (_: Throwable) { null }
-        if (videoId != null && currentEngineVideoIdentity != null &&
-            videoId != currentEngineVideoIdentity) {
+    /**
+     * A single metadata resolution pipeline serves home feed and full-series.
+     * The two screens only contribute different sources; MediaSession,
+     * notification, artwork and timeline are ALWAYS published identically.
+     * Read UI labels only from the focused currently playing Activity.
+     */
+    private fun resolveCurrentMedia(
+        activity: Activity?, engine: Any, reason: String, includeUi: Boolean
+    ): FullSeriesMediaInfo.Info {
+        val isFullSeries = activity?.javaClass?.name ==
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        val full = if (isFullSeries) FullSeriesMediaInfo.read(activity, engine)
+            else FullSeriesMediaInfo.Info()
+        val play = NativePlayEntityInfo.readForEngine(engine,
+            videoContext.get(), controller.get(), layer.get())
+        val ui = if (includeUi && activity?.hasWindowFocus() == true)
+            NativeMediaInfo.read(activity) else NativeMediaInfo.Info()
+        val title = if (isFullSeries)
+            full.title ?: ui.title ?: play.title
+        else play.title ?: ui.title
+        val episode = selectEpisodeLabel(full.episode,
+            play.episode ?: ui.episode)
+        val artworkUrl = full.artworkUrl ?: play.artworkUrl
+        if (full.seriesId != null && currentSeriesIdentity != null &&
+            full.seriesId != currentSeriesIdentity) {
+            // One Activity may navigate to another drama. A confirmed ID
+            // change must invalidate the old title, poster and late callback.
             seriesTitle = null
             episodeTitle = null
             coverArt = null
             artworkGeneration++
             artworkRequestUrl = null
             artworkRequestedAt = 0L
-            durationMs = -1L
-            positionMs = -1L
-            bufferedMs = -1L
+            lastMetadataArt = null
             lastMetadataSignature = null
-            LogUtil.info("系统媒体: 同一引擎切换视频ID，清空旧剧名与集数")
         }
-        if (videoId != null) currentEngineVideoIdentity = videoId
-        val playEntity = NativePlayEntityInfo.readForEngine(
-            engine, videoContext.get(), controller.get(), layer.get())
-        val fullSeries = FullSeriesMediaInfo.read(foregroundActivity.get(), engine)
-        // FullSeriesActivity has its own SaasVideoData/DetailModel pipeline.
-        // Prefer it when available; do not replace its verified episode with
-        // a generic PlayEntity title or a different preloaded episode.
-        val title = fullSeries.title ?: playEntity.title
-        val episode = selectEpisodeLabel(fullSeries.episode, playEntity.episode)
-        val artworkUrl = fullSeries.artworkUrl ?: playEntity.artworkUrl
-        requestNativeArtwork(artworkUrl, "native:$reason")
+        if (full.seriesId != null) currentSeriesIdentity = full.seriesId
+        if (activity != null) currentMetadataPage =
+            if (isFullSeries) "series" else "feed"
+        requestNativeArtwork(artworkUrl, "unified:$reason")
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
@@ -414,14 +422,75 @@ internal object SystemMediaBridge {
             episodeTitle = episode
             changed = true
         }
+        val source = when {
+            full.title != null || full.episode != null ||
+                full.artworkUrl != null -> full.source
+            play.title != null || play.episode != null ||
+                play.artworkUrl != null -> play.source
+            else -> ui.source
+        }
+        val identity = (activity?.javaClass?.simpleName ?: "?") + "|" +
+            (title ?: "") + "|" + (episode ?: "")
+        if (includeUi && (identity != lastVisibleInfoIdentity ||
+            source != lastVisibleInfoSource)) {
+            lastVisibleInfoIdentity = identity
+            lastVisibleInfoSource = source
+            LogUtil.info("系统媒体: 统一媒体信息采集" +
+                " page=" + (currentMetadataPage ?: "?") +
+                " source=$source title=" + (title != null) +
+                " episode=" + (episode != null) +
+                " seriesId=" + (full.seriesId != null) +
+                " officialPoster=" + (coverArt != null) +
+                " nativePosterUrl=" + (artworkUrl != null))
+            LogUtil.incr("systemMediaUnifiedSnapshot")
+        }
         if (changed) {
-            LogUtil.info("系统媒体: 原生播放器媒体信息已绑定 reason=$reason" +
-                " source=" + (if (fullSeries.title != null ||
-                    fullSeries.episode != null) fullSeries.source else playEntity.source) +
-                " title=" + (title != null) + " episode=" + (episode != null))
+            LogUtil.info("系统媒体: 统一媒体元数据已绑定 reason=$reason" +
+                " source=$source title=" + (title != null) +
+                " episode=" + (episode != null))
             updateSessionMetadata()
             if (reportedCard) updateMediaNotification(knownPlaying)
         }
+        return full
+    }
+
+    private fun captureNativePlayEntity(reason: String) {
+        if (!enabled) return
+        val engine = videoEngine.get() ?: return
+        val now = SystemClock.uptimeMillis()
+        if (reason == "periodic" && now - lastNativeMetaProbeAt < 4000L) return
+        lastNativeMetaProbeAt = now
+        val activity = foregroundActivity.get()
+        val videoId = try {
+            engine.javaClass.getMethod("getVideoID").invoke(engine)?.toString()
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) { null }
+        if (videoId != null && currentEngineVideoIdentity != null &&
+            videoId != currentEngineVideoIdentity) {
+            val incoming = FullSeriesMediaInfo.read(activity, engine)
+            val sameSeries = incoming.seriesId != null &&
+                incoming.seriesId == currentSeriesIdentity &&
+                currentMetadataPage == "series"
+            episodeTitle = null
+            if (!sameSeries) {
+                seriesTitle = null
+                coverArt = null
+                currentSeriesIdentity = null
+            }
+            artworkGeneration++
+            artworkRequestUrl = null
+            artworkRequestedAt = 0L
+            durationMs = -1L
+            positionMs = -1L
+            bufferedMs = -1L
+            lastMetadataArt = null
+            lastMetadataSignature = null
+            LogUtil.info("系统媒体: 同引擎切换视频 ID" +
+                " sameSeries=$sameSeries posterRetained=" + (coverArt != null))
+        }
+        if (videoId != null) currentEngineVideoIdentity = videoId
+        resolveCurrentMedia(activity, engine, "native:$reason",
+            includeUi = reason != "periodic")
     }
 
     private fun captureVisibleMediaInfo(activity: Activity?) {
@@ -429,47 +498,8 @@ internal object SystemMediaBridge {
         val isFullSeries = activity.javaClass.name ==
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
         if (!isFullSeries && !activity.hasWindowFocus()) return
-        // Series data objects remain available even when playback controls
-        // are hidden and the window has lost focus during backgrounding.
-        val fullSeries = if (isFullSeries)
-            FullSeriesMediaInfo.read(activity, videoEngine.get())
-        else FullSeriesMediaInfo.Info()
-        val ui = if (activity.hasWindowFocus()) NativeMediaInfo.read(activity)
-            else NativeMediaInfo.Info()
-        val title = fullSeries.title ?: ui.title
-        val episode = selectEpisodeLabel(fullSeries.episode, ui.episode)
-        requestNativeArtwork(fullSeries.artworkUrl, "fullseries-visible")
-        var changed = false
-        if (title != null && title != seriesTitle) {
-            seriesTitle = title
-            changed = true
-        }
-        if (episode != null && episode != episodeTitle) {
-            episodeTitle = episode
-            changed = true
-        }
-        // A video surface / episode-frame ImageView is NOT the series
-        // poster. Never let UI bitmaps replace artwork downloaded from the
-        // native SaasVideoDetailModel. If no trusted poster exists, leave
-        // MediaSession artwork empty.
-        val source = if (fullSeries.title != null || fullSeries.episode != null)
-            fullSeries.source else ui.source
-        val identity = activity.javaClass.simpleName + "|" +
-            (title ?: "") + "|" + (episode ?: "")
-        if (identity != lastVisibleInfoIdentity || source != lastVisibleInfoSource) {
-            lastVisibleInfoIdentity = identity
-            lastVisibleInfoSource = source
-            LogUtil.info("系统媒体: 当前播放信息采集 page=" +
-                activity.javaClass.simpleName + " source=$source" +
-                " title=" + (title != null) +
-                " episode=" + (episode != null) +
-                " officialPoster=" + (coverArt != null))
-            LogUtil.incr("systemMediaVisibleInfoScan")
-        }
-        if (changed) {
-            updateSessionMetadata()
-            if (reportedCard) updateMediaNotification(knownPlaying)
-        }
+        val engine = videoEngine.get() ?: return
+        resolveCurrentMedia(activity, engine, "visible", includeUi = true)
     }
 
     private fun requestSeek(position: Long, reason: String) {
@@ -570,13 +600,24 @@ internal object SystemMediaBridge {
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
         if (action == "play") {
             if (videoEngine.get() !== candidate) {
+                // Switching episodes can replace TTVideoEngine even within
+                // the SAME drama. Preserve its official poster and title
+                // until a native series ID actually changes.
+                val incomingSeries = FullSeriesMediaInfo.read(
+                    foregroundActivity.get(), candidate).seriesId
+                val sameSeries = incomingSeries != null &&
+                    incomingSeries == currentSeriesIdentity &&
+                    currentMetadataPage == "series"
                 durationMs = -1L
                 positionMs = -1L
                 bufferedMs = -1L
                 actualPlaybackSpeed = 1f
-                seriesTitle = null
+                if (!sameSeries) {
+                    seriesTitle = null
+                    coverArt = null
+                    currentSeriesIdentity = null
+                }
                 episodeTitle = null
-                coverArt = null
                 artworkGeneration++
                 artworkRequestUrl = null
                 artworkRequestedAt = 0L
@@ -595,7 +636,8 @@ internal object SystemMediaBridge {
                     feedPauseGuardUntil = 0L
                     feedPauseSuppressed = 0
                 }
-                LogUtil.info("系统媒体: 发现新的原生播放器实例，清空旧剧集进度")
+                LogUtil.info("系统媒体: 原生播放器实例切换" +
+                    " sameSeries=$sameSeries posterRetained=" + (coverArt != null))
             }
             videoEngine = WeakReference(candidate)
             lastNativeEngineAt = SystemClock.uptimeMillis()
@@ -1262,6 +1304,8 @@ internal object SystemMediaBridge {
         actualPlaybackSpeed = 1f
         seriesTitle = null
         episodeTitle = null
+        currentSeriesIdentity = null
+        currentMetadataPage = null
         coverArt = null
         artworkGeneration++
         artworkRequestUrl = null
