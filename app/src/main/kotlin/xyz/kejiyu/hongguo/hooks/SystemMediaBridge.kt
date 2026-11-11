@@ -77,10 +77,13 @@ internal object SystemMediaBridge {
         val wasPlaying: Boolean,
         val nativeAtCapture: Boolean?,
         val reason: String,
+        val explicitPauseEpochAtCapture: Long,
         var stopped: Boolean = false
     )
     @Volatile private var pendingExit: ExitSnapshot? = null
     private const val EXIT_SNAPSHOT_WINDOW_MS = 4800L
+    // Explicit media-card pause after a snapshot cancels pending auto-resume.
+    @Volatile private var explicitPauseEpoch = 0L
     private var prePauseApp: Application? = null
     private var prePauseListener: Application.ActivityLifecycleCallbacks? = null
 
@@ -926,6 +929,7 @@ internal object SystemMediaBridge {
             WeakReference(activity), WeakReference(engine),
             recent?.at ?: now, wasPlaying,
             native ?: recent?.nativeAtCapture, reason,
+            recent?.explicitPauseEpochAtCapture ?: explicitPauseEpoch,
             recent?.stopped == true
         )
         pendingExit = snapshot
@@ -986,6 +990,7 @@ internal object SystemMediaBridge {
         pendingExit = null  // Exactly one resolution, even if multiple callbacks fire.
         val engine = snapshot.engine.get()
         if (!snapshot.wasPlaying || engine == null || videoEngine.get() !== engine ||
+            snapshot.explicitPauseEpochAtCapture != explicitPauseEpoch ||
             !isVideoActivity(activity)) {
             LogUtil.info("系统媒体: 已后台但未恢复，无有效的离开前播放快照" +
                 " wasPlaying=" + snapshot.wasPlaying +
@@ -1018,12 +1023,23 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 原生视频未暂停，无需重复启动")
             return
         }
-        if (current != false) {
-            // Unknown or released decoder is NOT safe to launch blindly.
-            LogUtil.warn("系统媒体: 原生播放状态未知，跳过自动 play 防止双路声音")
+        // TTVideoEngine in 7.3.5.32 has no reliable public isPlaying():
+        // diagnostic shows native=null even while it is audibly playing.
+        // The engine's intercepted pause event is definitive evidence
+        // that the exact snapshot engine was stopped by Activity lifecycle.
+        // Recover once ONLY for that verified pause, not generic unknown.
+        val lifecyclePaused = lastLifecyclePauseEngine.get() === engine &&
+            lastLifecyclePauseWasPlaying &&
+            now - lastLifecyclePauseAt in 0L..EXIT_SNAPSHOT_WINDOW_MS &&
+            snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch
+        if (current == null && !lifecyclePaused) {
+            LogUtil.warn("系统媒体: 引擎状态未知且无同引擎生命周期暂停证据，取消恢复")
             LogUtil.incr("systemMediaBackgroundStateUnknown")
             return
         }
+        LogUtil.info("系统媒体: 后台恢复依据" +
+            " native=$current lifecyclePause=$lifecyclePaused" +
+            " beforeLeave=${snapshot.wasPlaying} sameEngine=true")
         // Single verified recovery of the SAME pinned engine only.
         // Never fall back to VideoContext/Controller or another audio player.
         val playMethod = engine.javaClass.methods.firstOrNull {
@@ -1427,6 +1443,8 @@ internal object SystemMediaBridge {
         }
         if (!play && reason.startsWith("system") ||
             !play && reason == "notification-action") {
+            explicitPauseEpoch++
+            pendingExit = null
             backgroundPauseGuardEngine.clear()
             backgroundPauseGuardUntil = 0L
             backgroundResumeBudget = 0
