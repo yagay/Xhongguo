@@ -292,10 +292,26 @@ internal object MinePageCleaner {
         var depth = 0
         while (depth++ < 4) {
             val parent = cur.parent as? ViewGroup ?: break
-            if (parent === root || parent.height <= 0 ||
-                parent.height > maxHeight) break
-            // A row has its own clickable group or an icon/text pair.
-            if (parent.isClickable || parent.childCount in 2..5)
+            val h = if (parent.height > 0) parent.height else parent.measuredHeight
+            if (parent === root || h <= 0 || h > maxHeight) break
+
+            // Never hide a whole five-icon quick-access row when the user
+            // toggles just one item. A candidate container must contain only
+            // the ONE entry being removed; otherwise use its smaller child.
+            var matchingLabels = 0
+            val nodes = ArrayDeque<Pair<View, Int>>()
+            nodes.add(parent to 0)
+            while (nodes.isNotEmpty() && matchingLabels < 2) {
+                val (node, nest) = nodes.removeFirst()
+                if (node is TextView &&
+                    allEntries.any { node.text?.toString()?.trim() in it.aliases })
+                    matchingLabels++
+                if (node is ViewGroup && nest < 3 && node.childCount < 20)
+                    for (i in 0 until node.childCount)
+                        nodes.addLast(node.getChildAt(i) to (nest + 1))
+            }
+            if (matchingLabels > 1) break
+            if (parent.isClickable || parent.childCount in 1..5)
                 candidate = parent
             cur = parent
             if (parent.isClickable) break
