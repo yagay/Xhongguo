@@ -5792,24 +5792,37 @@ object Hooks {
                         .setId("xhSystemMediaTTVideoEngine_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
+                            if (method.name == "play" && gMasterOn &&
+                                (gMiniPlayerOn || gSystemMediaOn) &&
+                                SinglePlaybackOwner.shouldBlockPlay(chain.thisObject)) {
+                                // This is a retired engine from another page.
+                                // No media state or autoplay callback is emitted.
+                                return@Hooker null
+                            }
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE) {
                                 // Mini is still inside MainFragmentActivity. Its
                                 // bottom-tab navigation calls low-level engine
                                 // pause directly, bypassing VideoController.
-                                if (!SystemMediaBridge.isExplicitMediaCommandInProgress() &&
+                                if (!SinglePlaybackOwner.isOwnershipTransition() &&
+                                    !SystemMediaBridge.isExplicitMediaCommandInProgress() &&
                                     InAppMiniPlayer.shouldKeepNativeEnginePlaying(chain.thisObject)) {
                                     return@Hooker null
                                 }
-                                if (SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
+                                if (!SinglePlaybackOwner.isOwnershipTransition() &&
+                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
                                     return@Hooker null
                                 }
                             }
                             val result = chain.proceed()
                             try {
                                 if (method.name == "play") {
+                                    if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn))
+                                        SinglePlaybackOwner.onEnginePlayed(chain.thisObject)
                                     InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
                                 }
+                                if (method.name == "releaseAsync")
+                                    SinglePlaybackOwner.onEngineReleased(chain.thisObject)
                                 InAppMiniPlayer.onNativeEngineAction(
                                     chain.thisObject, method.name)
                                 SystemMediaBridge.onNativeEngineCommand(
@@ -6641,6 +6654,12 @@ object Hooks {
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
                 gCurrentActivity = a
+                if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn)) {
+                    try { SinglePlaybackOwner.onActivityResuming(a) }
+                    catch (e: Throwable) {
+                        LogUtil.warn("单播放器: 页面切换前置状态失败: " + e.message)
+                    }
+                }
 
                 scheduleSettingsEntryInjection(a)
 
