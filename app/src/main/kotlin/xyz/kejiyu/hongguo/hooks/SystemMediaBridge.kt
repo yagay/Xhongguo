@@ -126,8 +126,40 @@ internal object SystemMediaBridge {
     private var seriesTitle: String? = null
     private var episodeTitle: String? = null
     private var coverArt: Bitmap? = null
+    private var artworkRequestUrl: String? = null
+    private var artworkRequestedAt = 0L
+    private var artworkGeneration = 0L
+    private var lastArtworkDiagnosticAt = 0L
     private var lastMetadataSignature: String? = null
     private var lastMetadataArt: Bitmap? = null
+    private var metadataSyncGeneration = 0L
+    private val delayedMetadataSync = Runnable {
+        if (!enabled || session == null) return@Runnable
+        if (seriesTitle == null && episodeTitle == null && coverArt == null)
+            return@Runnable
+        // The ShortSeriesActivity's model often arrives AFTER the initial
+        // engine.play / notification. Publish the settled metadata once more,
+        // keeping the same MediaSession and notification ID.
+        updateSessionMetadata(force = true)
+        updateSessionState(knownPlaying)
+        if (reportedCard) updateMediaNotification(knownPlaying)
+        try {
+            val snapshot = session?.controller?.metadata
+            val publishedTitle = snapshot?.getString(
+                MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            val publishedEpisode = snapshot?.getString(
+                MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
+            LogUtil.info("系统媒体: 媒体信息回读" +
+                " titleMatches=" + (publishedTitle == (seriesTitle ?: "红果短剧")) +
+                " episodeMatches=" + (publishedEpisode ==
+                    (episodeTitle ?: "正在播放的视频")) +
+                " artwork=" + (coverArt != null) +
+                " mediaActive=" + (session?.isActive == true))
+            LogUtil.incr("systemMediaMetadataReadback")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: MediaSession 元数据回读失败: " + e.message)
+        }
+    }
     private var progressPolling = false
     private var lastProgressDiagnosticAt = 0L
 
@@ -207,6 +239,53 @@ internal object SystemMediaBridge {
         }
     }
 
+    /**
+     * Covers come from the currently bound native Saas detail / PlayEntity,
+     * not random recommendation ImageViews or video-frame screenshots.
+     * Guard each asynchronous bitmap with both engine identity and generation:
+     * a previous drama must never overwrite the active media notification.
+     */
+    private fun requestNativeArtwork(raw: String?, reason: String) {
+        if (!enabled || raw.isNullOrBlank()) return
+        val ctx = appContext ?: return
+        val url = MediaArtworkLoader.normalize(raw)
+        if (url == null) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastArtworkDiagnosticAt > 15000L) {
+                lastArtworkDiagnosticAt = now
+                LogUtil.info("系统媒体: 原生封面字段存在，但并非可识别的 HTTPS 图片地址" +
+                    " reason=$reason")
+                LogUtil.incr("systemMediaArtworkUrlUnsupported")
+            }
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (url == artworkRequestUrl && (coverArt != null ||
+            now - artworkRequestedAt < 90_000L)) return
+        artworkRequestUrl = url
+        artworkRequestedAt = now
+        val generation = artworkGeneration
+        val ownerEngine = videoEngine.get()
+        LogUtil.info("系统媒体: 已发现原生剧集封面，准备异步读取 reason=$reason")
+        LogUtil.incr("systemMediaArtworkRequested")
+        MediaArtworkLoader.load(ctx, url) { bitmap, source ->
+            if (!enabled || generation != artworkGeneration ||
+                ownerEngine !== videoEngine.get() ||
+                artworkRequestUrl != url) return@load
+            if (bitmap == null) {
+                LogUtil.warn("系统媒体: 封面加载失败 source=$source")
+                LogUtil.incr("systemMediaArtworkUnavailable")
+            } else if (!bitmap.isRecycled) {
+                coverArt = bitmap
+                updateSessionMetadata()
+                updateMediaNotification(knownPlaying)
+                LogUtil.info("系统媒体: 媒体封面已写入 MediaSession source=$source" +
+                    " size=" + bitmap.width + "x" + bitmap.height)
+                LogUtil.incr("systemMediaArtworkApplied")
+            }
+        }
+    }
+
     private fun updateSessionMetadataDirect(media: MediaSession) {
         // Called before assigning session = media.
         try {
@@ -226,12 +305,13 @@ internal object SystemMediaBridge {
         }
     }
 
-    private fun updateSessionMetadata() {
+    private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
         val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
             "|" + durationMs
-        if (signature == lastMetadataSignature && artwork === lastMetadataArt) return
+        if (!force && signature == lastMetadataSignature &&
+            artwork === lastMetadataArt) return
         try {
             val title = seriesTitle ?: "红果短剧"
             val subtitle = episodeTitle ?: "正在播放的视频"
@@ -250,10 +330,17 @@ internal object SystemMediaBridge {
             media.setMetadata(builder.build())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
+            if (!force && (seriesTitle != null ||
+                episodeTitle != null || artwork != null)) {
+                metadataSyncGeneration++
+                handler.removeCallbacks(delayedMetadataSync)
+                handler.postDelayed(delayedMetadataSync, 850L)
+            }
             LogUtil.info("系统媒体: 媒体信息已更新 title=" +
                 (seriesTitle != null) + " episode=" + (episodeTitle != null) +
-                " cover=" + (artwork != null) + " durationMs=$durationMs")
-            LogUtil.incr("systemMediaMetadataUpdate")
+                " cover=" + (artwork != null) + " durationMs=$durationMs" +
+                " delayed=$force")
+            if (!force) LogUtil.incr("systemMediaMetadataUpdate")
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 更新媒体信息失败: " + e.message)
         }
@@ -297,6 +384,9 @@ internal object SystemMediaBridge {
             seriesTitle = null
             episodeTitle = null
             coverArt = null
+            artworkGeneration++
+            artworkRequestUrl = null
+            artworkRequestedAt = 0L
             durationMs = -1L
             positionMs = -1L
             bufferedMs = -1L
@@ -312,6 +402,8 @@ internal object SystemMediaBridge {
         // a generic PlayEntity title or a different preloaded episode.
         val title = fullSeries.title ?: playEntity.title
         val episode = selectEpisodeLabel(fullSeries.episode, playEntity.episode)
+        val artworkUrl = fullSeries.artworkUrl ?: playEntity.artworkUrl
+        requestNativeArtwork(artworkUrl, "native:$reason")
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
@@ -345,6 +437,7 @@ internal object SystemMediaBridge {
             else NativeMediaInfo.Info()
         val title = fullSeries.title ?: ui.title
         val episode = selectEpisodeLabel(fullSeries.episode, ui.episode)
+        requestNativeArtwork(fullSeries.artworkUrl, "fullseries-visible")
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
@@ -483,6 +576,11 @@ internal object SystemMediaBridge {
                 seriesTitle = null
                 episodeTitle = null
                 coverArt = null
+                artworkGeneration++
+                artworkRequestUrl = null
+                artworkRequestedAt = 0L
+                handler.removeCallbacks(delayedMetadataSync)
+                metadataSyncGeneration++
                 lastMetadataSignature = null
                 lastMetadataArt = null
                 lastProgressDiagnosticAt = 0L
@@ -1116,6 +1214,13 @@ internal object SystemMediaBridge {
                 .setStyle(Notification.MediaStyle()
                     .setMediaSession(media.sessionToken)
                     .setShowActionsInCompactView(0))
+                .apply {
+                    // Fallback for older/expanded notifications; Android 13+
+                    // media cards use ART/DISPLAY_ICON in MediaMetadata.
+                    coverArt?.let { art ->
+                        if (!art.isRecycled) setLargeIcon(art)
+                    }
+                }
                 .build()
             notificationManager?.notify(NOTIFICATION_ID, notification)
             if (!reportedCard) {
@@ -1148,6 +1253,7 @@ internal object SystemMediaBridge {
         }
         receiver = null
         handler.removeCallbacks(timelineTicker)
+        handler.removeCallbacks(delayedMetadataSync)
         progressPolling = false
         durationMs = -1L
         positionMs = -1L
@@ -1156,6 +1262,9 @@ internal object SystemMediaBridge {
         seriesTitle = null
         episodeTitle = null
         coverArt = null
+        artworkGeneration++
+        artworkRequestUrl = null
+        artworkRequestedAt = 0L
         lastMetadataSignature = null
         lastMetadataArt = null
         lastHomePauseAt = 0L
