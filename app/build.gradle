@@ -81,4 +81,5 @@ android {
 
 dependencies {
     compileOnly libs.libxposed.api
+    testImplementation 'junit:junit:4.13.2'
 }
