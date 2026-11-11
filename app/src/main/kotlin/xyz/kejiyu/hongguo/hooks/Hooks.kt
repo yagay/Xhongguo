@@ -3846,13 +3846,15 @@ object Hooks {
             }
             "player_bar" -> {
                 gPlayerOn = value
-                setVideoToolbarsVisible(value && !(gRestoreControlsOnPause && gVideoPaused))
+                setVideoToolbarsVisible(!value ||
+                    (gRestoreControlsOnPause && gVideoPaused))
             }
             "progress_off" -> {
                 gProgressOff = value
                 if (!value) for (root in collectAllWindows()) scanTreeProgressRestore(root)
             }
             "nav_bar_off" -> gNavBarOff = value
+            "video_longpress_settings" -> gVideoLongPressSettingsOn = value
             "restore_controls_pause" -> {
                 gRestoreControlsOnPause = value
                 if (value) refreshVideoPauseState("switch-enabled", gVideoPaused)
