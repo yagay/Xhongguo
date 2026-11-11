@@ -132,6 +132,34 @@ internal object SystemMediaBridge {
     private var lastArtworkDiagnosticAt = 0L
     private var lastMetadataSignature: String? = null
     private var lastMetadataArt: Bitmap? = null
+    private var metadataSyncGeneration = 0L
+    private val delayedMetadataSync = Runnable {
+        if (!enabled || session == null) return@Runnable
+        if (seriesTitle == null && episodeTitle == null && coverArt == null)
+            return@Runnable
+        // The ShortSeriesActivity's model often arrives AFTER the initial
+        // engine.play / notification. Publish the settled metadata once more,
+        // keeping the same MediaSession and notification ID.
+        updateSessionMetadata(force = true)
+        updateSessionState(knownPlaying)
+        if (reportedCard) updateMediaNotification(knownPlaying)
+        try {
+            val snapshot = session?.controller?.metadata
+            val publishedTitle = snapshot?.getString(
+                MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            val publishedEpisode = snapshot?.getString(
+                MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
+            LogUtil.info("系统媒体: 媒体信息回读" +
+                " titleMatches=" + (publishedTitle == (seriesTitle ?: "红果短剧")) +
+                " episodeMatches=" + (publishedEpisode ==
+                    (episodeTitle ?: "正在播放的视频")) +
+                " artwork=" + (coverArt != null) +
+                " mediaActive=" + (session?.isActive == true))
+            LogUtil.incr("systemMediaMetadataReadback")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: MediaSession 元数据回读失败: " + e.message)
+        }
+    }
     private var progressPolling = false
     private var lastProgressDiagnosticAt = 0L
 
@@ -277,12 +305,13 @@ internal object SystemMediaBridge {
         }
     }
 
-    private fun updateSessionMetadata() {
+    private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
         val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
             "|" + durationMs
-        if (signature == lastMetadataSignature && artwork === lastMetadataArt) return
+        if (!force && signature == lastMetadataSignature &&
+            artwork === lastMetadataArt) return
         try {
             val title = seriesTitle ?: "红果短剧"
             val subtitle = episodeTitle ?: "正在播放的视频"
@@ -301,10 +330,17 @@ internal object SystemMediaBridge {
             media.setMetadata(builder.build())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
+            if (!force && (seriesTitle != null ||
+                episodeTitle != null || artwork != null)) {
+                metadataSyncGeneration++
+                handler.removeCallbacks(delayedMetadataSync)
+                handler.postDelayed(delayedMetadataSync, 850L)
+            }
             LogUtil.info("系统媒体: 媒体信息已更新 title=" +
                 (seriesTitle != null) + " episode=" + (episodeTitle != null) +
-                " cover=" + (artwork != null) + " durationMs=$durationMs")
-            LogUtil.incr("systemMediaMetadataUpdate")
+                " cover=" + (artwork != null) + " durationMs=$durationMs" +
+                " delayed=$force")
+            if (!force) LogUtil.incr("systemMediaMetadataUpdate")
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 更新媒体信息失败: " + e.message)
         }
@@ -543,6 +579,8 @@ internal object SystemMediaBridge {
                 artworkGeneration++
                 artworkRequestUrl = null
                 artworkRequestedAt = 0L
+                handler.removeCallbacks(delayedMetadataSync)
+                metadataSyncGeneration++
                 lastMetadataSignature = null
                 lastMetadataArt = null
                 lastProgressDiagnosticAt = 0L
@@ -1215,6 +1253,7 @@ internal object SystemMediaBridge {
         }
         receiver = null
         handler.removeCallbacks(timelineTicker)
+        handler.removeCallbacks(delayedMetadataSync)
         progressPolling = false
         durationMs = -1L
         positionMs = -1L
