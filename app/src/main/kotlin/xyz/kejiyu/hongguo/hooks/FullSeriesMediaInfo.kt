@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.SystemClock
 import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * 7.3.5.32 full-series playback keeps its current SaasVideoData inside:
@@ -748,6 +749,11 @@ internal object FullSeriesMediaInfo {
                         observed.title != null || observed.artworkUrl != null) +
                     " safeMetadata=$matchedByVideoId")
                 LogUtil.incr("systemMediaSeriesUnverifiedTransition")
+                FeatureTrace.event("media", "series_candidate", "degraded",
+                    "presenterCount=" + current.size +
+                        ",detailPresent=" + (detailKey != null) +
+                        ",videoMatched=" + (active != null) +
+                        ",safeMetadata=" + matchedByVideoId)
             }
             return Info(titleByVideoId, episodeByVideoId,
                 if (matchedByVideoId) "series-video-id-only"
@@ -853,6 +859,13 @@ internal object FullSeriesMediaInfo {
                 " title=" + (seriesTitle != null) +
                 " episode=" + (episode != null))
             LogUtil.incr("systemMediaSeriesPlaybackIdentity")
+            FeatureTrace.event("media", "series_candidate",
+                if (seriesTitle != null) "bound" else "degraded",
+                "active=" + (active != null) +
+                    ",fallback=" + (safePresenter != null) +
+                    ",staleDetail=" + staleDetail +
+                    ",episode=" + (episode != null) +
+                    ",poster=" + (cachedCoverUrl != null))
         }
         return Info(
             title = seriesTitle,
