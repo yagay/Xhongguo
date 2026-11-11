@@ -3977,6 +3977,23 @@ object Hooks {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = dp(act, 5f) })
             }
+            fun makeAction(title: String, subtitle: String,
+                           action: () -> Unit) {
+                val (row, sw) = makePanelRow(act, title, subtitle, false, p)
+                row.removeView(sw)
+                row.addView(TextView(act).apply {
+                    text = "›"
+                    textSize = 24f
+                    setTextColor(p.textSecondary)
+                    gravity = Gravity.CENTER
+                }, LinearLayout.LayoutParams(
+                    dp(act, 28f), dp(act, 32f)))
+                row.minimumHeight = dp(act, 54f)
+                row.setPadding(dp(act, 12f), dp(act, 7f),
+                    dp(act, 10f), dp(act, 7f))
+                row.setOnClickListener { action() }
+                addRow(row)
+            }
             fun makeToggle(item: SettingsCatalog.Item) {
                 val current = gPrefs?.getBoolean(item.key, item.defaultValue)
                     ?: item.defaultValue
@@ -4058,28 +4075,14 @@ object Hooks {
                         }
                         when (item.kind) {
                             SettingsCatalog.Kind.SWITCH -> makeToggle(item)
-                            SettingsCatalog.Kind.SPEED -> {
-                                val (row, _) = makePanelRow(act,
-                                    item.title, defaultSpeedSummary(),
-                                    gDefaultSpeedOn, p, hasSubmenu = true)
-                                // An action row must not have a second toggle:
-                                // speed is switched from the preceding row.
-                                row.removeViewAt(row.childCount - 1)
-                                row.setOnClickListener {
+                            SettingsCatalog.Kind.SPEED ->
+                                makeAction(item.title, defaultSpeedSummary()) {
                                     showDefaultSpeedEditor(act, p) { render(group) }
                                 }
-                                addRow(row)
-                            }
-                            SettingsCatalog.Kind.DOWNLOAD_VALUES -> {
-                                val (row, _) = makePanelRow(act,
-                                    item.title, downloadLimitSummary(),
-                                    gDownloadLimitUnlimitOn, p, hasSubmenu = true)
-                                row.removeViewAt(row.childCount - 1)
-                                row.setOnClickListener {
+                            SettingsCatalog.Kind.DOWNLOAD_VALUES ->
+                                makeAction(item.title, downloadLimitSummary()) {
                                     showDownloadLimitEditor(act, p) { render(group) }
                                 }
-                                addRow(row)
-                            }
                             SettingsCatalog.Kind.DIAGNOSTICS -> Unit
                         }
                     }
