@@ -37,6 +37,7 @@ internal object HomeFeedMediaInfo {
     private var lastProbeAt = 0L
     private var lastTreeScanAt = 0L
     private var lastSuccessSignature = ""
+    private val identityAgreement = VideoIdentityAgreement()
     // Scanning the whole View tree every metadata tick causes UI jank.
     // A weak pager reference is valid only while that Activity still shows it.
     private var cachedActivity = WeakReference<Activity>(null)
@@ -125,8 +126,10 @@ internal object HomeFeedMediaInfo {
         val pos = (call(pager, "getCurrentItem") as? Number)?.toInt()
             ?: return null
         val active = data(call(adapter, "getCurrentData"))
-        val byIndex = indexedModel(adapter, pos) ?:
-            modelFromVisibleHolder(pager, pos)
+        val indexed = indexedModel(adapter, pos)
+        val visibleHolder = if (indexed == null)
+            modelFromVisibleHolder(pager, pos) else null
+        val byIndex = indexed ?: visibleHolder
         val activeId = vid(active)
         val indexedId = vid(byIndex)
         // On a swipe the adapter and pager can briefly disagree: defer
@@ -141,7 +144,11 @@ internal object HomeFeedMediaInfo {
         if (area < screenW.toLong() * screenH / 5L) return null
         return Candidate(model, pos, area,
             activeId != null && indexedId != null,
-            if (active != null) "current-data" else "pager-position")
+            when {
+                indexed != null -> "pager-position"
+                visibleHolder != null -> "selected-holder"
+                else -> "current-data"
+            })
     }
 
     fun read(activity: Activity?, engine: Any?): FullSeriesMediaInfo.Info {
@@ -197,11 +204,19 @@ internal object HomeFeedMediaInfo {
         val engineId = try { call(engine, "getVideoID")?.toString() }
             catch (_: Throwable) { null }
             ?.takeIf { it.isNotBlank() && it != "null" }
-        // Engine identity is authoritative when it exists. In the official
-        // home feed it may be blank even while video is playing.
-        val verified = selected != null &&
-            (engineId == null || engineId == activeVideoId)
+        // Official host routes can expose a TTVideoEngine ID in a different
+        // namespace from SaasVideoData. A mismatch may only fall back after
+        // independent selected-page evidence survives multiple probes.
         val now = SystemClock.uptimeMillis()
+        val stableKey = if (selected != null && activeVideoId != null)
+            System.identityHashCode(activity).toString() + "|" +
+                System.identityHashCode(engine).toString() + "|" +
+                selected.position + "|" + activeVideoId else null
+        val verified = identityAgreement.accept(
+            stableKey, engineId, activeVideoId,
+            independentlySelected = selected != null &&
+                (selected.aligned || selected.method != "current-data"),
+            nowMs = now)
         if (now - lastProbeAt > 9000L) {
             lastProbeAt = now
             LogUtil.info("系统媒体: 首页当前播放器模型" +
@@ -212,6 +227,8 @@ internal object HomeFeedMediaInfo {
                 " engineVideoId=" + (engineId != null) +
                 " pagerVideoId=" + (activeVideoId != null) +
                 " idMatched=" + (engineId != null && engineId == activeVideoId) +
+                " stableFallback=" + (verified && engineId != null &&
+                    engineId != activeVideoId) +
                 " ambiguous=$ambiguous verified=$verified")
             LogUtil.incr("systemMediaHomePagerProbe")
         }
