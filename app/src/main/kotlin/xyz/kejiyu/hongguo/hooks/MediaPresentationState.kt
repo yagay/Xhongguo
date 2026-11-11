@@ -9,7 +9,7 @@ package xyz.kejiyu.hongguo.hooks
  * waiting for the new native DTO to arrive.
  */
 internal class MediaPresentationState {
-    private var awaitingNewSeries = false
+    @Volatile private var awaitingNewSeries = false
 
     fun onVideoTransition(sameSeries: Boolean) {
         awaitingNewSeries = !sameSeries
