@@ -27,7 +27,10 @@ internal class BackgroundEpisodeMonitor {
         playing: Boolean,
         nowMs: Long
     ): String? {
-        if (!backgroundActive || !playing || durationMs < 5000L ||
+        // A real completion may set knownPlaying=false before the host
+        // advances; retain evidence of the callback in that case.
+        if (!backgroundActive || (!playing && !sawCompletion) ||
+            durationMs < 5000L ||
             positionMs < 0L || durationMs - positionMs > 350L) {
             reset()
             return null
