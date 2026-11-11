@@ -20,9 +20,9 @@ import xyz.kejiyu.hongguo.LogUtil
  */
 internal object SinglePlaybackOwner {
     private enum class Route { FEED, SERIES, DETAILS, OTHER }
-    private var owner = WeakReference<Any>(null)
-    private var route = Route.OTHER
-    private var ownerRoute = Route.OTHER
+    @Volatile private var owner = WeakReference<Any>(null)
+    @Volatile private var route = Route.OTHER
+    @Volatile private var ownerRoute = Route.OTHER
     private val routes = WeakHashMap<Any, Route>()
     private val transitioning = ThreadLocal<Boolean>()
     private var lastHandoffAt = 0L
@@ -50,7 +50,7 @@ internal object SinglePlaybackOwner {
     /** Native Activity navigation is the presentation route, not a new media
      * owner. Detail pages keep the original video; full-series/feed switches
      * retire the previous owner before the new page can start another. */
-    fun onActivityResuming(activity: Activity?) {
+    @Synchronized fun onActivityResuming(activity: Activity?) {
         val next = routeOf(activity)
         if (next == Route.OTHER || next == route) return
         val previous = owner.get()
@@ -97,7 +97,7 @@ internal object SinglePlaybackOwner {
     }
 
     /** Called AFTER successful native play. One owner at a time. */
-    fun onEnginePlayed(engine: Any?) {
+    @Synchronized fun onEnginePlayed(engine: Any?) {
         if (engine?.javaClass?.name != "com.ss.ttvideoengine.TTVideoEngine") return
         val old = owner.get()
         if (old === engine) return
@@ -146,7 +146,7 @@ internal object SinglePlaybackOwner {
 
     /** Called at release, never drop the current owner when an older engine
      * is released asynchronously. */
-    fun onEngineReleased(engine: Any?) {
+    @Synchronized fun onEngineReleased(engine: Any?) {
         if (engine == null) return
         if (owner.get() === engine) {
             owner.clear()
