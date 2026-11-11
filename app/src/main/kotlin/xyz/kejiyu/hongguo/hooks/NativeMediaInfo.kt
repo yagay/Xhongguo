@@ -108,13 +108,13 @@ internal object NativeMediaInfo {
 
     private fun homeScore(c: Candidate): Int {
         val text = parseTitle(c.text) ?: return -100
-        if (c.x > .66f || c.y !in .58f.. .85f) return -100
+        if (c.x > .66f || c.y !in 0.58f..0.85f) return -100
         if (text.contains("广告") || text.contains("福利") ||
             text.contains("短剧推荐") || text.contains("热门") ||
             text.contains("播放量")) return -100
         var score = 0
-        if (c.y in .67f.. .80f) score += 6
-        else if (c.y in .80f.. .84f) score += 1
+        if (c.y in 0.67f..0.80f) score += 6
+        else if (c.y in 0.80f..0.84f) score += 1
         if (c.x < .28f) score += 3
         if (c.font >= 17f) score += 6
         else if (c.font >= 14f) score += 3
@@ -134,7 +134,7 @@ internal object NativeMediaInfo {
         if (c.id != null && titleIdKeys.any { c.id.contains(it) }) score += 14
         if (c.font >= 18f) score += 6
         else if (c.font >= 14f) score += 3
-        if (c.y < .25f || c.y in .63f.. .80f) score += 4
+        if (c.y < .25f || c.y in 0.63f..0.80f) score += 4
         if (text.length in 7..55) score += 4
         if (text.contains("·")) score -= 5
         return score
