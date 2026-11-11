@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * One metadata refresh lane for home feed, full-series and autoplay.
@@ -30,6 +31,8 @@ internal class MediaRefreshCoordinator(
 
     fun onPlaybackTransition(reason: String) {
         val epoch = generation.incrementAndGet()
+        FeatureTrace.event("media", "refresh_schedule", "queued",
+            "reason=" + reason + ",generation=" + epoch)
         dtoEvent.incrementAndGet()
         transitionCallbacks.getAndSet(emptyList()).forEach(main::removeCallbacks)
         trailingDtoCallback.getAndSet(null)?.let(main::removeCallbacks)
@@ -53,6 +56,8 @@ internal class MediaRefreshCoordinator(
     fun onNativeDataChanged() {
         val epoch = generation.get()
         val request = dtoEvent.incrementAndGet()
+        FeatureTrace.event("media", "dto_refresh", "queued",
+            "generation=" + epoch, minIntervalMs = 2500L)
         val now = SystemClock.uptimeMillis()
         // Leading refresh prevents a continuous stream of preloaded DTOs from
         // starving the active video. The trailing refresh captures the last DTO.
@@ -83,9 +88,13 @@ internal class MediaRefreshCoordinator(
     }
 
     private fun safelyRefresh(reason: String) {
+        FeatureTrace.event("media", "refresh_invoke", "attempt",
+            "reason=" + reason, minIntervalMs = 2500L)
         try {
             refresh(reason)
         } catch (e: Throwable) {
+            FeatureTrace.event("media", "refresh_invoke", "fail",
+                "errorType=" + e.javaClass.simpleName)
             LogUtil.warn("系统媒体: 元数据调度独立失败 " +
                 e.javaClass.simpleName + " reason=" + reason)
             LogUtil.incr("systemMediaMetadataRefreshFailure")
