@@ -355,7 +355,7 @@ internal object FullSeriesMediaInfo {
 
     private fun preserveCurrentSeries(
         activity: Activity, seriesKey: String?, newTitle: String?,
-        newTotal: Long?, newCover: String?
+        newTotal: Long?, newCover: String?, verifiedPoster: Boolean
     ): Pair<String?, Long?> {
         if (cachedActivity.get() !== activity ||
             seriesKey != null && cachedSeriesKey != null &&
@@ -374,12 +374,15 @@ internal object FullSeriesMediaInfo {
         if (seriesKey != null) cachedSeriesKey = seriesKey
         if (newTitle != null) cachedSeriesTitle = newTitle
         if (newTotal != null && newTotal in 1..5000L) cachedTotal = newTotal
-        // Freeze the first verified series poster for this Activity/series.
-        // The transient detail/fragment may later expose a different video
-        // still; never replace the poster mid-episode or mid-series.
-        if (cachedCoverUrl.isNullOrBlank() && !newCover.isNullOrBlank()) {
+        // The official detail poster must be allowed to REPLACE an early
+        // low-confidence SaasVideoData.cover. Never let a later episode frame
+        // replace a verified detail poster.
+        if (!newCover.isNullOrBlank() &&
+            (cachedCoverUrl.isNullOrBlank() || verifiedPoster &&
+                cachedCoverUrl != newCover)) {
             cachedCoverUrl = newCover
-            LogUtil.info("系统媒体: 已锁定当前短剧正式封面来源；等待下载")
+            LogUtil.info("系统媒体: 已确定当前短剧官方封面" +
+                " verified=$verifiedPoster")
         }
         return cachedSeriesTitle to cachedTotal
     }
@@ -539,15 +542,17 @@ internal object FullSeriesMediaInfo {
         val safeDataCover = seriesCover?.takeIf {
             it.isNotBlank() && it != episodeFrame
         }
-        val freshCoverUrl = listOfNotNull(
+        val verifiedCoverUrl = listOfNotNull(
             field(detail, "episodesCover") as? String,
             field(detail, "smallEpisodesCover") as? String,
-            capturedDetail?.artworkUrl,
-            safeDataCover,
-            fragment.artworkUrl
+            capturedDetail?.artworkUrl
+        ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
+        val freshCoverUrl = verifiedCoverUrl ?: listOfNotNull(
+            safeDataCover, fragment.artworkUrl
         ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
         val retained = preserveCurrentSeries(activity, seriesKey,
-            latestTitle, freshTotal, freshCoverUrl)
+            latestTitle, freshTotal, freshCoverUrl,
+            verifiedPoster = verifiedCoverUrl != null)
         val seriesTitle = retained.first
         val total = retained.second
         val pager = pagerState(presenter, detail, total)
