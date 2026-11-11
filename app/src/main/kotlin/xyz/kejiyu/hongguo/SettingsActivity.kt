@@ -97,6 +97,19 @@ class SettingsActivity : Activity() {
         toggle("VIP 状态 Hook", "启用现有的 VIP 适配逻辑", "vip_unlock")
         toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
 
+        section("我的页面 · 快捷入口")
+        toggle("隐藏福利", "隐藏「我的」页面的福利入口，并禁止点击", "mine_hide_welfare", true)
+        toggle("隐藏订单", "隐藏「我的」页面的订单入口，并禁止点击", "mine_hide_orders", true)
+        toggle("隐藏消息", "隐藏「我的」页面的消息入口，并禁止点击", "mine_hide_messages", true)
+        toggle("隐藏游戏", "隐藏「我的」页面的游戏入口，并禁止点击", "mine_hide_games", true)
+        toggle("隐藏追更", "隐藏「我的」页面的追更入口，并禁止点击", "mine_hide_following", true)
+
+        section("我的页面 · 右侧菜单")
+        toggle("隐藏我的钱包", "隐藏右上角三横线菜单中的我的钱包入口", "mine_hide_wallet", true)
+        toggle("隐藏会员中心", "隐藏右上角三横线菜单中的会员中心入口", "mine_hide_membership", true)
+        toggle("隐藏游戏中心", "隐藏右上角三横线菜单中的游戏中心入口", "mine_hide_game_center", true)
+        toggle("隐藏创作中心", "隐藏右上角三横线菜单中的创作中心入口", "mine_hide_creator_center", true)
+
         section("诊断与日志")
         action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
             ModuleDiagnostics.chooseDestination(this)
