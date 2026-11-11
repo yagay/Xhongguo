@@ -486,7 +486,7 @@ internal object FullSeriesMediaInfo {
     }
 
     private fun isDetailModel(model: Any?): Boolean {
-        var type = model?.javaClass
+        var type: Class<*>? = model?.javaClass
         while (type != null && type != Any::class.java) {
             if (type.name == DETAIL) return true
             type = type.superclass
