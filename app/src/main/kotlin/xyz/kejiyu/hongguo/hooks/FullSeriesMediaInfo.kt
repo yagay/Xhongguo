@@ -101,7 +101,12 @@ internal object FullSeriesMediaInfo {
                 ",poster=" + (poster != null) +
                 ",differentSeries=" + (candidate.seriesId != transitionPreviousSeries),
             minIntervalMs = 1500L)
-        return Info(title, video.episode, "series-native-handoff-evidence",
+        // A fresh DTO can belong to a preloaded neighbouring episode.
+        // The official series total is safe, but a guessed current episode
+        // is not. Publish "全N集" until an exact active-index signal arrives.
+        val episodeSummary = detail.total?.takeIf { it in 1..5000L }
+            ?.let { "全" + it + "集" }
+        return Info(title, episodeSummary, "series-native-handoff-evidence",
             poster, candidate.seriesId)
     }
 
