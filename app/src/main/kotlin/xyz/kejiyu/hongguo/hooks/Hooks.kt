@@ -299,13 +299,11 @@ object Hooks {
         gDownloadOneDaySeries = prefs.getInt(DOWNLOAD_LIMIT_SERIES_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
         gDownloadTotalSeries = prefs.getInt(DOWNLOAD_LIMIT_TOTAL_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
 
-        // Newer obfuscated versions must not inherit old fullscreen/episode layout IDs.
-        if (!hasVerifiedUiProfile()) {
-            gStatusOn = false
-            gNavBarOff = false
-            gControlOn = false
-            gPlayerOn = false
-        }
+        // The generic View/Window and Android navigation hooks have no
+        // dependence on old obfuscated IDs. Only unsafe hardcoded navigation
+        // and toolbar substitutions are guarded at their call sites.
+        // Never silently disable user-selected feature preferences based on
+        // a missing legacy compatibility entry.
     }
 
     private fun ensureSettingsObserver(ctx: Context) {
@@ -3658,7 +3656,10 @@ object Hooks {
             val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
             gTargetVersionName = version
             gTargetVersionCode = code
-            val state = if (TargetNames.isSupported(gPkg, version)) "已适配" else "兼容表未列出"
+            val state = if (TargetNames.isUniversal(gNames))
+                "通用 Hook · 未使用旧版本配置"
+                else if (TargetNames.isSupported(gPkg, version)) "精确版本映射"
+                else "待验证"
             return "$version  ·  versionCode $code  ·  $state\n${gNames.profileId}"
         } catch (_: Throwable) {
             return "$gTargetVersionName  ·  versionCode $gTargetVersionCode\n${gNames.profileId}"
@@ -3701,7 +3702,7 @@ object Hooks {
                 background = roundedBg(act, p.surface, 22f, p.divider, 1f)
                 setPadding(dp(act, 15f), dp(act, 13f), dp(act, 15f), dp(act, 13f))
                 addView(TextView(act).apply {
-                    text = "当前兼容配置"
+                    text = "当前运行模式"
                     textSize = 11f
                     setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                     setTextColor(p.accent)
@@ -4046,6 +4047,13 @@ object Hooks {
     )
 
     private fun nativeSettingsSpec(): NativeSettingsSpec = when {
+        TargetNames.isUniversal(gNames) -> NativeSettingsSpec(
+            listMethods = emptySet(),
+            itemClass = "",
+            clickClass = "",
+            checkedClass = null,
+            style = "universal-no-legacy-settings-items",
+        )
         gPkg == TargetNames.OVERSEA_PACKAGE -> NativeSettingsSpec(
             listMethods = setOf("e1", "f1"),
             itemClass = "vr5.e",
@@ -4734,10 +4742,9 @@ object Hooks {
             LogUtil.info("Activity 验证目标版本=" + gTargetVersionName +
                 " versionCode=" + gTargetVersionCode + " installedProfile=" +
                 gNames.profileId)
-            if (!TargetNames.isSupported(gPkg, gTargetVersionName)) {
-                LogUtil.warn("当前版本 " + gTargetVersionName +
-                    " 尚无完整混淆方法映射，旧版 profile 的部分类 Hook 将缺失。" +
-                    "稳定 VideoContext 媒体接口单独 Hook，不冒充完整兼容。")
+            if (TargetNames.isUniversal(gNames)) {
+                LogUtil.info("当前版本 " + gTargetVersionName +
+                    " 使用独立通用 Hook；不加载任何历史版本混淆映射")
             }
         } catch (e: Throwable) {
             LogUtil.warn("Activity 验证目标版本失败: " + e.message)
@@ -4775,20 +4782,25 @@ object Hooks {
         gTargetVersionCode = detected.second
 
         gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
+        RuntimeCapabilities.inspect(classLoader, pkg, detected.first)
         // Re-read settings now the target version is known.
         appCtx?.let { initPrefs(it) }
         LogUtil.info("系统导航=" + (if (isGestureNavigation(appCtx)) "gesture" else "three-button/unknown") +
             " | verifiedUI=" + hasVerifiedUiProfile())
-        if (!hasVerifiedUiProfile()) {
-            LogUtil.warn("未适配版本 " + gTargetVersionName +
-                "：保护系统状态栏、导航按钮、首页Tab和全集入口")
+        if (TargetNames.isUniversal(gNames)) {
+            LogUtil.info("通用 Hook 已启用：无旧版资源 ID、旧版混淆方法或版本猜测；" +
+                "逐项按运行时接口安装，未发现则跳过")
+        } else if (!hasVerifiedUiProfile()) {
+            LogUtil.warn("精确版本映射未通过验证，禁用危险的旧版 UI 资源 Hook")
         }
 
         if (gNames.useLegacySeedIds) seedIds.forEach { gTargetIdSet.add(it) }
         gNames.staticHideIds.forEach { gTargetIdSet.add(it) }
         gNames.staticProgressIds.forEach { gProgressIdSet.add(it) }
         gNames.pauseRestoreIds.forEach { gPauseRestoreIdSet.add(it) }
-        LogUtil.info("目标兼容配置=${gNames.profileId} | detectedVersion=${gTargetVersionName}(${gTargetVersionCode}) | shortHolder=${gNames.shortHolder} | holderBaseS1=${gNames.holderBaseS1} | toolbarBase=${gNames.toolbarBase} | kmpVipModel=${gNames.kmpVipModel}")
+        LogUtil.info("目标运行模式=${gNames.profileId} | detectedVersion=${gTargetVersionName}(${gTargetVersionCode})" +
+            " | legacyObfuscatedMappings=" + (!TargetNames.isUniversal(gNames)) +
+            " | oldResourceIds=" + gTargetIdSet.size)
         LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
 
         try {
@@ -4815,6 +4827,7 @@ object Hooks {
             try {
                 val mainClazz = Class.forName("com.dragon.read.pages.main.MainFragmentActivity", false, classLoader)
                 val nativeMethods = when {
+                    TargetNames.isUniversal(gNames) -> listOf("onCreate")
                     pkg == TargetNames.OVERSEA_PACKAGE -> {
 
                         listOf("onCreate", "B2", "N1", "f1", "j2")
