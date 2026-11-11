@@ -29,12 +29,36 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Prevent legacy profile fallback
         run: python3 tools/verify_universal_mapping.py
-      - name: Run beta media policy unit tests
-        run: bash ./gradlew :app:testDebugUnitTest --stacktrace
+      # Compile the app first: a failed unit test must not masquerade as a
+      # Kotlin APK compilation failure. Keep each complete Gradle log.
       - name: Build Debug only
-        run: bash ./gradlew :app:assembleDebug --stacktrace
-      - uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./gradlew :app:assembleDebug --stacktrace --console=plain \
+            2>&1 | tee debug-build.log
+      - name: Run beta media policy unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./gradlew :app:testDebugUnitTest --stacktrace --console=plain \
+            2>&1 | tee debug-unit-tests.log
+      - name: Upload build diagnostic logs even when Gradle fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xhongguo-beta-build-diagnostics
+          path: |
+            debug-build.log
+            debug-unit-tests.log
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload Debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: Xhongguo-debug-apk
           path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
