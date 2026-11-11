@@ -308,12 +308,35 @@ internal object SystemMediaBridge {
     }
     private var progressPolling = false
     private var lastProgressDiagnosticAt = 0L
+    private val episodeMonitor = BackgroundEpisodeMonitor()
+
+    /** Called AFTER the host's original TTVideoEngine callback proceeds.
+     * A completion event is evidence only; never replay the video here.
+     */
+    fun onNativeCompletion(candidate: Any?) {
+        if (!enabled || candidate == null || videoEngine.get() !== candidate) return
+        episodeMonitor.onNativeCompletion()
+        LogUtil.info("系统媒体: 宿主原生 onCompletion 已执行" +
+            " background=$requestedBackgroundPlayback")
+        FeatureTrace.event("background", "native_completion", "observed",
+            "sameEngine=true", flow = mediaFlow)
+    }
 
     private val timelineTicker = object : Runnable {
         override fun run() {
             progressPolling = false
             if (!enabled || session == null) return
             readCurrentTimeline()
+            val stuck = episodeMonitor.onSample(positionMs, durationMs,
+                backgroundActive = requestedBackgroundPlayback,
+                playing = knownPlaying, nowMs = SystemClock.uptimeMillis())
+            if (stuck != null) {
+                LogUtil.warn("系统媒体: 后台播放到结尾但宿主未切下一集" +
+                    " reason=$stuck durationMs=$durationMs")
+                LogUtil.incr("systemMediaEpisodeEndStall")
+                FeatureTrace.event("background", "episode_end_stall", "fail",
+                    "reason=" + stuck + ",nativeDuration=true", flow = mediaFlow)
+            }
             captureNativePlayEntity("periodic")
             updateSessionMetadata()
             updateSessionState(knownPlaying)
@@ -518,6 +541,7 @@ internal object SystemMediaBridge {
      * to the exact same series ID. A missing/unknown ID is not evidence.
      */
     private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
+        episodeMonitor.reset()
         mediaFlow = FeatureTrace.newFlow("media", reason)
         FeatureTrace.event("playback", "video_transition", "started",
             "sameSeries=" + sameSeries, flow = mediaFlow)
@@ -725,6 +749,7 @@ internal object SystemMediaBridge {
         } catch (_: Throwable) { null }
         if (videoId != null && currentEngineVideoIdentity != null &&
             videoId != currentEngineVideoIdentity) {
+            episodeMonitor.reset()
             // A reused TTVideoEngine can switch to the next episode or drama
             // without replacing the engine instance.
             FullSeriesMediaInfo.beginEngineTransition(
@@ -1408,6 +1433,7 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         earlyHandoffEngine.clear()
         earlyHandoffSuppressed = 0
+        episodeMonitor.reset()
         if (backgroundPauseGuardEngine.get() != null) {
             backgroundPauseGuardEngine.clear()
             backgroundPauseGuardUntil = 0L
@@ -1761,6 +1787,7 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         earlyHandoffEngine.clear()
         earlyHandoffSuppressed = 0
+        episodeMonitor.reset()
         pendingExit = null
         backgroundResumeBudget = 0
         backgroundPauseGuardEngine.clear()
