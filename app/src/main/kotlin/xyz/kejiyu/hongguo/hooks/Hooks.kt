@@ -5912,6 +5912,93 @@ object Hooks {
                 e.javaClass.simpleName)
         }
 
+        // 7.3.5.32's details do NOT necessarily pass through Gson.fromJson
+        // or public setters: the RPC adapters assemble DTOs and pass completed
+        // instances to their consumers. Bind BY ARGUMENT/RETURN TYPE, never
+        // by obfuscated method names. Stable consuming classes are validated
+        // against the supplied APK; missing classes simply skip independently.
+        try {
+            val detailType = Class.forName(
+                "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDetailModel",
+                false, classLoader)
+            val videoType = Class.forName(
+                "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData",
+                false, classLoader)
+            val nativeConsumers = listOf(
+                "com.dragon.read.component.shortvideo.impl.v2.data.SingleSeriesDataCenter",
+                "com.dragon.read.component.shortvideo.impl.v2.data.LikeDataCenter",
+                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                "com.dragon.read.component.shortvideo.impl.seriesdetail.BaseSeriesDetailFragment",
+                "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailFragment",
+                "com.dragon.read.component.shortvideo.impl.rightview.ShortSeriesRightView",
+                "com.dragon.read.component.shortvideo.impl.infoheader.ShortSeriesInfoHeaderView",
+                "com.dragon.read.component.shortvideo.impl.NsShortVideoImpl",
+                "com.dragon.read.component.shortvideo.data.VideoDetailModelWrapper",
+                "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDataWrapper",
+                "com.dragon.read.component.shortvideo.impl.videotabranklist.VideoFeedRankListModel",
+            )
+            var detailBindings = 0
+            var videoBindings = 0
+            for ((classIndex, className) in nativeConsumers.withIndex()) {
+                val owner = try { Class.forName(className, false, classLoader) }
+                    catch (_: Throwable) { continue }
+                val members = owner.declaredMethods.toList() +
+                    owner.declaredConstructors.toList()
+                members.forEachIndexed { index, member ->
+                    val params = when (member) {
+                        is java.lang.reflect.Method -> member.parameterTypes
+                        is java.lang.reflect.Constructor<*> -> member.parameterTypes
+                        else -> emptyArray()
+                    }
+                    val returnsDetail = member is java.lang.reflect.Method &&
+                        member.returnType == detailType
+                    val returnsVideo = member is java.lang.reflect.Method &&
+                        member.returnType == videoType
+                    val consumesDetail = params.any { it == detailType }
+                    val consumesVideo = params.any { it == videoType }
+                    if (!returnsDetail && !returnsVideo &&
+                        !consumesDetail && !consumesVideo) return@forEachIndexed
+                    try {
+                        module.hook(member)
+                            .setId("xhNativeSeriesTyped_${classIndex}_${index}")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val result = chain.proceed()
+                                if (gMasterOn && gSystemMediaOn) {
+                                    try {
+                                        if (consumesDetail || consumesVideo) {
+                                            for (i in params.indices) {
+                                                val arg = chain.getArg(i)
+                                                if (params[i] == detailType)
+                                                    FullSeriesMediaInfo.observeDetailModel(arg)
+                                                if (params[i] == videoType)
+                                                    FullSeriesMediaInfo.observeVideoData(arg)
+                                            }
+                                        }
+                                        if (returnsDetail)
+                                            FullSeriesMediaInfo.observeDetailModel(result)
+                                        if (returnsVideo)
+                                            FullSeriesMediaInfo.observeVideoData(result)
+                                    } catch (e: Throwable) {
+                                        LogUtil.warn("系统媒体: 原生业务 DTO 采集异常 " +
+                                            e.javaClass.simpleName)
+                                    }
+                                }
+                                result
+                            })
+                        if (consumesDetail || returnsDetail) detailBindings++
+                        if (consumesVideo || returnsVideo) videoBindings++
+                    } catch (_: Throwable) { }
+                }
+            }
+            LogUtil.info("  ✓ system media typed series consumers" +
+                " detail=$detailBindings video=$videoBindings" +
+                " runtimeMethodNames=discovered")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media typed series consumers unavailable: " +
+                e.javaClass.simpleName + ": " + e.message)
+        }
+
         // Capture the original VideoShop PlayEntity model rather than
         // guessing title/episode from currently visible recommendations.
         // The PlayEntity APIs are present in the user's 7.3.5.32 APK.
