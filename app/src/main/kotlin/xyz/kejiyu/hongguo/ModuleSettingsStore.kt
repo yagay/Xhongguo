@@ -19,7 +19,13 @@ object ModuleSettingsStore {
         "restore_controls_pause", "vip_unlock", "vip_icon", "max_quality",
         "default_speed", "double_tap_comment", "oled_protect",
         "notification_menu", "download_limit_unlimit", "video_longpress_settings",
-        "disable_shopping_mall", "in_app_mini_player", "system_media_playback"
+        "disable_shopping_mall", "in_app_mini_player", "system_media_playback",
+        // All nine My-page entries are hidden by default. Each can be
+        // restored independently in either module settings surface.
+        "mine_hide_welfare", "mine_hide_orders", "mine_hide_messages",
+        "mine_hide_games", "mine_hide_following",
+        "mine_hide_wallet", "mine_hide_membership", "mine_hide_game_center",
+        "mine_hide_creator_center"
     )
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(
