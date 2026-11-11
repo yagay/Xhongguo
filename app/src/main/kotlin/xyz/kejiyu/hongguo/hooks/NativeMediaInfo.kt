@@ -53,14 +53,14 @@ internal object NativeMediaInfo {
             !it.contains("https://") }
     }
 
-    private fun title(value: String?): String? {
+    private fun parseTitle(value: String?): String? {
         val t = clean(value) ?: return null
         if (t.length !in 2..50 || t in forbidden || t.startsWith("第") &&
             t.endsWith("集") || t.contains("隐私") || t.contains("用户协议")) return null
         return t
     }
 
-    private fun episode(value: String?): String? {
+    private fun parseEpisode(value: String?): String? {
         val t = clean(value) ?: return null
         return episodePattern.find(t)?.value?.trim(' ', '·', '•')
     }
@@ -70,17 +70,21 @@ internal object NativeMediaInfo {
         else view.resources.getResourceEntryName(view.id).lowercase()
     } catch (_: Throwable) { null }
 
-    private fun iconBitmap(image: ImageView): Bitmap? = try {
-        val drawable = image.drawable as? BitmapDrawable ?: return null
-        val source = drawable.bitmap ?: return null
-        if (source.width < 72 || source.height < 72) return null
-        val max = 320f
-        if (source.width <= 320 && source.height <= 320) return source
-        val scale = minOf(max / source.width, max / source.height)
-        Bitmap.createScaledBitmap(source,
-            (source.width * scale).toInt().coerceAtLeast(1),
-            (source.height * scale).toInt().coerceAtLeast(1), true)
-    } catch (_: Throwable) { null }
+    private fun iconBitmap(image: ImageView): Bitmap? {
+        return try {
+            val drawable = image.drawable as? BitmapDrawable ?: return null
+            val source = drawable.bitmap ?: return null
+            if (source.width < 72 || source.height < 72) return null
+            val max = 320f
+            if (source.width <= 320 && source.height <= 320) source
+            else {
+                val scale = minOf(max / source.width, max / source.height)
+                Bitmap.createScaledBitmap(source,
+                    (source.width * scale).toInt().coerceAtLeast(1),
+                    (source.height * scale).toInt().coerceAtLeast(1), true)
+            }
+        } catch (_: Throwable) { null }
+    }
 
     fun read(activity: Activity?): Info {
         if (activity == null || activity.isFinishing || !activity.javaClass.name
@@ -95,7 +99,7 @@ internal object NativeMediaInfo {
         for (key in titleKeys) {
             val candidate = try { activity.intent?.getStringExtra(key) }
                 catch (_: Throwable) { null }
-            title = title(candidate)
+            title = parseTitle(candidate)
             if (title != null) break
         }
         val decor = try { activity.window?.decorView } catch (_: Throwable) { null }
@@ -113,13 +117,13 @@ internal object NativeMediaInfo {
                         val text = view.text?.toString()
                         if (title == null && id != null &&
                             titleIdKeys.any { id.contains(it) }) {
-                            title = title(text)
+                            title = parseTitle(text)
                         }
                         if (episode == null) {
-                            val matched = episode(text)
+                            val matched = parseEpisode(text)
                             if (matched != null && (id == null ||
                                 episodeIdKeys.any { id.contains(it) } ||
-                                text?.trim()?.length ?: 100 < 28)) episode = matched
+                                (text?.trim()?.length ?: 100) < 28)) episode = matched
                         }
                     }
                     is ImageView -> if (artwork == null && id != null &&
