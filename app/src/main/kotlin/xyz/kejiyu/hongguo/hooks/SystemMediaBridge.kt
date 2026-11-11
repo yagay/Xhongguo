@@ -409,29 +409,15 @@ internal object SystemMediaBridge {
     private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
-        // The transitional subtitle also belongs to the publication key:
-        // otherwise resolving a title without a new episode can be skipped.
-        val signature = mediaPresentation.title(seriesTitle) + "|" +
-            mediaPresentation.subtitle(episodeTitle, knownPlaying) +
-            "|" + durationMs
+        val snapshot = MediaCardSnapshot(
+            mediaPresentation.title(seriesTitle),
+            mediaPresentation.subtitle(episodeTitle, knownPlaying),
+            durationMs, artwork)
+        val signature = snapshot.signature
         if (!force && signature == lastMetadataSignature &&
             artwork === lastMetadataArt) return
         try {
-            val title = mediaPresentation.title(seriesTitle)
-            val subtitle = mediaPresentation.subtitle(episodeTitle, knownPlaying)
-            val builder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, "红果短剧")
-            if (durationMs > 0) builder.putLong(
-                MediaMetadata.METADATA_KEY_DURATION, durationMs)
-            if (artwork != null && !artwork.isRecycled) {
-                builder.putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
-                builder.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
-            }
-            media.setMetadata(builder.build())
+            media.setMetadata(snapshot.toPlatformMetadata())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
             if (!force && (seriesTitle != null ||
