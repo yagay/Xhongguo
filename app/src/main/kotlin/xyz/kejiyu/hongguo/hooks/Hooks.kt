@@ -5624,7 +5624,7 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
-                                SystemMediaBridge.shouldSuppressFeedEnginePause(chain.thisObject)) {
+                                SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
                                 return@Hooker null
                             }
                             val result = chain.proceed()
