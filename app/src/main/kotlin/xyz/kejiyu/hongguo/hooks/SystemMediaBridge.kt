@@ -163,6 +163,25 @@ internal object SystemMediaBridge {
         }
     }
 
+    private fun updateSessionMetadataDirect(media: MediaSession) {
+        // Called before assigning session = media.
+        try {
+            val builder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, seriesTitle ?: "红果短剧")
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, seriesTitle ?: "红果短剧")
+                .putString(MediaMetadata.METADATA_KEY_ARTIST,
+                    episodeTitle ?: "正在播放的视频")
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE,
+                    episodeTitle ?: "正在播放的视频")
+            if (durationMs > 0L) builder.putLong(
+                MediaMetadata.METADATA_KEY_DURATION, durationMs)
+            media.setMetadata(builder.build())
+            lastMetadataSignature = null // Let the next snapshot fill artwork.
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 初始媒体信息发布失败: " + e.message)
+        }
+    }
+
     private fun updateSessionMetadata() {
         val media = session ?: return
         val artwork = coverArt
@@ -315,6 +334,19 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null) return
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
         if (action == "play") {
+            if (videoEngine.get() !== candidate) {
+                durationMs = -1L
+                positionMs = -1L
+                bufferedMs = -1L
+                actualPlaybackSpeed = 1f
+                seriesTitle = null
+                episodeTitle = null
+                coverArt = null
+                lastMetadataSignature = null
+                lastMetadataArt = null
+                lastProgressDiagnosticAt = 0L
+                LogUtil.info("系统媒体: 发现新的原生播放器实例，清空旧剧集进度")
+            }
             videoEngine = WeakReference(candidate)
             lastNativeEngineAt = SystemClock.uptimeMillis()
         } else if (videoEngine.get() !== candidate) {
@@ -331,6 +363,13 @@ internal object SystemMediaBridge {
         LogUtil.incr("systemMediaNativeEngineCommand")
         if (action == "play") {
             onNativePlayback(true, "TTVideoEngine#play", candidate)
+            readCurrentTimeline()
+            updateSessionMetadata()
+            updateSessionState(true)
+            scheduleTimelinePoll(600L)
+            // The native Activity can still be drawing its title/episode overlay.
+            val act = foregroundActivity.get()
+            handler.postDelayed({ captureVisibleMediaInfo(act) }, 700L)
         } else if (action == "pause" || action == "stop") {
             onNativePlayback(false, "TTVideoEngine#$action", candidate)
         } else if (action.startsWith("release") && videoEngine.get() === candidate) {
@@ -389,6 +428,7 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null) return
         if (activity.packageName != appContext?.packageName) return
         discoverPlayingVideo(activity, "beforeActivityPause")
+        captureVisibleMediaInfo(activity)
         val name = activity.javaClass.simpleName
         LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying")
         handler.postDelayed({
@@ -421,6 +461,8 @@ internal object SystemMediaBridge {
         requestedBackgroundPlayback = true
         leaveAt = SystemClock.uptimeMillis()
         resumeAttempts = 0
+        captureVisibleMediaInfo(activity)
+        readCurrentTimeline()
         setNativeBackgroundAllowance(true)
         updateMediaNotification(true)
         LogUtil.info("系统媒体: $reason 后台媒体已激活，native=" +
@@ -517,11 +559,15 @@ internal object SystemMediaBridge {
         val stateChanged = knownPlaying != playing
         knownPlaying = playing
         if (playing) {
+            scheduleTimelinePoll(900L)
             resumeAttempts = 0
             requestedBackgroundPlayback = requestedBackgroundPlayback &&
                 SystemClock.uptimeMillis() - leaveAt < 30_000L
             if (stateChanged || !reportedCard) updateMediaNotification(true)
         } else {
+            readCurrentTimeline()
+            updateSessionMetadata()
+            updateSessionState(false)
             lastPauseAt = SystemClock.uptimeMillis()
             if (requestedBackgroundPlayback && resumeAttempts < 2 &&
                 lastPauseAt - leaveAt < 4000L && !userCommandInProgress) {
@@ -556,6 +602,12 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        for (delay in longArrayOf(650L, 2100L)) {
+            handler.postDelayed({
+                if (enabled && foregroundActivity.get() === activity && !activity.isFinishing)
+                    captureVisibleMediaInfo(activity)
+            }, delay)
+        }
         // A running TTVideoEngine/VideoContext can start before the Activity
         // reaches onResume; inspect again after its UI and video surface attach.
         for (delay in longArrayOf(500L, 1700L, 3800L)) {
@@ -639,6 +691,9 @@ internal object SystemMediaBridge {
                 override fun onStop() {
                     handler.post { requestTransport(false, "system-stop") }
                 }
+                override fun onSeekTo(pos: Long) {
+                    handler.post { requestSeek(pos, "system-seek") }
+                }
             }, handler)
             launchIntent(ctx)?.let { intent ->
                 media.setSessionActivity(
@@ -646,10 +701,7 @@ internal object SystemMediaBridge {
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 )
             }
-            media.setMetadata(MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, "红果短剧")
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, "正在播放的视频")
-                .build())
+            updateSessionMetadataDirect(media)
             media.setActive(true)
             session = media
             installActionReceiver(ctx)
@@ -756,16 +808,22 @@ internal object SystemMediaBridge {
     private fun updateSessionState(playing: Boolean) {
         val media = session ?: return
         try {
-            val state = PlaybackState.Builder()
-                .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
-                    PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP)
+            val canSeek = durationMs > 0L && positionMs >= 0L &&
+                videoEngine.get() != null
+            var actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP
+            if (canSeek) actions = actions or PlaybackState.ACTION_SEEK_TO
+            val builder = PlaybackState.Builder()
+                .setActions(actions)
                 .setState(
                     if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
-                    if (playing) 1f else 0f,
-                    SystemClock.elapsedRealtime(),
-                ).build()
-            media.setPlaybackState(state)
+                    if (positionMs >= 0L) positionMs
+                        else PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                    if (playing) actualPlaybackSpeed else 0f,
+                    SystemClock.elapsedRealtime()
+                )
+            if (bufferedMs >= 0L) builder.setBufferedPosition(bufferedMs)
+            media.setPlaybackState(builder.build())
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: PlaybackState 更新失败: " + e.message)
         }
@@ -785,9 +843,9 @@ internal object SystemMediaBridge {
                 else android.R.drawable.ic_media_play
             val notification = Notification.Builder(ctx, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("红果短剧")
-                .setContentText(if (playing) "正在播放 · 点击返回红果"
-                    else "已暂停 · 可从系统媒体卡片继续")
+                .setContentTitle(seriesTitle ?: "红果短剧")
+                .setContentText(episodeTitle ?: if (playing)
+                    "正在播放 · 点击返回红果" else "已暂停 · 点击返回红果")
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
                 .setOnlyAlertOnce(true)
@@ -835,6 +893,17 @@ internal object SystemMediaBridge {
             try { appContext?.unregisterReceiver(it) } catch (_: Throwable) {}
         }
         receiver = null
+        handler.removeCallbacks(timelineTicker)
+        progressPolling = false
+        durationMs = -1L
+        positionMs = -1L
+        bufferedMs = -1L
+        actualPlaybackSpeed = 1f
+        seriesTitle = null
+        episodeTitle = null
+        coverArt = null
+        lastMetadataSignature = null
+        lastMetadataArt = null
         controller.clear()
         layer.clear()
         videoContext.clear()
