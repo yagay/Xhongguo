@@ -281,6 +281,8 @@ object Hooks {
         InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn
         gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
         SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
+        if (!gMasterOn || (!gMiniPlayerOn && !gSystemMediaOn))
+            SinglePlaybackOwner.reset()
         gPlayerOn = prefs.getBoolean("player_bar", false)
         gAdOn = prefs.getBoolean("ad_block", false)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
@@ -3887,6 +3889,11 @@ object Hooks {
                     act, "下载限制更新可能需要强停红果后生效", Toast.LENGTH_SHORT
                 ).show()
             }
+        }
+        if (key in setOf("master_on", "system_media_playback",
+                "in_app_mini_player") &&
+            (!gMasterOn || (!gMiniPlayerOn && !gSystemMediaOn))) {
+            SinglePlaybackOwner.reset()
         }
         if (key == "master_on" || key.startsWith("mine_hide_")) {
             gPrefs?.let { MinePageCleaner.configure(it, gMasterOn) }
