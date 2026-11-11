@@ -1117,6 +1117,31 @@ internal object SystemMediaBridge {
         LogUtil.incr("systemMediaBackgroundConfirmed")
         captureVisibleMediaInfo(activity)
         readCurrentTimeline()
+        val lifecyclePaused = lastLifecyclePauseEngine.get() === engine &&
+            lastLifecyclePauseWasPlaying &&
+            now - lastLifecyclePauseAt in 0L..EXIT_SNAPSHOT_WINDOW_MS &&
+            snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch
+        val hostHeld = BackgroundHandoffPolicy.shouldTreatUnknownNativeStateAsRunning(
+            confirmedBackground = true,
+            heldNativePauseOrLifecycle = earlyHandoffEngine.get() === engine &&
+                earlyHandoffSuppressed > 0,
+            sameEngine = videoEngine.get() === engine,
+            explicitPauseUnchanged =
+                snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch,
+            hasVerifiedNativePause = lifecyclePaused)
+        if (current == null && hostHeld) {
+            // Native isPlaying() is missing for this TTVideoEngine build.
+            // If the real original engine was not paused, do NOT call the
+            // low-level play() again: that path leaves the host's autoplay
+            // controller behind and stalls forever on the last video frame.
+            LogUtil.info("系统媒体: 宿主播放器完整保活，不重复低层 play()" +
+                " heldEvents=" + earlyHandoffSuppressed)
+            FeatureTrace.event("background", "native_lifecycle_handoff",
+                "preserved", "engine=true,playReplay=false", flow = mediaFlow)
+            updateMediaNotification(true)
+            scheduleTimelinePoll(400L)
+            return
+        }
         if (current == true) {
             // A successful Home-key-like transition: keep the engine alive.
             updateMediaNotification(true)
@@ -1128,10 +1153,6 @@ internal object SystemMediaBridge {
         // The engine's intercepted pause event is definitive evidence
         // that the exact snapshot engine was stopped by Activity lifecycle.
         // Recover once ONLY for that verified pause, not generic unknown.
-        val lifecyclePaused = lastLifecyclePauseEngine.get() === engine &&
-            lastLifecyclePauseWasPlaying &&
-            now - lastLifecyclePauseAt in 0L..EXIT_SNAPSHOT_WINDOW_MS &&
-            snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch
         if (current == null && !lifecyclePaused) {
             LogUtil.warn("系统媒体: 引擎状态未知且无同引擎生命周期暂停证据，取消恢复")
             LogUtil.incr("systemMediaBackgroundStateUnknown")
