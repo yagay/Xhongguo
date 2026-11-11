@@ -71,7 +71,7 @@ internal object SystemMediaBridge {
      * user-requested media-session pause, foreground pause or preloading.
      */
     fun shouldSuppressFeedEnginePause(candidate: Any?): Boolean {
-        if (!enabled || candidate == null || userCommandInProgress ||
+        if (!enabled || candidate == null ||
             !requestedBackgroundPlayback || !knownPlaying ||
             feedPauseGuardEngine.get() !== candidate ||
             videoEngine.get() !== candidate ||
@@ -87,6 +87,8 @@ internal object SystemMediaBridge {
     private var lastVisibleInfoAt = 0L
     private var lastVisibleInfoIdentity = ""
     private var lastVisibleInfoSource = ""
+    private var currentEngineVideoIdentity: String? = null
+    private var lastNativeMetaProbeAt = 0L
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
     private var lastNativeEventAt = 0L
@@ -131,6 +133,7 @@ internal object SystemMediaBridge {
             progressPolling = false
             if (!enabled || session == null) return
             readCurrentTimeline()
+            captureNativePlayEntity("periodic")
             updateSessionMetadata()
             updateSessionState(knownPlaying)
             val activeActivity = foregroundActivity.get()
@@ -250,6 +253,54 @@ internal object SystemMediaBridge {
             LogUtil.incr("systemMediaMetadataUpdate")
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 更新媒体信息失败: " + e.message)
+        }
+    }
+
+    /**
+     * Capture the live VideoShop PlayEntity, matched to the TTVideoEngine by
+     * getVideoID() or exact engine identity. Unlike UI text heuristics, this
+     * cannot accidentally read a recommendation for another video.
+     */
+    private fun captureNativePlayEntity(reason: String) {
+        if (!enabled) return
+        val engine = videoEngine.get() ?: return
+        val now = SystemClock.uptimeMillis()
+        if (reason == "periodic" && now - lastNativeMetaProbeAt < 4000L) return
+        lastNativeMetaProbeAt = now
+
+        val videoId = try {
+            engine.javaClass.getMethod("getVideoID").invoke(engine)?.toString()
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) { null }
+        if (videoId != null && currentEngineVideoIdentity != null &&
+            videoId != currentEngineVideoIdentity) {
+            seriesTitle = null
+            episodeTitle = null
+            coverArt = null
+            durationMs = -1L
+            positionMs = -1L
+            bufferedMs = -1L
+            lastMetadataSignature = null
+            LogUtil.info("系统媒体: 同一引擎切换视频ID，清空旧剧名与集数")
+        }
+        if (videoId != null) currentEngineVideoIdentity = videoId
+        val info = NativePlayEntityInfo.readForEngine(
+            engine, videoContext.get(), controller.get(), layer.get())
+        var changed = false
+        if (info.title != null && info.title != seriesTitle) {
+            seriesTitle = info.title
+            changed = true
+        }
+        if (info.episode != null && info.episode != episodeTitle) {
+            episodeTitle = info.episode
+            changed = true
+        }
+        if (changed) {
+            LogUtil.info("系统媒体: 原生 PlayEntity 媒体信息已绑定 reason=$reason" +
+                " title=" + (info.title != null) +
+                " episode=" + (info.episode != null))
+            updateSessionMetadata()
+            if (reportedCard) updateMediaNotification(knownPlaying)
         }
     }
 
@@ -399,6 +450,8 @@ internal object SystemMediaBridge {
                 lastVisibleInfoAt = 0L
                 lastVisibleInfoIdentity = ""
                 lastVisibleInfoSource = ""
+                currentEngineVideoIdentity = null
+                lastNativeMetaProbeAt = 0L
                 if (feedPauseGuardEngine.get() !== candidate) {
                     feedPauseGuardEngine.clear()
                     feedPauseGuardUntil = 0L
@@ -430,6 +483,7 @@ internal object SystemMediaBridge {
         if (action == "play") {
             lastHomePauseWasPlaying = false
             onNativePlayback(true, "TTVideoEngine#play", candidate)
+            captureNativePlayEntity("engine-play")
             readCurrentTimeline()
             updateSessionMetadata()
             updateSessionState(true)
@@ -477,11 +531,22 @@ internal object SystemMediaBridge {
         }
         if (candidate != null) {
             rememberVideoContext(candidate)
+            val playEntity = try {
+                candidate.javaClass.getMethod("getPlayEntity").invoke(candidate)
+            } catch (_: Throwable) { null }
+            NativePlayEntityInfo.remember(playEntity)
             val playing = nativeIsPlaying(candidate)
             val boundLayer = try {
                 candidate.javaClass.getMethod("getLayerHostMediaLayout").invoke(candidate)
             } catch (_: Throwable) { null }
-            if (boundLayer != null) rememberLayer(boundLayer)
+            if (boundLayer != null) {
+                rememberLayer(boundLayer)
+                val boundEntity = try {
+                    boundLayer.javaClass.getMethod("getBindPlayEntity").invoke(boundLayer)
+                } catch (_: Throwable) { null }
+                NativePlayEntityInfo.remember(boundEntity)
+            }
+            captureNativePlayEntity("context-discovery")
             LogUtil.info("系统媒体: 播放器快照 $reason context=" +
                 candidate.javaClass.simpleName + " isPlaying=" +
                 (playing?.toString() ?: "unknown") + " layer=" +
@@ -1044,6 +1109,8 @@ internal object SystemMediaBridge {
         lastVisibleInfoAt = 0L
         lastVisibleInfoIdentity = ""
         lastVisibleInfoSource = ""
+        currentEngineVideoIdentity = null
+        lastNativeMetaProbeAt = 0L
         controller.clear()
         layer.clear()
         videoContext.clear()
