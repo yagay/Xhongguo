@@ -88,6 +88,9 @@ object LogUtil {
     @Synchronized
     fun incr(key: String) {
         counters[key] = (counters[key] ?: 0) + 1
+        // Existing counters now double as structured, rate-limited evidence
+        // for each feature; generic per-frame counters are ignored.
+        FeatureTrace.counter(key)
     }
 
     @Synchronized
