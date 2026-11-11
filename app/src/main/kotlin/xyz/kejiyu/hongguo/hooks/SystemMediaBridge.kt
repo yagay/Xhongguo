@@ -140,7 +140,8 @@ internal object SystemMediaBridge {
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
         if (!enabled || candidate == null || userCommandInProgress ||
-            !requestedBackgroundPlayback || !knownPlaying ||
+            SinglePlaybackOwner.isOwnershipTransition() ||
+            !requestedBackgroundPlayback ||
             backgroundPauseGuardEngine.get() !== candidate ||
             videoEngine.get() !== candidate ||
             SystemClock.uptimeMillis() > backgroundPauseGuardUntil) return false
@@ -931,13 +932,21 @@ internal object SystemMediaBridge {
             return
         }
         val noWindowFocus = !activity.hasWindowFocus()
+        val elapsed = SystemClock.uptimeMillis() - snapshot.at
+        // A native full-series Activity may pause/stop before the next
+        // in-app Activity reaches onResume. Wait for the task animation to
+        // finish before accepting onStop alone as proof of app background.
+        val stoppedBackground = snapshot.stopped && noWindowFocus &&
+            elapsed >= 1050L &&
+            state.importance >=
+                ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND_SERVICE
         val isBackground =
             state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE ||
-                (snapshot.stopped && noWindowFocus)
+                stoppedBackground
         LogUtil.info("系统媒体: 多路径后台检测 source=$source" +
             " importance=" + state.importance +
             " stopped=" + snapshot.stopped +
-            " focused=" + !noWindowFocus +
+            " elapsed=$elapsed focused=" + !noWindowFocus +
             " confirmed=$isBackground")
         if (!isBackground) return
         pendingExit = null  // Exactly one resolution, even if multiple callbacks fire.
