@@ -675,6 +675,10 @@ internal object SystemMediaBridge {
         } catch (_: Throwable) { null }
         if (videoId != null && currentEngineVideoIdentity != null &&
             videoId != currentEngineVideoIdentity) {
+            // A reused TTVideoEngine can switch to the next episode or drama
+            // without replacing the engine instance.
+            FullSeriesMediaInfo.beginEngineTransition(
+                activity, engine, currentSeriesIdentity)
             val incoming = when (activity?.javaClass?.name) {
                 "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ->
                     FullSeriesMediaInfo.read(activity, engine)
