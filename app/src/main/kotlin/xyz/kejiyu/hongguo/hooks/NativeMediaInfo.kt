@@ -155,11 +155,15 @@ internal object NativeMediaInfo {
         var total: String? = null
         var artwork: Bitmap? = null
         var source = "none"
-        for (key in titleKeys) {
-            val raw = try { activity.intent?.getStringExtra(key) }
-                catch (_: Throwable) { null }
-            title = parseTitle(raw)
-            if (title != null) { source = "intent"; break }
+        // The home feed updates in-place as the user swipes. Its Activity
+        // launch Intent is NOT a trustworthy identity for the current video.
+        if (isSeries) {
+            for (key in titleKeys) {
+                val raw = try { activity.intent?.getStringExtra(key) }
+                    catch (_: Throwable) { null }
+                title = parseTitle(raw)
+                if (title != null) { source = "intent"; break }
+            }
         }
 
         val root = try { activity.window?.decorView } catch (_: Throwable) { null }
