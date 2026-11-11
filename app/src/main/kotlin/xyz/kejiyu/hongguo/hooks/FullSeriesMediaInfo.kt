@@ -484,12 +484,13 @@ internal object FullSeriesMediaInfo {
      * empty inherited fields of its base SaasVideoDetailModel. */
     private fun detailField(model: Any?, name: String): Any? {
         val direct = field(model, name)
-        if (direct != null) return direct
-        if (model == null || !isDetailModel(model)) return null
+        if (model == null || !isDetailModel(model)) return direct
+        // Wrapper's semantic delegated value takes priority over the inherited
+        // base field, which may be unset or initialized to a placeholder.
         val delegate = field(model, "_" + name + '$' + "delegate")
-            ?: return null
-        val props = field(model, "" + '$' + '$' + "delegatedProperties")
-            as? Array<*> ?: return null
+            ?: return direct
+        val props = (field(model, "" + '$' + '$' + "delegatedProperties")
+            as? Array<*>) ?: return direct
         val prop = props.firstOrNull { p ->
             try {
                 val n = p?.javaClass?.methods?.firstOrNull {
@@ -497,15 +498,15 @@ internal object FullSeriesMediaInfo {
                 }?.invoke(p)?.toString()
                 n == "_" + name || n == name
             } catch (_: Throwable) { false }
-        } ?: return null
+        } ?: return direct
         return try {
             val getter = delegate.javaClass.declaredMethods.firstOrNull {
                 it.name == "a" && it.parameterCount == 1 &&
                     it.parameterTypes[0].name == "kotlin.reflect.KProperty"
-            } ?: return null
+            } ?: return direct
             getter.isAccessible = true
-            getter.invoke(delegate, prop)
-        } catch (_: Throwable) { null }
+            getter.invoke(delegate, prop) ?: direct
+        } catch (_: Throwable) { direct }
     }
 
     private fun field(receiver: Any?, name: String): Any? {
