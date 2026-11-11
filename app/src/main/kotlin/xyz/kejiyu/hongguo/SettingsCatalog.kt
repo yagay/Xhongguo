@@ -107,8 +107,10 @@ object SettingsCatalog {
                 Item("通知栏快捷菜单", "启用模块开关和面板快捷操作",
                     "notification_menu")
             )),
-        Group("diagnostics", "▤", "诊断与日志", "导出诊断 ZIP 用于排查问题",
+        Group("diagnostics", "▤", "诊断与日志", "按功能记录事件、故障和运行状态",
             listOf(
+                Item("详细诊断日志", "默认记录关键事件；开启后更频繁汇总功能触发次数",
+                    "diagnostic_verbose"),
                 Item("导出诊断日志 ZIP", "包含 Hook、Root 与进程运行信息",
                     "export_diagnostics", kind = Kind.DIAGNOSTICS)
             ))
