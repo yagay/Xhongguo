@@ -144,6 +144,49 @@ internal object SystemMediaBridge {
     private var backgroundPauseGuardEngine = WeakReference<Any>(null)
     private var backgroundPauseGuardUntil = 0L
     private var backgroundPauseSuppressed = 0
+    private var earlyHandoffEngine = WeakReference<Any>(null)
+    private var earlyHandoffSuppressed = 0
+    private var leaveExplicitPauseEpoch = 0L
+
+    /** Protect only the exact engine captured at a genuine user-leave hint.
+     * The host can otherwise release its completion dispatcher before
+     * Activity.onStop confirms that another app is foreground.
+     */
+    private fun shouldHoldOriginalOnLeave(candidateEngine: Any?): Boolean {
+        val owner = videoEngine.get()
+        val sameEngine = candidateEngine != null && owner === candidateEngine &&
+            lastUserLeaveEngine.get() === candidateEngine &&
+            pendingExit?.engine?.get() === candidateEngine
+        val hold = BackgroundHandoffPolicy.protectOnUserLeave(
+            mediaEnabled = enabled,
+            wasPlaying = lastUserLeaveWasPlaying,
+            userPauseInProgress = userCommandInProgress ||
+                explicitPauseEpoch != leaveExplicitPauseEpoch,
+            ownershipTransition = SinglePlaybackOwner.isOwnershipTransition(),
+            samePinnedEngine = sameEngine,
+            sameVideoActivity = isVideoActivity(foregroundActivity.get()),
+            elapsedMs = SystemClock.uptimeMillis() - lastUserLeaveAt)
+        if (hold) {
+            earlyHandoffEngine = WeakReference(owner)
+            earlyHandoffSuppressed++
+        }
+        return hold
+    }
+
+    /** Keep VideoShop's completion/next-item dispatcher alive only for the
+     * verified original page when the user explicitly leaves the app.
+     */
+    fun shouldHoldHostVideoLifecycle(candidate: Any?, method: String): Boolean {
+        if (candidate == null || candidate !== videoContext.get() ||
+            method !in setOf("onLifeCycleOnPause", "onLifeCycleOnStop")) return false
+        if (!shouldHoldOriginalOnLeave(videoEngine.get())) return false
+        LogUtil.info("系统媒体: 保留宿主播放生命周期 method=$method" +
+            " sameEngine=true reason=user-leave")
+        LogUtil.incr("systemMediaHostLifecycleHeld")
+        FeatureTrace.event("background", "host_lifecycle", "held",
+            "method=" + method, flow = mediaFlow)
+        return true
+    }
 
     /** Explicit notification/media-control pause must never be swallowed by
      * the in-app mini player's short navigation guard. */
@@ -154,6 +197,13 @@ internal object SystemMediaBridge {
      * suppress user-requested pause, foreground pause or a preload engine.
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
+        if (shouldHoldOriginalOnLeave(candidate)) {
+            LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
+            LogUtil.incr("systemMediaEarlyEnginePauseHeld")
+            FeatureTrace.event("background", "engine_pause", "held",
+                "reason=user-leave", flow = mediaFlow, minIntervalMs = 1000L)
+            return true
+        }
         if (!enabled || candidate == null || userCommandInProgress ||
             SinglePlaybackOwner.isOwnershipTransition() ||
             !requestedBackgroundPlayback ||
@@ -1316,6 +1366,9 @@ internal object SystemMediaBridge {
         // A hint is useful evidence, but not required for recents/app switches.
         // Real background confirmation happens after onPause / onStop.
         lastUserLeaveAt = SystemClock.uptimeMillis()
+        leaveExplicitPauseEpoch = explicitPauseEpoch
+        earlyHandoffSuppressed = 0
+        earlyHandoffEngine.clear()
         lastUserLeaveWasPlaying = true
         lastUserLeaveEngine = WeakReference(videoEngine.get())
         rememberExitSnapshot(activity, "onUserLeaveHint")
@@ -1332,6 +1385,8 @@ internal object SystemMediaBridge {
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
+        earlyHandoffEngine.clear()
+        earlyHandoffSuppressed = 0
         if (backgroundPauseGuardEngine.get() != null) {
             backgroundPauseGuardEngine.clear()
             backgroundPauseGuardUntil = 0L
@@ -1370,12 +1425,18 @@ internal object SystemMediaBridge {
      * pause is never blocked, nor is regular foreground/user pause.
      */
     fun shouldSuppressLifecyclePause(candidate: Any?): Boolean {
+        val active = controller.get()
+        val context = videoContext.get()
+        if (candidate != null && (candidate === active || candidate === context) &&
+            shouldHoldOriginalOnLeave(videoEngine.get())) {
+            LogUtil.info("系统媒体: 离开红果前保留原生 VideoShop.pause")
+            LogUtil.incr("systemMediaEarlyVideoShopPauseHeld")
+            return true
+        }
         if (!enabled || candidate == null || userCommandInProgress ||
             !requestedBackgroundPlayback || !knownPlaying) return false
         val now = SystemClock.uptimeMillis()
         if (now - leaveAt !in 0L..BACKGROUND_PAUSE_GUARD_MS) return false
-        val active = controller.get()
-        val context = videoContext.get()
         if (candidate !== active && candidate !== context) return false
         LogUtil.info("系统媒体: 忽略后台切换引发的 " +
             candidate.javaClass.simpleName + ".pause")
@@ -1677,6 +1738,8 @@ internal object SystemMediaBridge {
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
+        earlyHandoffEngine.clear()
+        earlyHandoffSuppressed = 0
         pendingExit = null
         backgroundResumeBudget = 0
         backgroundPauseGuardEngine.clear()
