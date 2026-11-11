@@ -98,7 +98,7 @@ internal object FullSeriesMediaInfo {
         for (key in listOf("episodesList", "playerSerialVideoList",
             "episodesListWithTrail", "episodesListWithTrailAfterCut")) {
             val list = field(detail, key) as? List<*> ?: continue
-            if (list.isEmpty() || list.size > 5000) continue
+            if (list.isEmpty() || list.size > 500) continue
             for ((index, item) in list.withIndex()) {
                 if (vid(item) == engineId) return index.toLong() + 1
             }
@@ -139,12 +139,17 @@ internal object FullSeriesMediaInfo {
             str(field(active, "title")) ?:
             str(field(current.firstOrNull(), "seriesName"))
 
-        val episodeNumber = indexFromList(detail, videoId)
-        val episode = if (episodeNumber != null) {
-            "第" + episodeNumber + "集" +
-                (if (total != null && total >= episodeNumber)
-                    " · 全" + total + "集" else "")
-        } else episodeFromIndex(active, total)
+        // Reading the active SaasVideoData is O(1). Avoid scanning hundreds
+        // of playlist items on every ~1.4s media timeline tick.
+        val fromActive = episodeFromIndex(active, total)
+        val episode = if (fromActive != null) fromActive else {
+            val episodeNumber = indexFromList(detail, videoId)
+            if (episodeNumber != null) {
+                "第" + episodeNumber + "集" +
+                    (if (total != null && total >= episodeNumber)
+                        " · 全" + total + "集" else "")
+            } else null
+        }
 
         val now = SystemClock.uptimeMillis()
         if (now - lastDiagnosticAt > 12000L) {
