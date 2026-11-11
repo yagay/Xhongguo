@@ -49,7 +49,8 @@ object FeatureTrace {
         val step = safe(stage, 48)
         val state = safe(result, 24)
         if (minIntervalMs > 0L) {
-            val key = category + ":" + step + ":" + state
+            val key = category + ":" + step + ":" + state +
+                if (flow > 0L) ":flow=" + flow else ""
             val now = SystemClock.elapsedRealtime()
             // Do not update the timestamp for a suppressed event: otherwise
             // a busy hook could silence diagnostics indefinitely.
