@@ -59,6 +59,31 @@ internal object SystemMediaBridge {
     private var lastHomePauseAt = 0L
     private var lastHomePauseEngine = WeakReference<Any>(null)
     private var lastHomePauseWasPlaying = false
+    // Prevent the 2026-11-11 07:32:50 home playback feedback loop:
+    // every automatic play used to reset resumeAttempts to zero.
+    private var backgroundResumeBudget = 0
+    private var feedPauseGuardEngine = WeakReference<Any>(null)
+    private var feedPauseGuardUntil = 0L
+    private var feedPauseSuppressed = 0
+
+    /** Only suppress repeated lifecycle pause on the SAME current feed engine
+     * after background importance has actually been verified. Never block a
+     * user-requested media-session pause, foreground pause or preloading.
+     */
+    fun shouldSuppressFeedEnginePause(candidate: Any?): Boolean {
+        if (!enabled || candidate == null || userCommandInProgress ||
+            !requestedBackgroundPlayback || !knownPlaying ||
+            feedPauseGuardEngine.get() !== candidate ||
+            videoEngine.get() !== candidate ||
+            SystemClock.uptimeMillis() > feedPauseGuardUntil) return false
+        feedPauseSuppressed++
+        if (feedPauseSuppressed <= 4 || feedPauseSuppressed % 20 == 0) {
+            LogUtil.info("系统媒体: 已保护首页后台播放器 pause #" +
+                feedPauseSuppressed)
+        }
+        LogUtil.incr("systemMediaFeedPauseSuppressed")
+        return true
+    }
     private var lastVisibleInfoAt = 0L
     private var lastVisibleInfoIdentity = ""
     private var lastVisibleInfoSource = ""
@@ -374,6 +399,11 @@ internal object SystemMediaBridge {
                 lastVisibleInfoAt = 0L
                 lastVisibleInfoIdentity = ""
                 lastVisibleInfoSource = ""
+                if (feedPauseGuardEngine.get() !== candidate) {
+                    feedPauseGuardEngine.clear()
+                    feedPauseGuardUntil = 0L
+                    feedPauseSuppressed = 0
+                }
                 LogUtil.info("系统媒体: 发现新的原生播放器实例，清空旧剧集进度")
             }
             videoEngine = WeakReference(candidate)
@@ -501,7 +531,13 @@ internal object SystemMediaBridge {
                     requestedBackgroundPlayback = true
                     leaveAt = SystemClock.uptimeMillis()
                     resumeAttempts = 0
+                    backgroundResumeBudget = 0 // one explicit recovery, no retry
+                    feedPauseGuardEngine = WeakReference(videoEngine.get())
+                    feedPauseGuardUntil = leaveAt + 10L * 60_000L
+                    feedPauseSuppressed = 0
                     setNativeBackgroundAllowance(true)
+                    LogUtil.info("系统媒体: 首页后台只恢复一次，后续生命周期 pause" +
+                        " 将针对当前播放器阻止；用户暂停仍允许")
                     requestTransport(true, "feed-background-recovery")
                     lastHomePauseWasPlaying = false
                 } else {
@@ -532,6 +568,7 @@ internal object SystemMediaBridge {
         requestedBackgroundPlayback = true
         leaveAt = SystemClock.uptimeMillis()
         resumeAttempts = 0
+        backgroundResumeBudget = 1
         captureVisibleMediaInfo(activity)
         readCurrentTimeline()
         setNativeBackgroundAllowance(true)
@@ -631,24 +668,31 @@ internal object SystemMediaBridge {
         knownPlaying = playing
         if (playing) {
             scheduleTimelinePoll(900L)
-            resumeAttempts = 0
-            requestedBackgroundPlayback = requestedBackgroundPlayback &&
-                SystemClock.uptimeMillis() - leaveAt < 30_000L
+            if (!requestedBackgroundPlayback) resumeAttempts = 0
+            // Do not expire background mode after 30 seconds of successful
+            // playback. The callback is the live player, not a new session.
             if (stateChanged || !reportedCard) updateMediaNotification(true)
         } else {
             readCurrentTimeline()
             updateSessionMetadata()
             updateSessionState(false)
             lastPauseAt = SystemClock.uptimeMillis()
-            if (requestedBackgroundPlayback && resumeAttempts < 2 &&
-                lastPauseAt - leaveAt < 4000L && !userCommandInProgress) {
+            if (requestedBackgroundPlayback && backgroundResumeBudget > 0 &&
+                lastPauseAt - leaveAt in 0L..4000L &&
+                !userCommandInProgress && feedPauseGuardEngine.get() == null) {
+                backgroundResumeBudget--
                 resumeAttempts++
-                LogUtil.warn("系统媒体: 检测到切后台暂停; native=$source; 尝试恢复 #$resumeAttempts")
+                LogUtil.warn("系统媒体: 后台暂停，单次恢复尝试 #" + resumeAttempts)
                 handler.postDelayed({
-                    if (enabled && requestedBackgroundPlayback && !knownPlaying) {
+                    if (enabled && requestedBackgroundPlayback && !knownPlaying &&
+                        feedPauseGuardEngine.get() == null) {
                         requestTransport(true, "background-auto-resume")
                     }
-                }, if (resumeAttempts == 1) 180L else 650L)
+                }, 350L)
+            } else if (requestedBackgroundPlayback && !userCommandInProgress &&
+                feedPauseGuardEngine.get() != null) {
+                LogUtil.warn("系统媒体: 首页后台播放器仍被暂停；不进行重复 play 循环")
+                LogUtil.incr("systemMediaFeedPlaybackStopped")
             }
             if (stateChanged || reportedCard) updateMediaNotification(false)
         }
@@ -673,6 +717,13 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        if (feedPauseGuardEngine.get() != null) {
+            feedPauseGuardEngine.clear()
+            feedPauseGuardUntil = 0L
+            feedPauseSuppressed = 0
+            backgroundResumeBudget = 0
+            LogUtil.info("系统媒体: 红果恢复前台，解除首页播放器暂停保护")
+        }
         for (delay in longArrayOf(650L, 2100L)) {
             handler.postDelayed({
                 if (enabled && foregroundActivity.get() === activity && !activity.isFinishing)
@@ -835,6 +886,14 @@ internal object SystemMediaBridge {
         } else {
             listOf("pause", "pauseVideo", "pausePlayback")
         }
+        if (!play && reason.startsWith("system") ||
+            !play && reason == "notification-action") {
+            feedPauseGuardEngine.clear()
+            feedPauseGuardUntil = 0L
+            backgroundResumeBudget = 0
+            requestedBackgroundPlayback = false
+            LogUtil.info("系统媒体: 用户主动暂停，解除首页后台保护")
+        }
         userCommandInProgress = true
         try {
             for (target in targets) {
@@ -977,6 +1036,10 @@ internal object SystemMediaBridge {
         lastMetadataArt = null
         lastHomePauseAt = 0L
         lastHomePauseWasPlaying = false
+        backgroundResumeBudget = 0
+        feedPauseGuardEngine.clear()
+        feedPauseGuardUntil = 0L
+        feedPauseSuppressed = 0
         lastHomePauseEngine.clear()
         lastVisibleInfoAt = 0L
         lastVisibleInfoIdentity = ""
