@@ -5648,6 +5648,65 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
+        // The original series detail is often a transient uo4.y0.x Runnable.
+        // By the time MediaSession polls ShortSeriesActivity, presenter.x.b
+        // may already be null. Snapshot only title/official poster/total when
+        // the host constructs or applies that model; do not retain the model.
+        try {
+            val detailRunner = Class.forName("uo4.y0.x", false, classLoader)
+            var installed = 0
+            detailRunner.declaredConstructors.forEachIndexed { index, ctor ->
+                try {
+                    module.hook(ctor)
+                        .setId("xhSeriesDetailConstruct_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn) {
+                                try {
+                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 全集详情创建捕获异常 " +
+                                        e.javaClass.simpleName)
+                                }
+                            }
+                            result
+                        })
+                    installed++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 全集详情构造 Hook 失败: " + e.message)
+                }
+            }
+            detailRunner.declaredMethods.filter {
+                it.name == "run" && it.parameterCount == 0
+            }.forEachIndexed { index, method ->
+                try {
+                    module.hook(method)
+                        .setId("xhSeriesDetailApplied_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn) {
+                                try {
+                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 全集详情应用捕获异常 " +
+                                        e.javaClass.simpleName)
+                                }
+                            }
+                            result
+                        })
+                    installed++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 全集详情应用 Hook 失败: " + e.message)
+                }
+            }
+            LogUtil.info("  ✓ system media native series-detail observers: $installed")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media series-detail observer unavailable: " +
+                e.javaClass.simpleName + ": " + e.message)
+        }
+
         // Capture the original VideoShop PlayEntity model rather than
         // guessing title/episode from currently visible recommendations.
         // The PlayEntity APIs are present in the user's 7.3.5.32 APK.
