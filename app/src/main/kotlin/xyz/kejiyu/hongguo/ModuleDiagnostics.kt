@@ -180,8 +180,19 @@ object ModuleDiagnostics {
         files.putAll(collectRoot(ctx))
         val evidence = files.filterKeys { it.startsWith("hook/") || it.startsWith("logcat/") }
             .values.joinToString("\n").takeLast(3_000_000)
+        val trace = FeatureTraceReport.analyze(evidence)
+        files["feature/TRACE_SUMMARY.txt"] = trace.summary
+        files["feature/TRACE_EVENTS.log"] = trace.events
+        files["feature/TRACE_ERRORS.log"] = trace.errors
+        files["feature/README.txt"] = (
+            "Structured events: XH_TRACE feature=... stage=... result=... flow=...\n" +
+            "observed = evidence only, not proof of successful behavior.\n" +
+            "fail/degraded = suspected issue; cross-reference hook/logcat.\n" +
+            "flow joins metadata changes during one native playback transition.\n" +
+            "No events can mean untriggered feature, missing Root or absent scope.\n")
         files["REPORT.txt"] = FeatureDiagnostics.analyze(ctx, evidence,
-            files["root/status.txt"] == "ROOT GRANTED")
+            files["root/status.txt"] == "ROOT GRANTED") +
+            "\n\n" + trace.summary
         val output = ctx.contentResolver.openOutputStream(uri, "w")
             ?: error("Cannot open destination ZIP")
         output.use { target ->
