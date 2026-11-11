@@ -74,7 +74,7 @@ internal object SystemMediaBridge {
      * suppress user-requested pause, foreground pause or a preload engine.
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
-        if (!enabled || candidate == null ||
+        if (!enabled || candidate == null || userCommandInProgress ||
             !requestedBackgroundPlayback || !knownPlaying ||
             backgroundPauseGuardEngine.get() !== candidate ||
             videoEngine.get() !== candidate ||
