@@ -27,7 +27,9 @@ The 2026-11-11 21:33 diagnostic showed these distinct problems:
    callbacks are removed after a new transition or when media is disabled.
 2. `MediaPresentationState` owns transitional notification labels. On a
    different, unverified series, it displays an honest loading label instead
-   of accidentally retaining the previous drama. The MediaSession and
+   of accidentally retaining the previous drama. `MediaCardSnapshot`
+   atomically constructs the Android MediaMetadata from one immutable
+   title/subtitle/duration/artwork snapshot. The MediaSession and
    Notification share exactly the same presentation policy.
 3. `SystemMediaBridge` retries a failed official-poster fetch after a
    15-second backoff; it still refuses episode screenshots and checks both
