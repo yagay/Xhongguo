@@ -287,53 +287,72 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 同一引擎切换视频ID，清空旧剧名与集数")
         }
         if (videoId != null) currentEngineVideoIdentity = videoId
-        val info = NativePlayEntityInfo.readForEngine(
+        val playEntity = NativePlayEntityInfo.readForEngine(
             engine, videoContext.get(), controller.get(), layer.get())
+        val fullSeries = FullSeriesMediaInfo.read(foregroundActivity.get(), engine)
+        // FullSeriesActivity has its own SaasVideoData/DetailModel pipeline.
+        // Prefer it when available; do not replace its verified episode with
+        // a generic PlayEntity title or a different preloaded episode.
+        val title = fullSeries.title ?: playEntity.title
+        val episode = fullSeries.episode ?: playEntity.episode
         var changed = false
-        if (info.title != null && info.title != seriesTitle) {
-            seriesTitle = info.title
+        if (title != null && title != seriesTitle) {
+            seriesTitle = title
             changed = true
         }
-        if (info.episode != null && info.episode != episodeTitle) {
-            episodeTitle = info.episode
+        if (episode != null && episode != episodeTitle) {
+            episodeTitle = episode
             changed = true
         }
         if (changed) {
-            LogUtil.info("系统媒体: 原生 PlayEntity 媒体信息已绑定 reason=$reason" +
-                " title=" + (info.title != null) +
-                " episode=" + (info.episode != null))
+            LogUtil.info("系统媒体: 原生播放器媒体信息已绑定 reason=$reason" +
+                " source=" + (if (fullSeries.title != null ||
+                    fullSeries.episode != null) fullSeries.source else playEntity.source) +
+                " title=" + (title != null) + " episode=" + (episode != null))
             updateSessionMetadata()
             if (reportedCard) updateMediaNotification(knownPlaying)
         }
     }
 
     private fun captureVisibleMediaInfo(activity: Activity?) {
-        if (!enabled || activity == null || !activity.hasWindowFocus()) return
-        val info = NativeMediaInfo.read(activity)
+        if (!enabled || activity == null) return
+        val isFullSeries = activity.javaClass.name ==
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        if (!isFullSeries && !activity.hasWindowFocus()) return
+        // Series data objects remain available even when playback controls
+        // are hidden and the window has lost focus during backgrounding.
+        val fullSeries = if (isFullSeries)
+            FullSeriesMediaInfo.read(activity, videoEngine.get())
+        else FullSeriesMediaInfo.Info()
+        val ui = if (activity.hasWindowFocus()) NativeMediaInfo.read(activity)
+            else NativeMediaInfo.Info()
+        val title = fullSeries.title ?: ui.title
+        val episode = fullSeries.episode ?: ui.episode
         var changed = false
-        if (info.title != null && info.title != seriesTitle) {
-            seriesTitle = info.title
+        if (title != null && title != seriesTitle) {
+            seriesTitle = title
             changed = true
         }
-        if (info.episode != null && info.episode != episodeTitle) {
-            episodeTitle = info.episode
+        if (episode != null && episode != episodeTitle) {
+            episodeTitle = episode
             changed = true
         }
-        if (info.artwork != null && info.artwork !== coverArt) {
-            coverArt = info.artwork
+        if (ui.artwork != null && ui.artwork !== coverArt) {
+            coverArt = ui.artwork
             changed = true
         }
-        val source = info.source
+        val source = if (fullSeries.title != null || fullSeries.episode != null)
+            fullSeries.source else ui.source
         val identity = activity.javaClass.simpleName + "|" +
-            (info.title ?: "") + "|" + (info.episode ?: "")
+            (title ?: "") + "|" + (episode ?: "")
         if (identity != lastVisibleInfoIdentity || source != lastVisibleInfoSource) {
             lastVisibleInfoIdentity = identity
             lastVisibleInfoSource = source
             LogUtil.info("系统媒体: 当前播放信息采集 page=" +
                 activity.javaClass.simpleName + " source=$source" +
-                " title=" + (info.title != null) +
-                " episode=" + (info.episode != null) +
-                " cover=" + (info.artwork != null))
+                " title=" + (title != null) +
+                " episode=" + (episode != null) +
+                " cover=" + (ui.artwork != null))
             LogUtil.incr("systemMediaVisibleInfoScan")
         }
         if (changed) {
