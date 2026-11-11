@@ -4088,9 +4088,11 @@ object Hooks {
             back.setOnClickListener { render(null) }
             dialog.setOnKeyListener { _, code, event ->
                 if (code == android.view.KeyEvent.KEYCODE_BACK &&
-                    event.action == android.view.KeyEvent.ACTION_UP &&
                     selected != null) {
-                    render(null)
+                    if (event.action == android.view.KeyEvent.ACTION_UP)
+                        render(null)
+                    // Consume DOWN and UP; native Dialog must not close
+                    // while a category page is open.
                     true
                 } else false
             }
