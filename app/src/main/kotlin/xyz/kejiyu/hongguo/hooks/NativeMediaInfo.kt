@@ -70,7 +70,11 @@ internal object NativeMediaInfo {
         }
     }
     private fun parseTitle(value: String?): String? {
-        val t = clean(value) ?: return null
+        // Some feed versions place the orange launch badge and series name in
+        // one styled TextView rather than two separate views.
+        val t = clean(value)?.replaceFirst(
+            Regex("""^(?:红果首发|红果独播|红果原创)\s*[:：·|]?\s*"""), ""
+        )?.trim() ?: return null
         if (t.length !in 4..74 || forbidden.any {
                 t == it || t.startsWith(it) || (it == "观看完整" && t.contains(it))
             } || t.contains("用户协议") || t.contains("隐私政策")
