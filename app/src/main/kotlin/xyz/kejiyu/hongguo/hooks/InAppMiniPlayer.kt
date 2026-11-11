@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
+import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
 
 /**
@@ -33,11 +34,14 @@ internal object InAppMiniPlayer {
         val originalIndex: Int,
         val originalLayoutParams: ViewGroup.LayoutParams,
         val overlay: FrameLayout,
+        val nativeEngine: WeakReference<Any>,
+        var nativePauseGuardsUsed: Int = 0
     )
 
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
     private var lastPlayingController: Any? = null
-    private var suppressPauseUntil = 0L
+    @Volatile private var lastNativeEngine = WeakReference<Any>(null)
+    @Volatile private var suppressPauseUntil = 0L
     private var restoreInProgress = false
     private var returningHome = false
     private const val FLOAT_TAG = "XHONGGUO_IN_APP_VIDEO_WINDOW"
@@ -53,6 +57,49 @@ internal object InAppMiniPlayer {
 
     fun rememberPlayingController(controller: Any?) {
         if (controller != null) lastPlayingController = controller
+    }
+
+    /** Captured ONLY from the actual TTVideoEngine.play event. The engine
+     * is pinned to the session at dock-time, so a later preloaded engine
+     * cannot have its pause suppressed by accident. */
+    fun rememberNativeEngine(candidate: Any?) {
+        if (candidate?.javaClass?.name ==
+            "com.ss.ttvideoengine.TTVideoEngine") {
+            lastNativeEngine = WeakReference(candidate)
+        }
+    }
+
+    /** Native feed navigation calls TTVideoEngine.pause directly, bypassing
+     * the existing VideoController pause hook. Protect only the engine that
+     * was playing when we docked, and only during the brief tab transition.
+     * Never block user media commands after the transition or app background. */
+    fun shouldKeepNativeEnginePlaying(candidate: Any?): Boolean {
+        val current = session ?: return false
+        if (!enabled || restoreInProgress || current.activity.isFinishing ||
+            !current.activity.hasWindowFocus() ||
+            candidate == null || candidate !== current.nativeEngine.get() ||
+            android.os.SystemClock.uptimeMillis() > suppressPauseUntil)
+            return false
+        return synchronized(current) {
+            if (current.nativePauseGuardsUsed >= 3) false
+            else {
+                current.nativePauseGuardsUsed++
+                LogUtil.info("应用内小窗：阻止页面切换引发的 TTVideoEngine.pause" +
+                    " count=" + current.nativePauseGuardsUsed)
+                LogUtil.incr("inAppMiniNativeEnginePauseIntercept")
+                true
+            }
+        }
+    }
+
+    private fun nativeEnginePlaying(candidate: Any?): Boolean? {
+        if (candidate == null) return null
+        return try {
+            candidate.javaClass.methods.firstOrNull {
+                it.name == "isPlaying" && it.parameterCount == 0 &&
+                    it.returnType == Boolean::class.javaPrimitiveType
+            }?.invoke(candidate) as? Boolean
+        } catch (_: Throwable) { null }
     }
 
     fun shouldKeepPlaying(controller: Any?): Boolean {
@@ -75,7 +122,35 @@ internal object InAppMiniPlayer {
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastResumeAttemptAt < 1000L) return
         lastResumeAttemptAt = now
-        val controller = lastPlayingController ?: return
+        // Recheck the exact engine pinned at dock-time. If the host paused
+        // without going through the intercepted method, retry once only when
+        // the native engine confirms it really is NOT playing.
+        val engine = active.nativeEngine.get()
+        val nativePlaying = nativeEnginePlaying(engine)
+        if (engine != null && nativePlaying == false) {
+            try {
+                val play = engine.javaClass.methods.firstOrNull {
+                    it.name == "play" && it.parameterCount == 0
+                }
+                if (play != null && session === active &&
+                    android.os.SystemClock.uptimeMillis() <= suppressPauseUntil) {
+                    play.invoke(engine)
+                    LogUtil.info("应用内小窗：原生引擎确认暂停，尝试恢复当前播放")
+                    LogUtil.incr("inAppMiniNativeEngineResume")
+                    return
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("应用内小窗：原生引擎恢复失败: " + e.message)
+            }
+        }
+        if (nativePlaying == true) {
+            LogUtil.info("应用内小窗：当前原生引擎仍在播放，无需再次启动")
+            return
+        }
+        val controller = lastPlayingController ?: run {
+            LogUtil.info("应用内小窗：VideoController 未捕获，使用原生引擎保护")
+            return
+        }
         for (name in listOf("resume", "resumeVideo", "play")) {
             try {
                 val method = controller.javaClass.methods.firstOrNull { m ->
@@ -169,8 +244,12 @@ internal object InAppMiniPlayer {
             // Remain ABOVE the app bottom tabs and Android's three-button bar.
             bottomMargin = dp(activity, 96f)
         }
-        val current = Session(activity, video, parent, index, originalParams, container)
+        val current = Session(activity, video, parent, index,
+            originalParams, container, WeakReference(lastNativeEngine.get()))
         session = current
+        LogUtil.info("应用内小窗：开始保护切换时的原生播放器" +
+            " engineBound=" + (current.nativeEngine.get() != null) +
+            " playing=" + nativeEnginePlaying(current.nativeEngine.get()))
         suppressPauseUntil = android.os.SystemClock.uptimeMillis() + 2200L
         try {
             // Avoid destroying the original video engine. Surface reconstruction
