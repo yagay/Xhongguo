@@ -4994,11 +4994,55 @@ object Hooks {
             }
         } catch (e: Exception) { LogUtil.warn("作用域更新检测启动失败: $e") }
 
-        fun ham(clazz: Class<*>, methodName: String, hookId: String, block: (XposedInterface.Chain) -> Any?) {
-            clazz.declaredMethods.filter { it.name == methodName }.forEachIndexed { i, m -> try { module.hook(m).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
+        // Centralized exception isolation for optional native hooks.
+        // On a failed callback NEVER invoke chain.proceed() a second time;
+        // the callback might already have proceeded into the original method.
+        fun guardedCallback(
+            id: String, chain: XposedInterface.Chain,
+            body: (XposedInterface.Chain) -> Any?
+        ): Any? {
+            if (HookCircuitBreaker.disabled(id)) return chain.proceed()
+            return try {
+                body(chain)
+            } catch (failure: Throwable) {
+                HookCircuitBreaker.failure(id, failure)
+                throw failure // handled by libxposed PROTECTIVE mode
+            }
         }
-        fun hac(clazz: Class<*>, hookId: String, block: (XposedInterface.Chain) -> Any?) {
-            clazz.declaredConstructors.forEachIndexed { i, c -> try { module.hook(c).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
+
+        fun ham(clazz: Class<*>, methodName: String, hookId: String,
+            block: (XposedInterface.Chain) -> Any?) {
+            clazz.declaredMethods.filter { it.name == methodName }
+                .forEachIndexed { i, method ->
+                    val id = "${hookId}_$i"
+                    try {
+                        module.hook(method).setId(id)
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                guardedCallback(id, chain, block)
+                            })
+                    } catch (e: Exception) {
+                        LogUtil.warn("可选 Hook 安装失败 id=$id type=" +
+                            e.javaClass.simpleName)
+                    }
+                }
+        }
+
+        fun hac(clazz: Class<*>, hookId: String,
+            block: (XposedInterface.Chain) -> Any?) {
+            clazz.declaredConstructors.forEachIndexed { i, constructor ->
+                val id = "${hookId}_$i"
+                try {
+                    module.hook(constructor).setId(id)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            guardedCallback(id, chain, block)
+                        })
+                } catch (e: Exception) {
+                    LogUtil.warn("可选 Hook 安装失败 id=$id type=" +
+                        e.javaClass.simpleName)
+                }
+            }
         }
 
         // ── Mine screen cleanup: exact native fragment scope + Compose DTOs ──
