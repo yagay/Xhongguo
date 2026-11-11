@@ -36,7 +36,7 @@ internal object InAppMiniPlayer {
         val originalIndex: Int,
         val originalLayoutParams: ViewGroup.LayoutParams,
         val overlay: FrameLayout,
-        val nativeEngine: WeakReference<Any>,
+        var nativeEngine: WeakReference<Any>,
         var nativePauseGuardsUsed: Int = 0,
         @Volatile var userPaused: Boolean = false,
         var snapAnimation: ValueAnimator? = null,
@@ -249,6 +249,11 @@ internal object InAppMiniPlayer {
             }
             newParent.addView(overlay, params)
             current.presentedActivity = activity
+            // No manual player controls exist behind the detail page. Keep
+            // the pinned decoder active while its mini surface is visible;
+            // explicit mini/media-card pause remains allowed.
+            suppressPauseUntil = android.os.SystemClock.uptimeMillis() +
+                30L * 60L * 1000L
             LogUtil.info("应用内小窗：详情页已接管原有视频窗口" +
                 " engineRetained=" + (current.nativeEngine.get() != null))
             LogUtil.incr("inAppMiniDetailsAttached")
@@ -262,10 +267,24 @@ internal object InAppMiniPlayer {
         }
     }
 
-    fun onPlaybackOwnerChanged(previous: Any, current: Any) {
+    fun onPlaybackOwnerChanged(previous: Any, current: Any, samePage: Boolean) {
         val active = session ?: return
-        if (previous !== current && active.nativeEngine.get() === previous) {
-            LogUtil.info("应用内小窗：播放权切换，归位旧视频渲染层")
+        if (previous === current || active.nativeEngine.get() !== previous) return
+        if (samePage && active.source.isAttachedToWindow) {
+            active.nativeEngine = WeakReference(current)
+            active.userPaused = false
+            active.playbackButton.get()?.let { button ->
+                button.post {
+                    if (session === active) {
+                        button.text = "Ⅱ"
+                        button.contentDescription = "暂停播放"
+                    }
+                }
+            }
+            LogUtil.info("应用内小窗：同页面新集复用小窗，更新原生播放所有者")
+            LogUtil.incr("inAppMiniEngineRebound")
+        } else {
+            LogUtil.info("应用内小窗：切换播放页面，归位旧视频渲染层")
             LogUtil.incr("inAppMiniOwnerTransferRestore")
             restore()
         }
