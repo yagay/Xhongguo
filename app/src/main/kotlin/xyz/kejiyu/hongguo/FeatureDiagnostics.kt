@@ -108,6 +108,9 @@ object FeatureDiagnostics {
             "系统媒体: 播放进度采样",
             "系统媒体: 全集原生元数据解析",
             "系统媒体: 全集内层视频索引",
+            "系统媒体: 已发现原生剧集封面",
+            "系统媒体: 媒体封面已写入 MediaSession",
+            "系统媒体: 封面加载失败",
             "系统媒体: 原生播放器媒体信息已绑定"
         )) {
             appendLine((if (evidence.contains(signal)) "找到" else "未找到") + " - " + signal)
