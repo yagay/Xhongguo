@@ -1438,7 +1438,9 @@ object Hooks {
     // Mini-player activation uses only a confirmed native video rendering host.
     // Never remove or resize the whole feed holder or the bottom tabs.
     private fun findLiveVideoHost(act: Activity): View? {
-        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY &&
+            act.javaClass.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") return null
         val candidates = ArrayList<View>()
         val inspected = java.util.Collections.newSetFromMap(
             java.util.IdentityHashMap<View, Boolean>()
@@ -1672,6 +1674,33 @@ object Hooks {
                 }
             }, 320L)
         }
+    }
+
+    /** Native detail screens are separate Activities and therefore bypass
+     * the bottom-tab mini activation. Dock BEFORE the activity launch, then
+     * transfer the SAME video window to the detail Activity onResume.
+     * Never start a second video engine or seek to a new media source. */
+    private fun beforeNativeDramaDetailsLaunch(source: Activity?, intent: Intent?) {
+        val owner = source ?: return
+        if (!gMasterOn || !gMiniPlayerOn ||
+            owner.javaClass.name !in setOf(
+                MAIN_TAB_ACTIVITY,
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+            )) return
+        val destination = intent?.component?.className ?: return
+        if (destination !in setOf(
+            "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
+            "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity"
+        )) return
+        if (!InAppMiniPlayer.activeFor(owner)) {
+            val videoHost = findLiveVideoHost(owner)
+            if (videoHost == null || !InAppMiniPlayer.dock(owner, videoHost)) {
+                LogUtil.warn("应用内小窗：详情页跳转时未找到原视频渲染容器")
+                LogUtil.incr("inAppMiniDetailNoRenderer")
+                return
+            }
+        }
+        InAppMiniPlayer.prepareForDetails(owner)
     }
 
     private val mainBottomNavLabels = setOf("首页", "剧场", "商城", "赚钱", "我的")
@@ -6682,6 +6711,21 @@ object Hooks {
                 try {
                     if (a != null) {
                         SystemMediaBridge.onActivityResumed(a)
+                        if (gMasterOn && gMiniPlayerOn) {
+                            try {
+                                InAppMiniPlayer.onSourceActivityResumed(a)
+                                // A Window is not always attached at onResume,
+                                // so transfer the existing surface after layout.
+                                mainHandler.postDelayed({
+                                    if (!a.isFinishing &&
+                                        InAppMiniPlayer.attachToDetails(a)) {
+                                        InAppMiniPlayer.resumeAfterTabSwitch()
+                                    }
+                                }, 140L)
+                            } catch (e: Throwable) {
+                                LogUtil.warn("应用内小窗：详情页恢复失败 " + e.message)
+                            }
+                        }
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6769,6 +6813,12 @@ object Hooks {
             // Reject only the dedicated shopping-mall Activity intent.
             // Shopping-related short-drama classes are deliberately not blocked.
             ham(c, "startActivity", "shoppingStartActivity") { chain ->
+                try {
+                    beforeNativeDramaDetailsLaunch(
+                        chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                } catch (e: Throwable) {
+                    LogUtil.warn("应用内小窗：详情导航观察失败 " + e.message)
+                }
                 if (isShoppingMallDisabled() &&
                     isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
                     LogUtil.incr("shoppingActivityIntentBlocked")
@@ -6777,6 +6827,12 @@ object Hooks {
                 } else chain.proceed()
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
+                try {
+                    beforeNativeDramaDetailsLaunch(
+                        chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                } catch (e: Throwable) {
+                    LogUtil.warn("应用内小窗：详情导航观察失败 " + e.message)
+                }
                 if (isShoppingMallDisabled() &&
                     isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
                     LogUtil.incr("shoppingActivityIntentBlocked")
