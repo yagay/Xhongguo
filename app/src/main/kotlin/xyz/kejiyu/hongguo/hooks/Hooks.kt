@@ -5039,7 +5039,9 @@ object Hooks {
         ): Any? {
             if (HookCircuitBreaker.disabled(id)) return chain.proceed()
             return try {
-                body(chain)
+                val result = body(chain)
+                FeatureTrace.hookHit(id)
+                result
             } catch (failure: Throwable) {
                 HookCircuitBreaker.failure(id, failure)
                 throw failure // handled by libxposed PROTECTIVE mode
