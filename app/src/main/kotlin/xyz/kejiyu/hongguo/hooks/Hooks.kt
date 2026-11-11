@@ -2616,6 +2616,9 @@ object Hooks {
         gLastVideoStateReason = reason
 
         if (!gMasterOn || !gRestoreControlsOnPause) return
+        if (changed) FeatureTrace.event("ui", "pause_controls",
+            if (paused) "restoring" else "hiding",
+            "source=" + reason.take(48))
         if (paused) {
             restoreAllControls()
             restoreNativeBottomWindowColor(gCurrentActivity)
@@ -2740,7 +2743,11 @@ object Hooks {
                 enforceNativeMainBottomHidden(gCurrentActivity)
                 enforceKnownFeedViewportBottomMargin()
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            FeatureTrace.event("ui", "full_window_scan", "fail",
+                "errorType=" + e.javaClass.simpleName,
+                minIntervalMs = 5000L)
+        }
     }
 
     private var gScanRunnable: Runnable? = null
@@ -3103,7 +3110,13 @@ object Hooks {
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             decor.requestApplyInsets()
             updateSeriesMallTopMargin(act, true)
-        } catch (_: Exception) {}
+            FeatureTrace.event("ui", "status_bar", "applied",
+                minIntervalMs = 15000L)
+        } catch (e: Exception) {
+            FeatureTrace.event("ui", "status_bar", "fail",
+                "errorType=" + e.javaClass.simpleName,
+                minIntervalMs = 5000L)
+        }
     }
     private fun showStatusBar(act: Activity?) {
         if (act == null) return
@@ -3138,6 +3151,8 @@ object Hooks {
             }
             decor.requestApplyInsets()
             updateSeriesMallTopMargin(act, false)
+            FeatureTrace.event("ui", "status_bar", "restored",
+                minIntervalMs = 15000L)
         } catch (e: Throwable) {
             LogUtil.warn("restore original status bar failed: " + e)
         }
@@ -3159,7 +3174,12 @@ object Hooks {
             }
             synchronized(gHiddenGestureBars) { gHiddenGestureBars[act] = true }
             decor.requestApplyInsets()
+            FeatureTrace.event("ui", "gesture_bar", "applied",
+                minIntervalMs = 15000L)
         } catch (e: Throwable) {
+            FeatureTrace.event("ui", "gesture_bar", "fail",
+                "errorType=" + e.javaClass.simpleName,
+                minIntervalMs = 5000L)
             LogUtil.warn("gesture-only bar hide failed: " + e)
         }
     }
