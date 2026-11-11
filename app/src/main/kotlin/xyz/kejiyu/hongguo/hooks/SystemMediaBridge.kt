@@ -289,6 +289,60 @@ internal object SystemMediaBridge {
      * getVideoID() or exact engine identity. Unlike UI text heuristics, this
      * cannot accidentally read a recommendation for another video.
      */
+    /** Read back the Android session and our posted notification after updates.
+     * Only boolean matches are logged, never private drama titles.
+     */
+    private fun verifyMediaCardDelivery(stage: String) {
+        val media = session ?: return
+        val now = SystemClock.uptimeMillis()
+        if (stage == "metadata-written" &&
+            now - lastDeliveryDiagnosticAt < 1800L) return
+        lastDeliveryDiagnosticAt = now
+        try {
+            val metadata = media.controller.metadata
+            val title = metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+                ?: metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
+            val subtitle = metadata?.getString(
+                MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
+                ?: metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+            val expectedTitle = seriesTitle ?: "红果短剧"
+            val expectedSubtitle = episodeTitle ?: "正在播放的视频"
+            var notificationFound = false
+            var notificationTitleMatched = false
+            var notificationEpisodeMatched = false
+            var notificationQueryError = false
+            try {
+                val posted = notificationManager?.activeNotifications
+                    ?.firstOrNull { it.id == NOTIFICATION_ID }
+                notificationFound = posted != null
+                val extras = posted?.notification?.extras
+                notificationTitleMatched = extras?.getCharSequence(
+                    Notification.EXTRA_TITLE)?.toString() == expectedTitle
+                val expectedNotificationText = episodeTitle ?: if (knownPlaying)
+                    "正在播放 · 点击返回红果" else "已暂停 · 点击返回红果"
+                notificationEpisodeMatched = extras?.getCharSequence(
+                    Notification.EXTRA_TEXT)?.toString() == expectedNotificationText
+            } catch (_: Throwable) {
+                notificationQueryError = true
+            }
+            LogUtil.info("系统媒体: 媒体会话回读 stage=$stage" +
+                " active=" + media.isActive +
+                " titleMatches=" + (title == expectedTitle) +
+                " episodeMatches=" + (subtitle == expectedSubtitle) +
+                " durationMs=" +
+                (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: -1L) +
+                " notificationFound=$notificationFound" +
+                " notificationTitleMatches=$notificationTitleMatched" +
+                " notificationEpisodeMatches=$notificationEpisodeMatched" +
+                " notificationQueryError=$notificationQueryError")
+            LogUtil.incr("systemMediaCardDeliveryProbe")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 媒体会话回读失败: " +
+                e.javaClass.simpleName + ": " + e.message)
+            LogUtil.incr("systemMediaCardDeliveryProbeFailed")
+        }
+    }
+
     private fun selectEpisodeLabel(fullSeries: String?, other: String?): String? {
         if (fullSeries == null) return other
         val hasCurrent = fullSeries.trim().startsWith("第") ||
@@ -1128,6 +1182,7 @@ internal object SystemMediaBridge {
                 .setContentTitle(seriesTitle ?: "红果短剧")
                 .setContentText(episodeTitle ?: if (playing)
                     "正在播放 · 点击返回红果" else "已暂停 · 点击返回红果")
+                .setSubText(episodeTitle ?: "红果短剧")
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
                 .setOnlyAlertOnce(true)
@@ -1146,6 +1201,19 @@ internal object SystemMediaBridge {
                     .setShowActionsInCompactView(0))
                 .build()
             notificationManager?.notify(NOTIFICATION_ID, notification)
+            val metadataSignature = (seriesTitle ?: "") + "|" +
+                (episodeTitle ?: "")
+            if (metadataSignature != lastNotifiedMetadataSignature) {
+                lastNotifiedMetadataSignature = metadataSignature
+                LogUtil.info("系统媒体: MediaStyle 内容已同步" +
+                    " title=" + (seriesTitle != null) +
+                    " episode=" + (episodeTitle != null) +
+                    " titleLength=" + (seriesTitle?.length ?: 0) +
+                    " episodeLength=" + (episodeTitle?.length ?: 0) +
+                    " mediaActive=" + media.isActive)
+                LogUtil.incr("systemMediaNotificationMetadataSync")
+                verifyMediaCardDelivery("notification-updated")
+            }
             if (!reportedCard) {
                 reportedCard = true
                 LogUtil.info("系统媒体: MediaStyle 通知已发布 | pkg=" + ctx.packageName)
