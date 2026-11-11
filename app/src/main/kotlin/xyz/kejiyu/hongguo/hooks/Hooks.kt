@@ -6134,6 +6134,14 @@ object Hooks {
                                 .intercept(Hooker { chain ->
                                     LogUtil.info("系统媒体: VideoContext.$name before" +
                                         " isEnabled=" + SystemMediaBridge.enabled)
+                                    // The native host completion/autoplay callbacks
+                                    // must survive a verified app-leave. Do not
+                                    // skip unrelated page switches or non-void APIs.
+                                    if (method.returnType == Void.TYPE &&
+                                        SystemMediaBridge.shouldHoldHostVideoLifecycle(
+                                            chain.thisObject, name)) {
+                                        return@Hooker null
+                                    }
                                     val result = chain.proceed()
                                     LogUtil.info("系统媒体: VideoContext.$name after")
                                     result
