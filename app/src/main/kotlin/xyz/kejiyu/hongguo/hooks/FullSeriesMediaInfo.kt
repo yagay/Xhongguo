@@ -53,6 +53,77 @@ internal object FullSeriesMediaInfo {
     private val observedDetails = LinkedHashMap<String, DetailSnapshot>()
     private const val DETAIL_TTL_MS = 30L * 60L * 1000L
 
+    // The native feed and full-series screens share these immutable, bounded
+    // snapshots. Key by the ACTUAL video ID from TTVideoEngine, never by UI
+    // position, autoplay neighbours or a recycled Activity.
+    private data class VideoSnapshot(
+        val seriesId: String?,
+        val title: String?,
+        val poster: String?,
+        val observedAt: Long
+    )
+    private val observedVideos = LinkedHashMap<String, VideoSnapshot>()
+    private const val VIDEO_TTL_MS = 15L * 60L * 1000L
+    private var lastObservedVideoDiagnosticAt = 0L
+
+    /** Observe a completed native data-model *at its consumption boundary*.
+     * The empty default constructor is not useful with RPC/Gson adapters. */
+    fun observeVideoData(model: Any?) {
+        if (model?.javaClass?.name != DATA) return
+        val videoId = seriesId(field(model, "vid")) ?: return
+        val id = seriesId(field(model, "episodesId")) ?:
+            seriesId(field(model, "seriesId"))
+        val title = str(field(model, "seriesName"))
+        val posterValue = field(model, "cover") as? String
+        val episodeCover = field(model, "episodeCover") as? String
+        // A still/thumbnail is not the official series poster.
+        val poster = posterValue?.takeIf {
+            it.isNotBlank() && it != episodeCover
+        }?.let { MediaArtworkLoader.normalize(it) }
+        if (title == null && poster == null) return
+        val now = SystemClock.uptimeMillis()
+        synchronized(detailLock) {
+            val previous = observedVideos.remove(videoId)
+            val sameSeries = previous != null &&
+                (id == null || previous.seriesId == null ||
+                    previous.seriesId == id)
+            observedVideos[videoId] = VideoSnapshot(
+                id ?: previous?.seriesId,
+                title ?: if (sameSeries) previous?.title else null,
+                poster ?: if (sameSeries) previous?.poster else null, now)
+            while (observedVideos.size > 250) {
+                val it = observedVideos.keys.iterator()
+                if (!it.hasNext()) break
+                it.next()
+                it.remove()
+            }
+            if (now - lastObservedVideoDiagnosticAt > 12000L) {
+                lastObservedVideoDiagnosticAt = now
+                LogUtil.info("系统媒体: 原生视频数据已观察" +
+                    " videoId=true seriesId=" + (id != null) +
+                    " title=" + (title != null) +
+                    " poster=" + (poster != null) +
+                    " cacheSize=" + observedVideos.size)
+                LogUtil.incr("systemMediaVideoDataObserved")
+            }
+        }
+    }
+
+    fun observedForEngine(engine: Any?): Info {
+        val videoId = seriesId(call(engine, "getVideoID")) ?: return Info()
+        val now = SystemClock.uptimeMillis()
+        val video = synchronized(detailLock) {
+            observedVideos[videoId]?.takeIf {
+                now - it.observedAt in 0L..VIDEO_TTL_MS
+            }
+        } ?: return Info()
+        val detail = detailForSeries(video.seriesId)
+        return Info(detail?.title ?: video.title, null,
+            "native-model-video-id",
+            detail?.artworkUrl ?: video.poster, video.seriesId)
+    }
+
+
     private fun seriesId(value: Any?): String? =
         value?.toString()?.trim()?.takeIf {
             it.isNotEmpty() && it != "null" && it != "0" && it.length <= 128
@@ -66,7 +137,8 @@ internal object FullSeriesMediaInfo {
 
     private fun rememberDetail(model: Any?) {
         if (model?.javaClass?.name != DETAIL) return
-        val id = seriesId(field(model, "episodesId")) ?: return
+        val id = seriesId(field(model, "episodesId")) ?:
+            seriesId(field(model, "seriesId")) ?: return
         val title = str(field(model, "episodesTitle")) ?:
             str(field(model, "seriesName"))
         val cover = listOf("episodesCover", "smallEpisodesCover")
@@ -231,7 +303,7 @@ internal object FullSeriesMediaInfo {
                             val wrapper = list[position]
                             val model = call(wrapper, "getVideoData")
                             if (model?.javaClass?.name == DATA) {
-                                val modelId = str(field(model, "episodesId"))
+                                val modelId = seriesId(field(model, "episodesId"))
                                 val modelTotal = number(field(model,
                                     "episodesCount"))
                                 val sameSeries = seriesKey == null ||
@@ -330,6 +402,7 @@ internal object FullSeriesMediaInfo {
         val model = best.video
         val fragmentTotal = number(field(model, "episodesCount"))
             ?.takeIf { it in 1..5000L }
+        observeVideoData(model)
         val modelTitle = str(field(model, "seriesName"))
         // The Saas model separates the drama's 'cover' from the individual
         // episode's 'episodeCover' (often a frame still). Accept 'cover'
@@ -476,6 +549,7 @@ internal object FullSeriesMediaInfo {
         val current = listOf("I", "z")
             .mapNotNull { key -> field(presenter, key) }
             .filter { it.javaClass.name == DATA }
+        current.forEach(::observeVideoData)
 
         // A prepared next episode can coexist with the active video. Never
         // use its index or episode title without an exact ID match.
@@ -504,8 +578,10 @@ internal object FullSeriesMediaInfo {
             cachedTotal else null
         val fragment = mediaFromActiveFragment(activity,
             detailSeriesKey ?: previousSeriesKey, provisionalTotal ?: previousTotal)
-        val seriesKey = detailSeriesKey ?: fragment.seriesId
+        val seriesKey = detailSeriesKey ?: fragment.seriesId ?:
+            observedForEngine(engine).seriesId
         val capturedDetail = detailForSeries(seriesKey)
+        val observedVideo = observedForEngine(engine)
         val freshTotal = provisionalTotal ?: fragment.total ?: capturedDetail?.total
 
         // Detail metadata belongs to this ShortSeriesActivity rather than an
@@ -529,7 +605,8 @@ internal object FullSeriesMediaInfo {
             fragment.title ?:
             intentTitle ?:
             str(field(active, "title")) ?:
-            str(field(current.firstOrNull(), "seriesName"))
+            str(field(current.firstOrNull(), "seriesName")) ?:
+            observedVideo.title
         // 7.3.5.32's official Saas model has URL strings for both full-sized
         // and compact series posters. The detail is a transient Runnable
         // payload, so preserve its URL for the currently displayed series.
@@ -548,7 +625,7 @@ internal object FullSeriesMediaInfo {
             capturedDetail?.artworkUrl
         ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
         val freshCoverUrl = verifiedCoverUrl ?: listOfNotNull(
-            safeDataCover, fragment.artworkUrl
+            safeDataCover, fragment.artworkUrl, observedVideo.artworkUrl
         ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
         val retained = preserveCurrentSeries(activity, seriesKey,
             latestTitle, freshTotal, freshCoverUrl,
