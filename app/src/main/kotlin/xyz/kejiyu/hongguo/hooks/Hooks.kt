@@ -5951,11 +5951,11 @@ object Hooks {
                         else -> emptyArray()
                     }
                     val returnsDetail = member is java.lang.reflect.Method &&
-                        member.returnType == detailType
+                        detailType.isAssignableFrom(member.returnType)
                     val returnsVideo = member is java.lang.reflect.Method &&
-                        member.returnType == videoType
-                    val consumesDetail = params.any { it == detailType }
-                    val consumesVideo = params.any { it == videoType }
+                        videoType.isAssignableFrom(member.returnType)
+                    val consumesDetail = params.any { detailType.isAssignableFrom(it) }
+                    val consumesVideo = params.any { videoType.isAssignableFrom(it) }
                     if (!returnsDetail && !returnsVideo &&
                         !consumesDetail && !consumesVideo) return@forEachIndexed
                     try {
@@ -5969,9 +5969,9 @@ object Hooks {
                                         if (consumesDetail || consumesVideo) {
                                             for (i in params.indices) {
                                                 val arg = chain.getArg(i)
-                                                if (params[i] == detailType)
+                                                if (detailType.isAssignableFrom(params[i]))
                                                     FullSeriesMediaInfo.observeDetailModel(arg)
-                                                if (params[i] == videoType)
+                                                if (videoType.isAssignableFrom(params[i]))
                                                     FullSeriesMediaInfo.observeVideoData(arg)
                                             }
                                         }
