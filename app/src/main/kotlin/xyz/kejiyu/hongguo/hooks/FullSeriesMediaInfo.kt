@@ -400,8 +400,12 @@ internal object FullSeriesMediaInfo {
         // 16:41 diagnostics. Read its series name and art at the same time.
         // Unlike the transient detail Runnable, this model stays attached to
         // the current playing video's internal list.
+        val previousSeriesKey = if (cachedActivity.get() === activity)
+            cachedSeriesKey else null
+        val previousTotal = if (cachedActivity.get() === activity)
+            cachedTotal else null
         val fragment = mediaFromActiveFragment(activity,
-            detailSeriesKey ?: cachedSeriesKey, provisionalTotal ?: cachedTotal)
+            detailSeriesKey ?: previousSeriesKey, provisionalTotal ?: previousTotal)
         val freshTotal = provisionalTotal ?: fragment.total
 
         // Detail metadata belongs to this ShortSeriesActivity rather than an
