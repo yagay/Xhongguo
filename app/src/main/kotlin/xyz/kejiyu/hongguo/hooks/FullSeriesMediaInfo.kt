@@ -82,15 +82,21 @@ internal object FullSeriesMediaInfo {
         }?.let { MediaArtworkLoader.normalize(it) }
         if (title == null && poster == null) return
         val now = SystemClock.uptimeMillis()
+        var newMetadata = false
         synchronized(detailLock) {
             val previous = observedVideos.remove(videoId)
             val sameSeries = previous != null &&
                 (id == null || previous.seriesId == null ||
                     previous.seriesId == id)
-            observedVideos[videoId] = VideoSnapshot(
+            val updated = VideoSnapshot(
                 id ?: previous?.seriesId,
                 title ?: if (sameSeries) previous?.title else null,
                 poster ?: if (sameSeries) previous?.poster else null, now)
+            observedVideos[videoId] = updated
+            newMetadata = previous == null ||
+                previous.seriesId != updated.seriesId ||
+                previous.title != updated.title ||
+                previous.poster != updated.poster
             while (observedVideos.size > 250) {
                 val it = observedVideos.keys.iterator()
                 if (!it.hasNext()) break
@@ -107,6 +113,7 @@ internal object FullSeriesMediaInfo {
                 LogUtil.incr("systemMediaVideoDataObserved")
             }
         }
+        if (newMetadata) SystemMediaBridge.onNativeSeriesMetadataAvailable()
     }
 
     fun observedForEngine(engine: Any?): Info {
@@ -153,6 +160,7 @@ internal object FullSeriesMediaInfo {
             }
         if (title == null && cover == null && total == null) return
         val now = SystemClock.uptimeMillis()
+        var newMetadata = false
         synchronized(detailLock) {
             val prev = observedDetails[id]
             val updated = DetailSnapshot(title ?: prev?.title,
@@ -165,8 +173,10 @@ internal object FullSeriesMediaInfo {
                 if (now - entry.value.observedAt > DETAIL_TTL_MS ||
                     observedDetails.size > 24) iterator.remove()
             }
-            if (prev == null || prev.title != updated.title ||
-                prev.artworkUrl != updated.artworkUrl) {
+            newMetadata = prev == null || prev.title != updated.title ||
+                prev.artworkUrl != updated.artworkUrl ||
+                prev.total != updated.total
+            if (newMetadata) {
                 LogUtil.info("系统媒体: 已捕获官方全集详情" +
                     " title=" + (updated.title != null) +
                     " poster=" + (updated.artworkUrl != null) +
@@ -174,6 +184,7 @@ internal object FullSeriesMediaInfo {
                 LogUtil.incr("systemMediaSeriesDetailCaptured")
             }
         }
+        if (newMetadata) SystemMediaBridge.onNativeSeriesMetadataAvailable()
     }
 
     private fun detailForSeries(id: String?): DetailSnapshot? {
