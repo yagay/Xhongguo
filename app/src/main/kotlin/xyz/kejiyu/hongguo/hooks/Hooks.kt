@@ -4988,6 +4988,181 @@ object Hooks {
             clazz.declaredConstructors.forEachIndexed { i, c -> try { module.hook(c).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
         }
 
+        // ── Mine screen cleanup: exact native fragment scope + Compose DTOs ──
+        // 7.3.5.32 uses both native Views and KMP Compose. Only methods
+        // attached to semantic Mine classes are hooked; no global text
+        // filtering of unrelated app screens.
+        try {
+            val mineFragments = listOf(
+                "com.dragon.read.component.biz.impl.mine.KmpHongguoMineFragment",
+                "com.dragon.read.component.biz.impl.mine.HongguoMineFragmentV2",
+                "com.dragon.read.component.biz.impl.mine.HongguoMineFragment",
+                "com.dragon.read.component.biz.impl.mine.VariantMineFragment",
+                "com.dragon.read.component.biz.impl.mine.VariantMineFragmentV2",
+            )
+            var installed = 0
+            for ((clIndex, name) in mineFragments.withIndex()) {
+                val clazz = try { Class.forName(name, false, classLoader) }
+                    catch (_: Throwable) { continue }
+                val methods = clazz.declaredMethods.filter { it.name in setOf(
+                    "onCreateContent", "onViewCreated", "onVisible",
+                    "onInvisible", "onDestroy"
+                ) }
+                for ((index, method) in methods.withIndex()) {
+                    try {
+                        module.hook(method)
+                            .setId("xhMineFragmentScope_${clIndex}_$index")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val result = chain.proceed()
+                                try {
+                                    val fragment = chain.thisObject
+                                    when (method.name) {
+                                        "onCreateContent" -> MinePageCleaner.rememberMineView(
+                                            fragment, result as? View)
+                                        "onViewCreated" -> MinePageCleaner.rememberMineView(
+                                            fragment, chain.args.firstOrNull() as? View)
+                                        "onVisible" -> MinePageCleaner.onMineVisible(fragment)
+                                        "onInvisible", "onDestroy" ->
+                                            MinePageCleaner.onMineInvisible(fragment)
+                                    }
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("我的页面精简: Fragment 观察失败 " +
+                                        e.javaClass.simpleName)
+                                }
+                                result
+                            })
+                        installed++
+                    } catch (_: Throwable) {}
+                }
+            }
+            LogUtil.info("  ✓ mine page fragment scoped observers installed=$installed")
+        } catch (e: Throwable) {
+            LogUtil.warn("  mine fragment observers unavailable: " + e.message)
+        }
+
+        // Compose menu items and native RPC entries are filtered at their
+        // real List-consumption boundary. Exact visible titles / typed
+        // JgZoneItemId decide which item is removed; do not rely on index.
+        try {
+            val sources = listOf(
+                "com.dragon.read.kmp.mine.sidebar.MineSidebarController",
+                "com.dragon.read.kmp.mine.page.data.MineSidebarRepository",
+                "com.dragon.read.component.biz.impl.mine.sidebar.SidebarPageDataManager",
+                "com.dragon.read.component.biz.impl.mine.functionpage.HongguoMineFunctionFragment",
+            )
+            var installed = 0
+            for ((classIndex, className) in sources.withIndex()) {
+                val clazz = try { Class.forName(className, false, classLoader) }
+                    catch (_: Throwable) { continue }
+                val members = (clazz.declaredMethods.toList() +
+                    clazz.declaredConstructors.toList())
+                for ((index, member) in members.withIndex()) {
+                    val params = when (member) {
+                        is java.lang.reflect.Method -> member.parameterTypes
+                        is java.lang.reflect.Constructor<*> -> member.parameterTypes
+                        else -> emptyArray()
+                    }
+                    val returnsList = member is java.lang.reflect.Method &&
+                        List::class.java.isAssignableFrom(member.returnType)
+                    val consumesList = params.any {
+                        List::class.java.isAssignableFrom(it)
+                    }
+                    val consumesDto = params.any {
+                        it.name in setOf(
+                            "com.dragon.read.rpc.model.MyTabCellData",
+                            "com.dragon.read.rpc.model.GetMyTabPlanRespData"
+                        )
+                    }
+                    if (!returnsList && !consumesList && !consumesDto) continue
+                    try {
+                        module.hook(member)
+                            .setId("xhMineList_${classIndex}_$index")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val args = (chain.args as Array<Any?>).copyOf()
+                                for (i in params.indices) {
+                                    if (List::class.java.isAssignableFrom(params[i])) {
+                                        args[i] = MinePageCleaner.filterList(
+                                            args[i] as? List<*>,
+                                            MinePageCleaner.Area.SIDEBAR,
+                                            className.substringAfterLast('.') + "#arg")
+                                    } else if (params[i].name.endsWith("MyTabCellData") ||
+                                        params[i].name.endsWith("GetMyTabPlanRespData")) {
+                                        MinePageCleaner.filterRpcCellContainer(
+                                            args[i], MinePageCleaner.Area.SIDEBAR)
+                                    }
+                                }
+                                val result = chain.proceed(args)
+                                if (returnsList) MinePageCleaner.filterList(
+                                    result as? List<*>, MinePageCleaner.Area.SIDEBAR,
+                                    className.substringAfterLast('.') + "#result")
+                                else result
+                            })
+                        installed++
+                    } catch (e: Throwable) {
+                        LogUtil.warn("我的页面精简: 列表 Hook 失败 " +
+                            member.name + " " + e.javaClass.simpleName)
+                    }
+                }
+            }
+            LogUtil.info("  ✓ mine sidebar native/KMP item boundaries installed=$installed")
+        } catch (e: Throwable) {
+            LogUtil.warn("  mine sidebar item boundaries unavailable: " + e.message)
+        }
+
+        // KMP main-page state: the official model's direct List fields
+        // contain gr5.g cells with a stable semantic JgZoneItemId enum.
+        try {
+            val stateClass = Class.forName("gr5.t", false, classLoader)
+            stateClass.declaredConstructors.forEachIndexed { index, ctor ->
+                try {
+                    module.hook(ctor)
+                        .setId("xhMineKmpState_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            MinePageCleaner.filterKmpMineState(
+                                chain.thisObject, "mine-main-compose")
+                            result
+                        })
+                } catch (_: Throwable) {}
+            }
+            LogUtil.info("  ✓ mine KMP typed JgZoneItemId state observers")
+        } catch (e: Throwable) {
+            LogUtil.warn("  mine KMP typed state unavailable: " + e.message)
+        }
+        try {
+            val vm = Class.forName(
+                "com.dragon.read.kmp.mine.page.vm.MinePageViewModel",
+                false, classLoader)
+            val enumName = "com.dragon.read.kmp.mine.config.JgZoneItemId"
+            var guarded = 0
+            for ((index, method) in vm.declaredMethods.filter {
+                it.returnType == Void.TYPE &&
+                    it.parameterTypes.any { p -> p.name == enumName }
+            }.withIndex()) {
+                module.hook(method)
+                    .setId("xhMineZoneAction_$index")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val zone = chain.args.firstOrNull { arg ->
+                            arg?.javaClass?.name == enumName
+                        }
+                        if (MinePageCleaner.blocksZoneAction(zone)) {
+                            LogUtil.info("我的页面精简: 已阻止隐藏捷径点击 " +
+                                ((zone as? Enum<*>)?.name ?: "unknown"))
+                            LogUtil.incr("mineEntryActionBlocked")
+                            null
+                        } else chain.proceed()
+                    })
+                guarded++
+            }
+            LogUtil.info("  ✓ mine KMP semantic zone actions guarded=$guarded")
+        } catch (e: Throwable) {
+            LogUtil.warn("  mine KMP semantic action guard unavailable: " + e.message)
+        }
+
         if (pkg == TargetNames.CN_PACKAGE || pkg == TargetNames.OVERSEA_PACKAGE) {
             try {
                 val mainClazz = Class.forName("com.dragon.read.pages.main.MainFragmentActivity", false, classLoader)
