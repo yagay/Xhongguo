@@ -108,7 +108,7 @@ internal object FullSeriesMediaInfo {
         val now = SystemClock.uptimeMillis()
         return synchronized(detailLock) {
             observedDetails[id]?.takeIf {
-                now - it.observedAt in 0..DETAIL_TTL_MS
+                now - it.observedAt in 0L..DETAIL_TTL_MS
             }
         }
     }
