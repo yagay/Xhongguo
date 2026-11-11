@@ -387,18 +387,22 @@ internal object SystemMediaBridge {
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
         val full = if (isFullSeries) FullSeriesMediaInfo.read(activity, engine)
             else FullSeriesMediaInfo.Info()
+        val observed = FullSeriesMediaInfo.observedForEngine(engine)
         val play = NativePlayEntityInfo.readForEngine(engine,
             videoContext.get(), controller.get(), layer.get())
         val ui = if (includeUi && activity?.hasWindowFocus() == true)
             NativeMediaInfo.read(activity) else NativeMediaInfo.Info()
         val title = if (isFullSeries)
-            full.title ?: ui.title ?: play.title
-        else play.title ?: ui.title
+            full.title ?: observed.title ?: ui.title ?: play.title
+        else observed.title ?: play.title ?: ui.title
         val episode = selectEpisodeLabel(full.episode,
             play.episode ?: ui.episode)
-        val artworkUrl = full.artworkUrl ?: play.artworkUrl
-        if (full.seriesId != null && currentSeriesIdentity != null &&
-            full.seriesId != currentSeriesIdentity) {
+        // Only true native series posters: never use a playing frame still or
+        // the video Surface as Android MediaMetadata art.
+        val artworkUrl = full.artworkUrl ?: observed.artworkUrl ?: play.artworkUrl
+        val resolvedSeriesId = full.seriesId ?: observed.seriesId
+        if (resolvedSeriesId != null && currentSeriesIdentity != null &&
+            resolvedSeriesId != currentSeriesIdentity) {
             // One Activity may navigate to another drama. A confirmed ID
             // change must invalidate the old title, poster and late callback.
             seriesTitle = null
@@ -410,7 +414,7 @@ internal object SystemMediaBridge {
             lastMetadataArt = null
             lastMetadataSignature = null
         }
-        if (full.seriesId != null) currentSeriesIdentity = full.seriesId
+        if (resolvedSeriesId != null) currentSeriesIdentity = resolvedSeriesId
         if (activity != null) currentMetadataPage =
             if (isFullSeries) "series" else "feed"
         requestNativeArtwork(artworkUrl, "unified:$reason")
@@ -426,6 +430,8 @@ internal object SystemMediaBridge {
         val source = when {
             full.title != null || full.episode != null ||
                 full.artworkUrl != null -> full.source
+            observed.title != null || observed.artworkUrl != null ->
+                observed.source
             play.title != null || play.episode != null ||
                 play.artworkUrl != null -> play.source
             else -> ui.source
@@ -440,7 +446,8 @@ internal object SystemMediaBridge {
                 " page=" + (currentMetadataPage ?: "?") +
                 " source=$source title=" + (title != null) +
                 " episode=" + (episode != null) +
-                " seriesId=" + (full.seriesId != null) +
+                " seriesId=" + (resolvedSeriesId != null) +
+                " observedTitle=" + (observed.title != null) +
                 " officialPoster=" + (coverArt != null) +
                 " nativePosterUrl=" + (artworkUrl != null))
             LogUtil.incr("systemMediaUnifiedSnapshot")
@@ -468,10 +475,12 @@ internal object SystemMediaBridge {
         } catch (_: Throwable) { null }
         if (videoId != null && currentEngineVideoIdentity != null &&
             videoId != currentEngineVideoIdentity) {
-            val incoming = FullSeriesMediaInfo.read(activity, engine)
+            val incoming = if (activity?.javaClass?.name ==
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
+                FullSeriesMediaInfo.read(activity, engine)
+                else FullSeriesMediaInfo.observedForEngine(engine)
             val sameSeries = incoming.seriesId != null &&
-                incoming.seriesId == currentSeriesIdentity &&
-                currentMetadataPage == "series"
+                incoming.seriesId == currentSeriesIdentity
             episodeTitle = null
             if (!sameSeries) {
                 seriesTitle = null
@@ -604,11 +613,13 @@ internal object SystemMediaBridge {
                 // Switching episodes can replace TTVideoEngine even within
                 // the SAME drama. Preserve its official poster and title
                 // until a native series ID actually changes.
-                val incomingSeries = FullSeriesMediaInfo.read(
-                    foregroundActivity.get(), candidate).seriesId
+                val activity = foregroundActivity.get()
+                val incomingSeries = if (activity?.javaClass?.name ==
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
+                    FullSeriesMediaInfo.read(activity, candidate).seriesId
+                    else FullSeriesMediaInfo.observedForEngine(candidate).seriesId
                 val sameSeries = incomingSeries != null &&
-                    incomingSeries == currentSeriesIdentity &&
-                    currentMetadataPage == "series"
+                    incomingSeries == currentSeriesIdentity
                 durationMs = -1L
                 positionMs = -1L
                 bufferedMs = -1L
