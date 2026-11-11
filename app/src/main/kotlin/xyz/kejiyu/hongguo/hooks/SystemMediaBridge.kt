@@ -63,6 +63,23 @@ internal object SystemMediaBridge {
     private var lastUserLeaveAt = 0L
     private var lastUserLeaveWasPlaying = false
     private var lastUserLeaveEngine = WeakReference<Any>(null)
+    /**
+     * Android does not guarantee onUserLeaveHint when another application
+     * becomes foreground (recents, links, notifications, multi-tasking).
+     * Capture a candidate BEFORE native Activity.onPause pauses the engine.
+     * Only a later, VERIFIED background/stopped transition may recover it.
+     */
+    private data class ExitSnapshot(
+        val activity: WeakReference<Activity>,
+        val engine: WeakReference<Any>,
+        val at: Long,
+        val wasPlaying: Boolean,
+        val nativeAtCapture: Boolean?,
+        val reason: String,
+        var stopped: Boolean = false
+    )
+    @Volatile private var pendingExit: ExitSnapshot? = null
+    private const val EXIT_SNAPSHOT_WINDOW_MS = 4800L
     // Prevent the 2026-11-11 07:32:50 home playback feedback loop:
     // every automatic play used to reset resumeAttempts to zero.
     private var backgroundResumeBudget = 0
@@ -799,95 +816,193 @@ internal object SystemMediaBridge {
         }
     }
 
+    private fun isVideoActivity(activity: Activity?): Boolean =
+        activity?.javaClass?.name in setOf(
+            "com.dragon.read.pages.main.MainFragmentActivity",
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        )
+
+    private fun rememberExitSnapshot(activity: Activity, reason: String): ExitSnapshot? {
+        if (!enabled || !isVideoActivity(activity) ||
+            foregroundActivity.get() !== activity) return null
+        val engine = videoEngine.get() ?: return null
+        val now = SystemClock.uptimeMillis()
+        val recent = pendingExit?.takeIf {
+            it.activity.get() === activity && it.engine.get() === engine &&
+                now - it.at in 0L..EXIT_SNAPSHOT_WINDOW_MS
+        }
+        val native = nativeIsPlaying(engine)
+        val recentNativePause = lastLifecyclePauseEngine.get() === engine &&
+            lastLifecyclePauseWasPlaying &&
+            now - lastLifecyclePauseAt in 0L..2000L
+        // A confirmed native=false with no pending/recorded lifecycle pause
+        // means the user may already have paused: DO NOT auto-play.
+        val wasPlaying = native == true ||
+            (native == null && knownPlaying) ||
+            recentNativePause || recent?.wasPlaying == true ||
+            (lastUserLeaveEngine.get() === engine &&
+                lastUserLeaveWasPlaying &&
+                now - lastUserLeaveAt in 0L..3000L)
+        val snapshot = ExitSnapshot(
+            WeakReference(activity), WeakReference(engine),
+            recent?.at ?: now, wasPlaying,
+            native ?: recent?.nativeAtCapture, reason,
+            recent?.stopped == true
+        )
+        pendingExit = snapshot
+        LogUtil.info("系统媒体: 离开播放器快照 reason=$reason" +
+            " engine=true native=$native playing=$wasPlaying" +
+            " hint=" + (recent != null || lastUserLeaveWasPlaying))
+        LogUtil.incr("systemMediaExitSnapshot")
+        return snapshot
+    }
+
+    private fun queueBackgroundChecks(snapshot: ExitSnapshot, reason: String) {
+        for (delay in longArrayOf(190L, 490L, 950L, 1750L, 3150L)) {
+            handler.postDelayed({
+                verifyBackgroundExit(snapshot, reason + "/" + delay)
+            }, delay)
+        }
+    }
+
+    /**
+     * Do not use Home-key hints to infer background. Android can deliver
+     * onPause and onStop in different orders while opening a full-series
+     * Activity inside Hongguo. A new Hongguo onResume cancels this snapshot.
+     */
+    private fun verifyBackgroundExit(snapshot: ExitSnapshot, source: String) {
+        if (!enabled || pendingExit !== snapshot) return
+        val activity = snapshot.activity.get() ?: run {
+            pendingExit = null
+            return
+        }
+        if (foregroundActivity.get() !== activity) {
+            pendingExit = null
+            LogUtil.info("系统媒体: 已进入其他红果页面，不启动后台恢复")
+            return
+        }
+        val state = ActivityManager.RunningAppProcessInfo()
+        try { ActivityManager.getMyMemoryState(state) } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 无法读取进程重要性 " + e.javaClass.simpleName)
+            return
+        }
+        val noWindowFocus = !activity.hasWindowFocus()
+        val isBackground =
+            state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE ||
+                (snapshot.stopped && noWindowFocus)
+        LogUtil.info("系统媒体: 多路径后台检测 source=$source" +
+            " importance=" + state.importance +
+            " stopped=" + snapshot.stopped +
+            " focused=" + !noWindowFocus +
+            " confirmed=$isBackground")
+        if (!isBackground) return
+        pendingExit = null  // Exactly one resolution, even if multiple callbacks fire.
+        val engine = snapshot.engine.get()
+        if (!snapshot.wasPlaying || engine == null || videoEngine.get() !== engine ||
+            !isVideoActivity(activity)) {
+            LogUtil.info("系统媒体: 已后台但未恢复，无有效的离开前播放快照" +
+                " wasPlaying=" + snapshot.wasPlaying +
+                " sameEngine=" + (engine != null && videoEngine.get() === engine))
+            LogUtil.incr("systemMediaBackgroundSkip")
+            return
+        }
+        if (SinglePlaybackOwner.isOwnershipTransition()) {
+            LogUtil.info("系统媒体: 播放所有权正在切换，取消后台恢复")
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        requestedBackgroundPlayback = true
+        leaveAt = now
+        resumeAttempts = 0
+        backgroundResumeBudget = 0
+        backgroundPauseGuardEngine = WeakReference(engine)
+        backgroundPauseGuardUntil = now + 10L * 60_000L
+        backgroundPauseSuppressed = 0
+        setNativeBackgroundAllowance(true)
+        val current = nativeIsPlaying(engine)
+        LogUtil.info("系统媒体: 已确认其他 App 前台，保护离开前原生播放器" +
+            " via=$source native=$current")
+        LogUtil.incr("systemMediaBackgroundConfirmed")
+        captureVisibleMediaInfo(activity)
+        readCurrentTimeline()
+        if (current == true) {
+            // A successful Home-key-like transition: keep the engine alive.
+            updateMediaNotification(true)
+            LogUtil.info("系统媒体: 原生视频未暂停，无需重复启动")
+            return
+        }
+        if (current != false) {
+            // Unknown or released decoder is NOT safe to launch blindly.
+            LogUtil.warn("系统媒体: 原生播放状态未知，跳过自动 play 防止双路声音")
+            LogUtil.incr("systemMediaBackgroundStateUnknown")
+            return
+        }
+        // Single verified recovery of the SAME pinned engine only.
+        // Never fall back to VideoContext/Controller or another audio player.
+        val playMethod = engine.javaClass.methods.firstOrNull {
+            it.name == "play" && it.parameterCount == 0 &&
+                it.returnType == Void.TYPE
+        } ?: run {
+            LogUtil.warn("系统媒体: 离开前原生引擎没有安全的 play()")
+            LogUtil.incr("systemMediaBackgroundNoPlayMethod")
+            return
+        }
+        try {
+            playMethod.invoke(engine)
+            LogUtil.info("系统媒体: 切换 App 后恢复同一 TTVideoEngine（仅一次）")
+            LogUtil.incr("systemMediaAppSwitchRecovery")
+            handler.postDelayed({
+                if (enabled && requestedBackgroundPlayback &&
+                    videoEngine.get() === engine) {
+                    val confirmed = nativeIsPlaying(engine)
+                    LogUtil.info("系统媒体: 切换 App 恢复校验 playing=$confirmed")
+                    if (confirmed != null) onNativePlayback(
+                        confirmed, "app-switch-recovery-check", engine)
+                }
+            }, 430L)
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 切换 App 恢复原生引擎失败 " +
+                e.javaClass.simpleName)
+            LogUtil.incr("systemMediaAppSwitchRecoveryFailed")
+        }
+    }
+
     fun onActivityPaused(activity: Activity?) {
-        if (!enabled || activity == null) return
-        if (activity.packageName != appContext?.packageName) return
-        val isPlayerActivity = activity.javaClass.name.contains("MainFragmentActivity") ||
-            activity.javaClass.name.contains("ShortSeriesActivity")
-        if (isPlayerActivity) lastPlayerActivityPauseAt = SystemClock.uptimeMillis()
+        if (!enabled || activity == null ||
+            activity.packageName != appContext?.packageName) return
+        if (isVideoActivity(activity)) lastPlayerActivityPauseAt =
+            SystemClock.uptimeMillis()
+        // Must precede discoverPlayingVideo (which can itself report a pause).
+        val snapshotBefore = rememberExitSnapshot(activity, "Activity.onPause:before")
         discoverPlayingVideo(activity, "beforeActivityPause")
         captureVisibleMediaInfo(activity)
-        val name = activity.javaClass.simpleName
-        val isPlayerPage = activity.javaClass.name.contains("MainFragmentActivity") ||
-            activity.javaClass.name.contains("ShortSeriesActivity")
-        val recentUserLeave = isPlayerPage &&
-            SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..3000L &&
-            lastUserLeaveWasPlaying &&
-            lastUserLeaveEngine.get() === videoEngine.get()
-        val wasPlayingBeforePause = knownPlaying || recentUserLeave
-        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying" +
-            " recentUserLeave=$recentUserLeave")
-        handler.postDelayed({
-            if (!enabled || foregroundActivity.get() !== activity) return@postDelayed
-            val state = ActivityManager.RunningAppProcessInfo()
-            try { ActivityManager.getMyMemoryState(state) } catch (_: Throwable) {
-                return@postDelayed
-            }
-            val isBackground = state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
-            LogUtil.info("系统媒体: Activity 暂停后进程 importance=" +
-                state.importance + " background=$isBackground activity=$name")
-            if (isBackground) {
-                val recentPause = SystemClock.uptimeMillis() - lastLifecyclePauseAt in 0L..1900L
-                val sameEngine = lastLifecyclePauseEngine.get() === videoEngine.get() &&
-                    videoEngine.get() != null
-                val shouldRecoverCurrent = isPlayerPage && wasPlayingBeforePause &&
-                    !knownPlaying && lastLifecyclePauseWasPlaying &&
-                    recentPause && sameEngine && !userCommandInProgress
-                if (shouldRecoverCurrent) {
-                    LogUtil.warn("系统媒体: 后台检测晚于原生 pause，恢复当前播放器" +
-                        " page=$name elapsedMs=" +
-                        (SystemClock.uptimeMillis() - lastLifecyclePauseAt))
-                    LogUtil.incr("systemMediaNativeBackgroundRecovery")
-                    // Genuine process background confirmed; this is not an
-                    // in-app navigation to fullscreen/series Activities.
-                    requestedBackgroundPlayback = true
-                    leaveAt = SystemClock.uptimeMillis()
-                    resumeAttempts = 0
-                    backgroundResumeBudget = 0 // one explicit recovery, no retry
-                    backgroundPauseGuardEngine = WeakReference(videoEngine.get())
-                    backgroundPauseGuardUntil = leaveAt + 10L * 60_000L
-                    backgroundPauseSuppressed = 0
-                    setNativeBackgroundAllowance(true)
-                    LogUtil.info("系统媒体: 当前播放器只恢复一次，后续生命周期 pause" +
-                        " 将针对同一引擎阻止；用户暂停仍允许")
-                    requestTransport(true, "native-background-recovery")
-                    lastLifecyclePauseWasPlaying = false
-                } else {
-                    onBackgroundTransition(activity, "Activity.onPause")
-                    LogUtil.info("系统媒体: 后台恢复判定 background=$isBackground" +
-                        " playerPage=$isPlayerPage wasPlaying=$wasPlayingBeforePause" +
-                        " knownPlaying=$knownPlaying recentPause=$recentPause" +
-                        " sameEngine=$sameEngine")
-                }
-            }
-        }, 500L)
+        val snapshot = snapshotBefore ?: rememberExitSnapshot(
+            activity, "Activity.onPause:after")
+        LogUtil.info("系统媒体: Activity.onPause " +
+            activity.javaClass.simpleName + " knownPlaying=$knownPlaying" +
+            " snapshotPlaying=" + (snapshot?.wasPlaying == true) +
+            " engine=" + (snapshot?.engine?.get() != null))
+        if (snapshot != null) queueBackgroundChecks(snapshot, "onPause")
     }
 
     fun onActivityStopped(activity: Activity?) {
-        if (!enabled || activity == null) return
-        if (activity.packageName != appContext?.packageName) return
+        if (!enabled || activity == null ||
+            activity.packageName != appContext?.packageName) return
         LogUtil.info("系统媒体: Activity.onStop " + activity.javaClass.simpleName)
-        discoverPlayingVideo(activity, "beforeActivityStop")
-    }
-
-    private fun onBackgroundTransition(activity: Activity, reason: String) {
-        if (!enabled) return
-        val native = nativeIsPlaying(activeNativePlayer())
-        if (!knownPlaying && native != true) {
-            LogUtil.info("系统媒体: $reason 未检测到真实视频播放，不发布虚假媒体卡片")
-            return
+        val snapshot = pendingExit?.takeIf {
+            it.activity.get() === activity &&
+                SystemClock.uptimeMillis() - it.at in 0L..EXIT_SNAPSHOT_WINDOW_MS
         }
-        requestedBackgroundPlayback = true
-        leaveAt = SystemClock.uptimeMillis()
-        resumeAttempts = 0
-        backgroundResumeBudget = 1
-        captureVisibleMediaInfo(activity)
-        readCurrentTimeline()
-        setNativeBackgroundAllowance(true)
-        updateMediaNotification(true)
-        LogUtil.info("系统媒体: $reason 后台媒体已激活，native=" +
-            (native?.toString() ?: "?"))
-        LogUtil.incr("systemMediaEnterBackground")
+        if (snapshot != null) {
+            snapshot.stopped = true
+            // onStop can arrive after the 500ms importance probe, or after
+            // a recent-app animation; the next main-loop tick confirms it.
+            handler.post { verifyBackgroundExit(snapshot, "onStop/post") }
+            handler.postDelayed({
+                verifyBackgroundExit(snapshot, "onStop/250")
+            }, 250L)
+        }
+        discoverPlayingVideo(activity, "beforeActivityStop")
     }
 
     /** Called by the exact public VideoShop callbacks, not by obfuscated holder IDs. */
@@ -1035,11 +1150,12 @@ internal object SystemMediaBridge {
             activity.javaClass.simpleName + " knownPlaying=$knownPlaying" +
             " nativePlaying=" + (nativePlaying?.toString() ?: "?"))
         if (!knownPlaying && nativePlaying != true) return
-        // Identical for home and full-series: user-leave hints can also fire
-        // for in-app navigation. Defer until the process actually backgrounds.
+        // A hint is useful evidence, but not required for recents/app switches.
+        // Real background confirmation happens after onPause / onStop.
         lastUserLeaveAt = SystemClock.uptimeMillis()
         lastUserLeaveWasPlaying = true
         lastUserLeaveEngine = WeakReference(videoEngine.get())
+        rememberExitSnapshot(activity, "onUserLeaveHint")
         LogUtil.info("系统媒体: 页面离开事件已记录，等待真实后台确认" +
             " page=" + activity.javaClass.simpleName)
     }
@@ -1048,6 +1164,7 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        pendingExit = null
         lastPlayerActivityPauseAt = 0L
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
@@ -1388,6 +1505,7 @@ internal object SystemMediaBridge {
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
+        pendingExit = null
         backgroundResumeBudget = 0
         backgroundPauseGuardEngine.clear()
         backgroundPauseGuardUntil = 0L
