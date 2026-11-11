@@ -63,7 +63,7 @@ internal object MinePageCleaner {
     private val hiddenClickRoots = Collections.synchronizedMap(
         WeakHashMap<View, Boolean>()
     )
-    private var lastDataLogAt = 0L
+    private var lastScanAt = 0L
 
     fun configure(prefs: SharedPreferences, master: Boolean) {
         enabled = master
@@ -253,16 +253,36 @@ internal object MinePageCleaner {
      * ("消息", "游戏" etc). Only the registered native Mine fragment root
      * may hide those. A right-side menu is scanned separately and only
      * when the Mine fragment is visibly active. */
-    fun scanVisibleMine(activity: Activity?) {
+    fun scanVisibleMine(activity: Activity?, force: Boolean = false) {
         if (!enabled || activity?.javaClass?.name !=
             "com.dragon.read.pages.main.MainFragmentActivity") return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now - lastScanAt < 800L) return
+        lastScanAt = now
         val fragment = visibleMine.get() ?: return
         val mineRoot = roots[fragment]?.get() ?: return
         if (!mineRoot.isAttachedToWindow || !mineRoot.isShown) return
         scan(mineRoot, Area.MAIN)
-        // Drawer is normally in the same decor but may be outside fragment.
+        // Do not hide a single "会员中心" tile elsewhere on Mine as
+        // though it were the right sidebar. Only scan native sidebar text
+        // when a visible menu contains at least two known sidebar labels.
+        // Compose sidebars are filtered at the model/List boundary instead.
         val decor = activity.window?.decorView as? ViewGroup ?: return
-        scan(decor, Area.SIDEBAR)
+        val labels = linkedSetOf<String>()
+        val pending = ArrayDeque<View>()
+        pending.add(decor)
+        var count = 0
+        while (pending.isNotEmpty() && count++ < 1600) {
+            val view = pending.removeFirst()
+            if (!view.isShown) continue
+            if (view is TextView) {
+                val t = view.text?.toString()?.trim().orEmpty()
+                if (sidebarEntries.any { t in it.aliases }) labels.add(t)
+            }
+            if (view is ViewGroup && view.childCount < 90)
+                for (i in 0 until view.childCount) pending.addLast(view.getChildAt(i))
+        }
+        if (labels.size >= 2) scan(decor, Area.SIDEBAR)
     }
 
     private fun pickRow(text: TextView, root: View, area: Area): View {
@@ -307,7 +327,7 @@ internal object MinePageCleaner {
         var inspected = 0
         while (pending.isNotEmpty() && inspected++ < 1800) {
             val v = pending.removeFirst()
-            if (v is TextView) {
+            if (v is TextView && v.isShown) {
                 val entry = blockedLabel(v.text?.toString(), area)
                 if (entry != null) hideNative(pickRow(v, root, area), entry)
             }
@@ -342,6 +362,7 @@ internal object MinePageCleaner {
         }
         saved.clear()
         hiddenClickRoots.clear()
-        scanVisibleMine(activity)
+        lastScanAt = 0L
+        scanVisibleMine(activity, force = true)
     }
 }
