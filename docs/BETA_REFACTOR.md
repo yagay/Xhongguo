@@ -96,6 +96,45 @@ multiple dramas or never supplies a matching official detail. The result
 must be checked with an actual beta Debug build and new on-device diagnostics
 before treating this change as validated.
 
+## 2026-11-11 22:45:26 background episode-end regression
+
+The exported diagnostic ZIP confirms that after the host
+`ShortSeriesActivity` received `onUserLeaveHint` at 22:43:28:
+
+- `VideoContext.onLifeCycleOnPause` and `onLifeCycleOnStop` ran.
+- The native TTVideoEngine was paused, then `TTVideoEngine.play()` was
+  called directly approximately one second later to resume background audio.
+- Audio/video progress continued from ~17.3s to the exact 103.658s duration.
+- At 22:44:53, 22:45:09 and 22:45:24, the native progress remained
+  103.658/103.658s; no new video engine play event was observed.
+
+This is evidence that **the host episode advance did not occur**, not proof
+of which specific host completion callback was dropped. The previous
+direct-engine recovery bypassed higher-level VideoShop state, so the beta
+now prefers a guarded, exact-engine handoff:
+
+1. During a verified `onUserLeaveHint` from an actually playing native
+   page, protect only the pinned TTVideoEngine, VideoContext and controller
+   from the brief host lifecycle pause/stop. Unrelated navigation, normal
+   user pause, ownership switches and preloaded engines are excluded.
+2. If those guards were used and no native pause event was observed, retain
+   the original player instead of invoking TTVideoEngine.play() again.
+3. If native progress does not advance after a bounded 2.2s check, request
+   one high-level `VideoContext.play()` only for the same recorded context,
+   same engine, unchanged user-pause epoch, and not near episode end.
+4. Observe already registered `VideoEngineCallback.onCompletion` methods
+   *after* forwarding to the host's own handler. This is optional
+   diagnostics and never requests a next episode or fabricates video IDs.
+5. Detect a background `positionMs == durationMs` stall lasting at least
+   three seconds and record either `no_completion_callback` or
+   `completion_but_no_next`. Do not loop, seek or replay at EOF.
+
+This patch requires a new beta Debug build and real-device regression
+before calling the next-episode behavior fixed. If no native completion
+event arrives even with preserved VideoShop lifecycle, the next step is to
+inspect the host's exact registered completion controller rather than
+guess an obfuscated next-episode method.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
