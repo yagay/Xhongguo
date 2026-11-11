@@ -3971,6 +3971,21 @@ object Hooks {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             var selected: SettingsCatalog.Group? = null
 
+            fun sheetHeight(group: SettingsCatalog.Group?): Int {
+                val base = if (group == null) 108f else 118f
+                val optionCount = if (group == null)
+                    1 + SettingsCatalog.groups.count { it.id != "diagnostics" }
+                else group.items.size
+                val subsectionCount = group?.items?.count {
+                    it.subsection.isNotBlank()
+                } ?: 0
+                val desired = dp(act, base + optionCount * 62f +
+                    subsectionCount * 28f)
+                val screenLimit = (act.resources.displayMetrics.heightPixels *
+                    0.78f).toInt()
+                return desired.coerceAtMost(screenLimit)
+            }
+
             fun addRow(view: View) {
                 rows.addView(view, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4088,6 +4103,11 @@ object Hooks {
                     }
                 }
                 scroll.post { scroll.scrollTo(0, 0) }
+                if (dialog.isShowing) {
+                    dialog.window?.setLayout(
+                        (act.resources.displayMetrics.widthPixels * .96f).toInt(),
+                        sheetHeight(group))
+                }
             }
 
             back.setOnClickListener { render(null) }
@@ -4115,7 +4135,7 @@ object Hooks {
                         windowAnimations = 0
                     }
                     setLayout((act.resources.displayMetrics.widthPixels * .96f).toInt(),
-                        (act.resources.displayMetrics.heightPixels * .78f).toInt())
+                        sheetHeight(selected))
                 }
             }
             dialog.show()
