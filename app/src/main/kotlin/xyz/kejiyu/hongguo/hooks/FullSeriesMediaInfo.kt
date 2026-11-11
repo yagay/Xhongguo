@@ -47,6 +47,63 @@ internal object FullSeriesMediaInfo {
     private var boundPresenterActivity = WeakReference<Activity>(null)
     private var boundPresenterEngine = WeakReference<Any>(null)
     private var boundPresenterVideoId: String? = null
+    private var transitionActivity = WeakReference<Activity>(null)
+    private var transitionEngine = WeakReference<Any>(null)
+    private var transitionAt = 0L
+    private var transitionPreviousVideo: String? = null
+    private var transitionPreviousSeries: String? = null
+
+    /** Called before the host's new native engine starts: capture the prior
+     * verified identity without importing the old Activity's stale labels. */
+    fun beginEngineTransition(activity: Activity?, engine: Any?, previousSeries: String?) {
+        if (activity?.javaClass?.name != ACTIVITY || engine == null) return
+        transitionActivity = WeakReference(activity)
+        transitionEngine = WeakReference(engine)
+        transitionAt = SystemClock.uptimeMillis()
+        transitionPreviousVideo = boundPresenterVideoId
+        transitionPreviousSeries = previousSeries
+    }
+
+    /**
+     * A host DTO consumed AFTER the new engine started may provide its
+     * official series identity despite incompatible engine video-ID formats.
+     * Accept it only with matching official detail and one unique series.
+     * Never use this for the home feed or unrelated Activity instances.
+     */
+    private fun recentNativeHandoff(activity: Activity, engine: Any?): Info? {
+        if (transitionActivity.get() !== activity ||
+            transitionEngine.get() !== engine) return null
+        val now = SystemClock.uptimeMillis()
+        val selected: Pair<NativeEvidencePolicy.Candidate, VideoSnapshot>? =
+            synchronized(detailLock) {
+                val all = observedVideos.mapNotNull { (videoId, v) ->
+                    val series = v.seriesId ?: return@mapNotNull null
+                    val detail = observedDetails[series]
+                    val candidate = NativeEvidencePolicy.Candidate(
+                        videoId, series, v.nativeConsumedAt,
+                        detail != null, detail?.observedAt ?: 0L)
+                    candidate to v
+                }
+                val choice = NativeEvidencePolicy.select(
+                    all.map { it.first }, transitionAt, now,
+                    transitionPreviousVideo, transitionPreviousSeries)
+                    ?: return@synchronized null
+                all.firstOrNull { it.first == choice }
+            }
+        if (selected == null) return null
+        val (candidate, video) = selected
+        val detail = detailForSeries(candidate.seriesId) ?: return null
+        val title = detail.title ?: video.title
+        val poster = detail.artworkUrl ?: video.poster
+        if (title == null && poster == null) return null
+        FeatureTrace.event("media", "native_handoff_match", "matched",
+            "officialDetail=true,series=true,title=" + (title != null) +
+                ",poster=" + (poster != null) +
+                ",differentSeries=" + (candidate.seriesId != transitionPreviousSeries),
+            minIntervalMs = 1500L)
+        return Info(title, video.episode, "series-native-handoff-evidence",
+            poster, candidate.seriesId)
+    }
 
     // The 7.3.5.32 detail is often held only by a short-lived uo4.y0.x
     // Runnable. Retain safe metadata keyed by the actual series ID, never
@@ -68,7 +125,9 @@ internal object FullSeriesMediaInfo {
         val seriesId: String?,
         val title: String?,
         val poster: String?,
-        val observedAt: Long
+        val observedAt: Long,
+        val nativeConsumedAt: Long,
+        val episode: String?
     )
     private val observedVideos = LinkedHashMap<String, VideoSnapshot>()
     private const val VIDEO_TTL_MS = 15L * 60L * 1000L
@@ -77,7 +136,7 @@ internal object FullSeriesMediaInfo {
 
     /** Observe a completed native data-model *at its consumption boundary*.
      * The empty default constructor is not useful with RPC/Gson adapters. */
-    fun observeVideoData(model: Any?) {
+    fun observeVideoData(model: Any?, nativeConsumer: Boolean = true) {
         if (model?.javaClass?.name != DATA) return
         val videoId = seriesId(field(model, "vid")) ?: return
         val id = seriesId(field(model, "episodesId")) ?:
@@ -100,7 +159,12 @@ internal object FullSeriesMediaInfo {
             val updated = VideoSnapshot(
                 id ?: previous?.seriesId,
                 title ?: if (sameSeries) previous?.title else null,
-                poster ?: if (sameSeries) previous?.poster else null, now)
+                poster ?: if (sameSeries) previous?.poster else null,
+                now, if (nativeConsumer) now else previous?.nativeConsumedAt ?: 0L,
+                episodeFromIndex(model,
+                    number(field(model, "episodesCount"))?.takeIf {
+                        it in 1..5000L
+                    }) ?: previous?.episode)
             observedVideos[videoId] = updated
             newMetadata = previous == null ||
                 previous.seriesId != updated.seriesId ||
@@ -134,7 +198,7 @@ internal object FullSeriesMediaInfo {
     fun infoForVideoData(model: Any?): Info {
         if (model?.javaClass?.name != DATA) return Info()
         val videoId = seriesId(field(model, "vid")) ?: return Info()
-        observeVideoData(model)
+        observeVideoData(model, nativeConsumer = false)
         val cached = synchronized(detailLock) {
             observedVideos[videoId]?.takeIf {
                 SystemClock.uptimeMillis() - it.observedAt in 0L..VIDEO_TTL_MS
@@ -469,7 +533,7 @@ internal object FullSeriesMediaInfo {
         val model = best.video
         val fragmentTotal = number(field(model, "episodesCount"))
             ?.takeIf { it in 1..5000L }
-        observeVideoData(model)
+        observeVideoData(model, nativeConsumer = false)
         val modelTitle = str(field(model, "seriesName"))
         // The Saas model separates the drama's 'cover' from the individual
         // episode's 'episodeCover' (often a frame still). Accept 'cover'
@@ -665,7 +729,7 @@ internal object FullSeriesMediaInfo {
         val current = listOf("I", "z")
             .mapNotNull { key -> field(presenter, key) }
             .filter { it.javaClass.name == DATA }
-        current.forEach(::observeVideoData)
+        current.forEach { observeVideoData(it, nativeConsumer = false) }
 
         // A presenter can still hold the LAST drama's current/next model.
         // Verify exact video identity before using either one.
@@ -721,6 +785,8 @@ internal object FullSeriesMediaInfo {
         // to stale presenter.x.b, intent extras or old cached title.
         // With no trustworthy matching DTO, temporarily publish blanks.
         if (videoId != null && matchedSeriesKey == null) {
+            val independent = recentNativeHandoff(activity, engine)
+            if (independent != null) return independent
             // A SaasVideoData matched by exact video ID can still carry a
             // correct title/poster even if the backend omitted episodesId.
             // Use those fields directly; NEVER substitute old Activity
