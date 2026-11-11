@@ -54,6 +54,16 @@ internal object SystemMediaBridge {
     private var layer = WeakReference<Any>(null)
     private var videoContext = WeakReference<Any>(null)
     private var videoEngine = WeakReference<Any>(null)
+    // No feature writes directly to a second MediaSession. All pages pass
+    // through this common refresh and publication lifecycle.
+    private val mediaPresentation = MediaPresentationState()
+    private val mediaRefresh = MediaRefreshCoordinator(handler,
+        isActive = { enabled && videoEngine.get() != null },
+        refresh = { reason ->
+            captureNativePlayEntity(reason)
+            updateSessionMetadata()
+            if (reportedCard) updateMediaNotification(knownPlaying)
+        })
     private var foregroundActivity = WeakReference<Activity>(null)
     private var lastDiscoveryAt = 0L
     private var lastNativeEngineAt = 0L
@@ -161,28 +171,10 @@ internal object SystemMediaBridge {
     private var lastVisibleInfoSource = ""
     private var currentEngineVideoIdentity: String? = null
     private var lastNativeMetaProbeAt = 0L
-    private val dtoRefreshLock = Any()
-    private var nextDtoRefreshAt = 0L
-
-    /** Native detail/video DTOs can finish loading AFTER the engine begins
-     * playback. Refresh the SINGLE media resolver on completed model changes;
-     * never depend on the UI becoming visible or another episode starting. */
+    /** Host DTO updates may arrive in bursts or after autoplay. The shared
+     * coordinator never drops the last event inside an arbitrary throttle. */
     fun onNativeSeriesMetadataAvailable() {
-        if (!enabled) return
-        val now = SystemClock.uptimeMillis()
-        val schedule = synchronized(dtoRefreshLock) {
-            if (now < nextDtoRefreshAt) false
-            else {
-                nextDtoRefreshAt = now + 1500L
-                true
-            }
-        }
-        if (!schedule) return
-        handler.postDelayed({
-            if (!enabled || videoEngine.get() == null) return@postDelayed
-            captureNativePlayEntity("dto-observed")
-            updateSessionMetadata()
-        }, 260L)
+        if (enabled) mediaRefresh.onNativeDataChanged()
     }
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
@@ -224,6 +216,8 @@ internal object SystemMediaBridge {
     private var coverArt: Bitmap? = null
     private var artworkRequestUrl: String? = null
     private var artworkRequestedAt = 0L
+    private var artworkFailedUrl: String? = null
+    private var artworkFailedAt = 0L
     private var artworkGeneration = 0L
     private var lastArtworkDiagnosticAt = 0L
     private var lastMetadataSignature: String? = null
@@ -246,9 +240,10 @@ internal object SystemMediaBridge {
             val publishedEpisode = snapshot?.getString(
                 MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
             LogUtil.info("系统媒体: 媒体信息回读" +
-                " titleMatches=" + (publishedTitle == (seriesTitle ?: "红果短剧")) +
+                " titleMatches=" + (publishedTitle ==
+                    mediaPresentation.title(seriesTitle)) +
                 " episodeMatches=" + (publishedEpisode ==
-                    (episodeTitle ?: "正在播放的视频")) +
+                    mediaPresentation.subtitle(episodeTitle, knownPlaying)) +
                 " artwork=" + (coverArt != null) +
                 " mediaActive=" + (session?.isActive == true))
             LogUtil.incr("systemMediaMetadataReadback")
@@ -357,6 +352,8 @@ internal object SystemMediaBridge {
             return
         }
         val now = SystemClock.uptimeMillis()
+        if (url == artworkFailedUrl &&
+            now - artworkFailedAt in 0L..15_000L) return
         if (url == artworkRequestUrl && (coverArt != null ||
             now - artworkRequestedAt < 90_000L)) return
         artworkRequestUrl = url
@@ -370,9 +367,16 @@ internal object SystemMediaBridge {
                 ownerEngine !== videoEngine.get() ||
                 artworkRequestUrl != url) return@load
             if (bitmap == null) {
+                artworkFailedUrl = url
+                artworkFailedAt = SystemClock.uptimeMillis()
+                // A failed request must be retried after bounded backoff,
+                // not suppressed for 90 seconds as if it had succeeded.
+                artworkRequestUrl = null
                 LogUtil.warn("系统媒体: 封面加载失败 source=$source")
                 LogUtil.incr("systemMediaArtworkUnavailable")
             } else if (!bitmap.isRecycled) {
+                artworkFailedUrl = null
+                artworkFailedAt = 0L
                 coverArt = bitmap
                 updateSessionMetadata()
                 updateMediaNotification(knownPlaying)
@@ -410,8 +414,8 @@ internal object SystemMediaBridge {
         if (!force && signature == lastMetadataSignature &&
             artwork === lastMetadataArt) return
         try {
-            val title = seriesTitle ?: "红果短剧"
-            val subtitle = episodeTitle ?: "正在播放的视频"
+            val title = mediaPresentation.title(seriesTitle)
+            val subtitle = mediaPresentation.subtitle(episodeTitle, knownPlaying)
             val builder = MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
@@ -453,6 +457,7 @@ internal object SystemMediaBridge {
      * to the exact same series ID. A missing/unknown ID is not evidence.
      */
     private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
+        mediaPresentation.onVideoTransition(sameSeries)
         episodeTitle = null
         if (!sameSeries) {
             seriesTitle = null
@@ -479,6 +484,7 @@ internal object SystemMediaBridge {
         // should retain last drama's title/poster while the new drama loads.
         updateSessionMetadata(force = true)
         if (reportedCard) updateMediaNotification(knownPlaying)
+        mediaRefresh.onPlaybackTransition(reason)
         LogUtil.info("系统媒体: 剧集切换已清理旧元数据" +
             " reason=$reason sameSeries=$sameSeries" +
             " retainedPoster=" + (coverArt != null))
@@ -617,6 +623,12 @@ internal object SystemMediaBridge {
                 " nativePosterUrl=" + (artworkUrl != null))
             LogUtil.incr("systemMediaUnifiedSnapshot")
         }
+        mediaPresentation.onResolved(
+            verified = !seriesUnverified &&
+                (resolvedSeriesId != null || source == "series-video-id-only" ||
+                    source == "home-native-current-item" ||
+                    source == "native-model-video-id"),
+            title = title)
         if (changed) {
             LogUtil.info("系统媒体: 统一媒体元数据已绑定 reason=$reason" +
                 " source=$source title=" + (title != null) +
@@ -1530,9 +1542,8 @@ internal object SystemMediaBridge {
                 else android.R.drawable.ic_media_play
             val notification = Notification.Builder(ctx, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(seriesTitle ?: "红果短剧")
-                .setContentText(episodeTitle ?: if (playing)
-                    "正在播放 · 点击返回红果" else "已暂停 · 点击返回红果")
+                .setContentTitle(mediaPresentation.title(seriesTitle))
+                .setContentText(mediaPresentation.subtitle(episodeTitle, playing))
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
                 .setOnlyAlertOnce(true)
@@ -1589,6 +1600,8 @@ internal object SystemMediaBridge {
         receiver = null
         handler.removeCallbacks(timelineTicker)
         handler.removeCallbacks(delayedMetadataSync)
+        mediaRefresh.cancel()
+        mediaPresentation.reset()
         progressPolling = false
         durationMs = -1L
         positionMs = -1L
