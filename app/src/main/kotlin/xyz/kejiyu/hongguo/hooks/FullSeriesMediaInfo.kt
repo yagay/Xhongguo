@@ -65,6 +65,7 @@ internal object FullSeriesMediaInfo {
     private val observedVideos = LinkedHashMap<String, VideoSnapshot>()
     private const val VIDEO_TTL_MS = 15L * 60L * 1000L
     private var lastObservedVideoDiagnosticAt = 0L
+    private var lastDetailTypeDiagnosticAt = 0L
 
     /** Observe a completed native data-model *at its consumption boundary*.
      * The empty default constructor is not useful with RPC/Gson adapters. */
@@ -145,7 +146,20 @@ internal object FullSeriesMediaInfo {
     private fun rememberDetail(model: Any?) {
         if (!isDetailModel(model)) return
         val id = seriesId(detailField(model, "episodesId")) ?:
-            seriesId(detailField(model, "seriesId")) ?: return
+            seriesId(detailField(model, "seriesId"))
+        val nowForEvidence = SystemClock.uptimeMillis()
+        if (nowForEvidence - lastDetailTypeDiagnosticAt > 12000L) {
+            lastDetailTypeDiagnosticAt = nowForEvidence
+            LogUtil.info("系统媒体: 原生详情对象实际到达" +
+                " wrapper=" + (model?.javaClass?.name != DETAIL) +
+                " id=" + (id != null) +
+                " hasTitle=" + (str(detailField(model, "episodesTitle")) != null) +
+                " hasCover=" +
+                (MediaArtworkLoader.normalize(detailField(model, "episodesCover") as? String)
+                    != null))
+            LogUtil.incr("systemMediaNativeDetailObjectSeen")
+        }
+        if (id == null) return
         val title = str(detailField(model, "episodesTitle")) ?:
             str(detailField(model, "seriesName"))
         val cover = listOf("episodesCover", "smallEpisodesCover")
