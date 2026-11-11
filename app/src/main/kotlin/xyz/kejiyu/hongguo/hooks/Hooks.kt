@@ -4965,6 +4965,8 @@ object Hooks {
 
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
         LogUtil.info("── installBusinessHooks ── pkg=$pkg")
+        FeatureTrace.event("hook", "installation", "started",
+            "package=host")
         InAppMiniPlayer.openHomeTab = { activity ->
             val tab = nativeTabClickForLabel(activity, "首页")
             if (tab != null) tab.performClick()
@@ -5055,9 +5057,13 @@ object Hooks {
                             .intercept(Hooker { chain ->
                                 guardedCallback(id, chain, block)
                             })
+                        LogUtil.incr("hookMethodInstalled")
                     } catch (e: Exception) {
                         LogUtil.warn("可选 Hook 安装失败 id=$id type=" +
                             e.javaClass.simpleName)
+                        FeatureTrace.event("hook", "install_method", "fail",
+                            "hook=" + id.take(55) +
+                                ",errorType=" + e.javaClass.simpleName)
                     }
                 }
         }
@@ -5072,9 +5078,13 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             guardedCallback(id, chain, block)
                         })
+                    LogUtil.incr("hookConstructorInstalled")
                 } catch (e: Exception) {
                     LogUtil.warn("可选 Hook 安装失败 id=$id type=" +
                         e.javaClass.simpleName)
+                    FeatureTrace.event("hook", "install_constructor", "fail",
+                        "hook=" + id.take(55) +
+                            ",errorType=" + e.javaClass.simpleName)
                 }
             }
         }
@@ -7381,6 +7391,7 @@ object Hooks {
             ham(c, "canShowVipCenter", "nvCenter") { chain -> if (gMasterOn && gVipOn) true else chain.proceed() }
             LogUtil.info("  ✓ NsVipImpl") } catch (e: Exception) { LogUtil.warn("  NsVipImpl 未找到: $e") }
 
+        FeatureTrace.event("hook", "installation", "completed")
         LogUtil.info("installBusinessHooks done"); LogUtil.diagDump(true)
     }
 
