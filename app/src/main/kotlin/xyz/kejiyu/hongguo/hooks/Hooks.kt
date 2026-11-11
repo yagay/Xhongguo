@@ -1784,6 +1784,32 @@ object Hooks {
         val totalInsetDp = if (parentWidth >= width) (parentWidth - width) / density else 0f
 
         when (gNames.seriesToolbarProfile) {
+            "auto" -> {
+                val act = gCurrentActivity
+                if (act?.javaClass?.name !=
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
+                    return 0
+                val loc = IntArray(2)
+                try { v.getLocationOnScreen(loc) } catch (_: Throwable) { return 0 }
+                val screenHeight = act.resources.displayMetrics.heightPixels
+                val validShape = heightDp in 33f..58f &&
+                    widthRatio >= 0.82f && v.childCount in 2..16
+                if (!validShape) return 0
+                val labels = collectUiTexts(v, 4).map { it.replace(" ", "") }
+                val contentEvidence = labels.any { t ->
+                    t.contains("全集") || t.contains("选集") ||
+                        t.contains("第") && t.contains("集") ||
+                        t.contains("播放") || t.contains("返回")
+                } || (0 until v.childCount).any { idx ->
+                    v.getChildAt(idx) is android.widget.SeekBar
+                }
+                // Do not hide a fullscreen dialog or a random panel just
+                // because it happens to have the same size as a toolbar.
+                if (!contentEvidence) return 0
+                if (loc[1] >= 0 && loc[1] < screenHeight * 0.17f) return 1
+                if (loc[1] > screenHeight * 0.62f &&
+                    loc[1] < screenHeight * 0.97f) return 2
+            }
             "oversea73132" -> {
                 val isTop = v.childCount == 9 && heightDp in 40f..48f &&
                     (widthDp >= 400f || widthRatio >= 0.97f)
@@ -2581,7 +2607,25 @@ object Hooks {
         if (v == null) return false
         try { val id = v.id; if (id > 0 && gProgressIdSet.contains(id)) return true } catch (_: Exception) {}
         try { if (v.javaClass.name == gNames.progressBar) return true } catch (_: Exception) {}
-        return false
+        if (!TargetNames.isUniversal(gNames)) return false
+        val activity = gCurrentActivity ?: return false
+        if (activity.javaClass.name !in setOf(
+            "com.dragon.read.pages.main.MainFragmentActivity",
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        )) return false
+        // Generic video progress only: do not hide settings/loaders or
+        // widgets unrelated to the currently visible video screen.
+        if (v !is android.widget.SeekBar &&
+            v !is android.widget.ProgressBar) return false
+        if (!isInsideCurrentActivityDecor(v)) return false
+        val dm = activity.resources.displayMetrics
+        val w = if (v.width > 0) v.width else v.measuredWidth
+        val h = if (v.height > 0) v.height else v.measuredHeight
+        if (w < dm.widthPixels * 0.62f || h > dm.density * 42f) return false
+        val loc = IntArray(2)
+        try { v.getLocationOnScreen(loc) } catch (_: Throwable) { return false }
+        return loc[1] > dm.heightPixels * 0.50f &&
+            loc[1] < dm.heightPixels * 0.96f
     }
     private fun scanTreeProgress(v: View?) {
         if (v == null || !gMasterOn || !gProgressOff) return
@@ -2720,6 +2764,11 @@ object Hooks {
     private fun hasVerifiedUiProfile(): Boolean =
         TargetNames.isSupported(gPkg, gTargetVersionName)
 
+    /** System status/navigation bars use Android framework APIs, not
+     * obfuscated resource IDs. Valid even in universal mode. */
+    private fun canApplySystemBars(): Boolean =
+        hasVerifiedUiProfile() || TargetNames.isUniversal(gNames)
+
     private fun keepNativeNavigation(): Boolean =
         !hasVerifiedUiProfile() || !isGestureNavigation(appCtx ?: gCurrentActivity)
 
@@ -2770,6 +2819,8 @@ object Hooks {
     }
 
     private fun updateSeriesMallTopMargin(act: Activity, statusHidden: Boolean) {
+        // 'is7' is a known legacy resource, never touch it on a new APK.
+        if (TargetNames.isUniversal(gNames)) return
         try {
 
             val topBarId = act.resources.getIdentifier("is7", "id", gPkg)
@@ -2833,7 +2884,7 @@ object Hooks {
     }
 
     private fun applyWindowedTop(act: Activity) {
-        if (!gMasterOn || !gStatusOn || !hasVerifiedUiProfile()) return
+        if (!gMasterOn || !gStatusOn || !canApplySystemBars()) return
         try {
             rememberOriginalStatusBar(act)
             val window = act.window ?: return
@@ -2942,7 +2993,7 @@ object Hooks {
     }
 
     private fun applyCleanTop(act: Activity?) {
-        if (act == null || !gMasterOn || !gStatusOn || !hasVerifiedUiProfile()) return
+        if (act == null || !gMasterOn || !gStatusOn || !canApplySystemBars()) return
         if (isWindowedMode(act)) {
             applyWindowedTop(act)
             return
@@ -3026,7 +3077,7 @@ object Hooks {
 
     private fun applyBottomEdgeToEdge(act: Activity?, hideNavigationBar: Boolean) {
         if (act == null || !hideNavigationBar || isWindowedMode(act) ||
-            !hasVerifiedUiProfile() || !isGestureNavigation(act)) return
+            !canApplySystemBars() || !isGestureNavigation(act)) return
         try {
             val decor = act.window.decorView
             if (Build.VERSION.SDK_INT >= 30) {
@@ -3046,7 +3097,8 @@ object Hooks {
     }
 
     private fun extendKnownBottomContentRoot(act: Activity?, expectedGapPx: Int) {
-        if (act == null || expectedGapPx <= 0) return
+        if (TargetNames.isUniversal(gNames) ||
+            act == null || expectedGapPx <= 0) return
         try {
             val id = act.resources.getIdentifier("hsw", "id", gPkg)
             if (id == 0) return
@@ -3081,7 +3133,7 @@ object Hooks {
     private fun applyNavBar(act: Activity?) {
         if (act == null) return
         if (!gMasterOn || !gNavBarOff || !isGestureNavigation(act) ||
-            !hasVerifiedUiProfile()) {
+            !canApplySystemBars()) {
             showNavBar(act)
             return
         }
