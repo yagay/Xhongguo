@@ -47,6 +47,8 @@ internal object FullSeriesMediaInfo {
     private var boundPresenterActivity = WeakReference<Activity>(null)
     private var boundPresenterEngine = WeakReference<Any>(null)
     private var boundPresenterVideoId: String? = null
+    private var lastMatchedActivity = WeakReference<Activity>(null)
+    private var lastMatchedVideoId: String? = null
     private var transitionActivity = WeakReference<Activity>(null)
     private var transitionEngine = WeakReference<Any>(null)
     private var transitionAt = 0L
@@ -60,7 +62,11 @@ internal object FullSeriesMediaInfo {
         transitionActivity = WeakReference(activity)
         transitionEngine = WeakReference(engine)
         transitionAt = SystemClock.uptimeMillis()
-        transitionPreviousVideo = boundPresenterVideoId
+        transitionPreviousVideo = when {
+            lastMatchedActivity.get() === activity -> lastMatchedVideoId
+            boundPresenterActivity.get() === activity -> boundPresenterVideoId
+            else -> null
+        }
         transitionPreviousSeries = previousSeries
     }
 
@@ -74,6 +80,8 @@ internal object FullSeriesMediaInfo {
         if (transitionActivity.get() !== activity ||
             transitionEngine.get() !== engine) return null
         val now = SystemClock.uptimeMillis()
+        var recentNativeCount = 0
+        var withOfficialDetail = 0
         val selected: Pair<NativeEvidencePolicy.Candidate, VideoSnapshot>? =
             synchronized(detailLock) {
                 val all = observedVideos.mapNotNull { (videoId, v) ->
@@ -84,18 +92,36 @@ internal object FullSeriesMediaInfo {
                         detail != null, detail?.observedAt ?: 0L)
                     candidate to v
                 }
+                recentNativeCount = all.count {
+                    it.first.nativeObservedAtMs >= transitionAt &&
+                        it.first.videoId != transitionPreviousVideo
+                }
+                withOfficialDetail = all.count {
+                    it.first.nativeObservedAtMs >= transitionAt &&
+                        it.first.videoId != transitionPreviousVideo &&
+                        it.first.detailAvailable
+                }
                 val choice = NativeEvidencePolicy.select(
                     all.map { it.first }, transitionAt, now,
                     transitionPreviousVideo, transitionPreviousSeries)
                     ?: return@synchronized null
                 all.firstOrNull { it.first == choice }
             }
-        if (selected == null) return null
+        if (selected == null) {
+            FeatureTrace.event("media", "native_handoff_probe", "degraded",
+                "recentNative=" + recentNativeCount +
+                    ",matchingDetail=" + withOfficialDetail +
+                    ",pendingMs=" + (now - transitionAt).coerceAtLeast(0L),
+                minIntervalMs = 3500L)
+            return null
+        }
         val (candidate, video) = selected
         val detail = detailForSeries(candidate.seriesId) ?: return null
         val title = detail.title ?: video.title
         val poster = detail.artworkUrl ?: video.poster
         if (title == null && poster == null) return null
+        lastMatchedActivity = WeakReference(activity)
+        lastMatchedVideoId = candidate.videoId
         FeatureTrace.event("media", "native_handoff_match", "matched",
             "officialDetail=true,series=true,title=" + (title != null) +
                 ",poster=" + (poster != null) +
@@ -907,6 +933,8 @@ internal object FullSeriesMediaInfo {
             boundPresenterActivity = WeakReference(activity)
             boundPresenterEngine = WeakReference(engine)
             boundPresenterVideoId = vid(playingModel)
+            lastMatchedActivity = WeakReference(activity)
+            lastMatchedVideoId = boundPresenterVideoId
         }
         val now = SystemClock.uptimeMillis()
         if (now - lastDiagnosticAt > 9000L) {
