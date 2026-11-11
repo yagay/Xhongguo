@@ -42,7 +42,8 @@ internal object InAppMiniPlayer {
         var snapAnimation: ValueAnimator? = null,
         var playbackButton: WeakReference<TextView> = WeakReference(null),
         var presentedActivity: Activity = activity,
-        var detailTransitionUntil: Long = 0L
+        var detailTransitionUntil: Long = 0L,
+        var resumeAfterDetails: Boolean = false
     )
 
     @Volatile private var session: Session? = null
@@ -185,6 +186,10 @@ internal object InAppMiniPlayer {
         val current = session ?: return
         if (candidate !== current.nativeEngine.get()) return
         if (action !in setOf("play", "pause", "stop")) return
+        if (SystemMediaBridge.isExplicitMediaCommandInProgress()) {
+            current.userPaused = action != "play"
+            current.resumeAfterDetails = action == "play"
+        }
         val button = current.playbackButton.get() ?: return
         val paused = action != "play"
         button.post {
@@ -208,6 +213,9 @@ internal object InAppMiniPlayer {
         val current = session ?: return false
         if (current.activity !== owner || !enabled) return false
         val until = android.os.SystemClock.uptimeMillis() + 5000L
+        current.resumeAfterDetails =
+            nativeEnginePlaying(current.nativeEngine.get()) == true &&
+            !current.userPaused
         current.detailTransitionUntil = until
         suppressPauseUntil = until
         LogUtil.info("应用内小窗：已准备跨 Activity 剧集详情切换" +
@@ -493,6 +501,7 @@ internal object InAppMiniPlayer {
         }
         if (invokeNative(current, if (pause) "pause" else "play")) {
             current.userPaused = pause
+            current.resumeAfterDetails = !pause
             button.text = if (pause) "▶" else "Ⅱ"
             button.contentDescription = if (pause) "继续播放" else "暂停播放"
             LogUtil.info("应用内小窗：用户" + if (pause) "暂停" else "继续播放")
@@ -647,11 +656,28 @@ internal object InAppMiniPlayer {
     }
 
     /** Back from details returns to the SAME native video, not a new one. */
+    private fun recoverAfterDetails(active: Session) {
+        if (!active.resumeAfterDetails || active.userPaused) return
+        val engine = active.nativeEngine.get() ?: return
+        val host = active.activity
+        host.window?.decorView?.postDelayed({
+            if (!host.isFinishing &&
+                SinglePlaybackOwner.isOwner(engine) &&
+                nativeEnginePlaying(engine) == false) {
+                if (invokeNative(active, "play")) {
+                    LogUtil.info("应用内小窗：详情返回复用原引擎继续播放")
+                    LogUtil.incr("inAppMiniDetailsResume")
+                }
+            }
+        }, 220L)
+    }
+
     fun onSourceActivityResumed(activity: Activity) {
         val active = session ?: return
         if (active.activity === activity &&
             active.presentedActivity !== activity) {
             restore()
+            recoverAfterDetails(active)
             LogUtil.incr("inAppMiniDetailsReturned")
         }
     }
@@ -668,8 +694,10 @@ internal object InAppMiniPlayer {
         returningHome = true
         try {
             restore()
-            if (details != null) details.finish()
-            else if (host.javaClass.name ==
+            if (details != null) {
+                details.finish()
+                recoverAfterDetails(active)
+            } else if (host.javaClass.name ==
                 "com.dragon.read.pages.main.MainFragmentActivity")
                 openHomeTab?.invoke(host)
         } catch (e: Throwable) {
