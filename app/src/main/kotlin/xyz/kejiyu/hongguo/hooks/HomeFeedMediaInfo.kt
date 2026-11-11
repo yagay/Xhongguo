@@ -24,8 +24,6 @@ internal object HomeFeedMediaInfo {
         "com.dragon.read.pages.main.MainFragmentActivity"
     private const val PAGER =
         "androidx.viewpager2.widget.ViewPager2"
-    private const val ADAPTER_BASE =
-        "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
     private const val MODEL =
         "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData"
 
@@ -37,6 +35,7 @@ internal object HomeFeedMediaInfo {
         val method: String
     )
     private var lastProbeAt = 0L
+    private var lastTreeScanAt = 0L
     private var lastSuccessSignature = ""
     // Scanning the whole View tree every metadata tick causes UI jank.
     // A weak pager reference is valid only while that Activity still shows it.
@@ -69,12 +68,10 @@ internal object HomeFeedMediaInfo {
     } catch (_: Throwable) { null }
 
     private fun nativeAdapter(adapter: Any?): Boolean {
-        var cl = adapter?.javaClass
-        while (cl != null && cl != Any::class.java) {
-            if (cl.name == ADAPTER_BASE) return true
-            cl = cl.superclass
-        }
-        return false
+        // Semantic native package rather than version-specific obfuscated
+        // class. The returned model is still validated below.
+        return adapter?.javaClass?.name
+            ?.startsWith("com.dragon.read.component.shortvideo.") == true
     }
 
     private fun indexedModel(adapter: Any, position: Int): Any? {
@@ -91,23 +88,52 @@ internal object HomeFeedMediaInfo {
         catch (_: Throwable) { null }
     }
 
+    private fun modelFromVisibleHolder(pager: View, pos: Int): Any? {
+        // ViewPager2's selected holder is stronger evidence than a stale
+        // adapter.getCurrentData() at the boundary between two videos.
+        val recycler = (pager as? ViewGroup)?.getChildAt(0) ?: return null
+        val holder = call(recycler, "findViewHolderForAdapterPosition", pos)
+            ?: return null
+        val itemView = try {
+            holder.javaClass.getField("itemView").get(holder) as? View
+        } catch (_: Throwable) { null }
+        if (itemView?.isShown != true) return null
+        val models = ArrayList<Any>(2)
+        var type: Class<*>? = holder.javaClass
+        while (type != null && type != Any::class.java) {
+            for (field in type.declaredFields) {
+                if (field.type.name != MODEL) continue
+                try {
+                    field.isAccessible = true
+                    field.get(holder)?.let(models::add)
+                } catch (_: Throwable) {}
+            }
+            type = type.superclass
+        }
+        return models.singleOrNull()?.takeIf { vid(it) != null }
+    }
+
     private fun inspectPager(pager: View, screenW: Int, screenH: Int): Candidate? {
         if (!pager.isShown || pager.width <= 0 || pager.height <= 0 ||
             pager.width < screenW * 0.55f ||
             pager.height < screenH * 0.38f) return null
         val adapter = call(pager, "getAdapter") ?: return null
         if (!nativeAdapter(adapter)) return null
+        // Avoid showing the previous page while ViewPager2 is settling.
+        val scrollState = (call(pager, "getScrollState") as? Number)?.toInt()
+        if (scrollState != null && scrollState != 0) return null
         val pos = (call(pager, "getCurrentItem") as? Number)?.toInt()
             ?: return null
         val active = data(call(adapter, "getCurrentData"))
-        val byIndex = indexedModel(adapter, pos)
+        val byIndex = indexedModel(adapter, pos) ?:
+            modelFromVisibleHolder(pager, pos)
         val activeId = vid(active)
         val indexedId = vid(byIndex)
         // On a swipe the adapter and pager can briefly disagree: defer
         // publishing rather than show the previous drama's poster.
         if (activeId != null && indexedId != null &&
             activeId != indexedId) return null
-        val model = active ?: byIndex ?: return null
+        val model = byIndex ?: active ?: return null
         if (vid(model) == null) return null
         val rect = Rect()
         if (!pager.getGlobalVisibleRect(rect)) return null
@@ -133,6 +159,10 @@ internal object HomeFeedMediaInfo {
         }
         if (reused != null) candidates.add(reused)
         else {
+            val scanAt = SystemClock.uptimeMillis()
+            if (scanAt - lastTreeScanAt in 0L..280L)
+                return FullSeriesMediaInfo.Info()
+            lastTreeScanAt = scanAt
             val pending = ArrayDeque<View>()
             pending.add(root)
             var scanned = 0
