@@ -32,10 +32,12 @@ object FeatureDiagnostics {
             listOf("首页仅隐藏商城 Tab", "已拦截打开商城"),
             listOf("商城 Tab 隐藏失败")),
         Rule("max_quality", "自动最高画质",
-            listOf("默认最高画质"), listOf("maxResolutionForce", "maxQualityApply"),
+            listOf("默认最高画质", "通用最高画质 SDK setVideoModel"),
+            listOf("maxResolutionForce", "maxQualityApply", "最高画质：检测到"),
             listOf("默认最高画质 Hook 失败")),
         Rule("default_speed", "默认倍速",
-            listOf("默认倍速 Hook", "默认倍速 |"), listOf("defaultSpeedImmediate", "defaultSpeedFloatForce"),
+            listOf("默认倍速 Hook", "默认倍速 |", "通用默认倍速 PlaybackParams"),
+            listOf("defaultSpeedImmediate", "defaultSpeedFloatForce", "通用默认倍速:"),
             listOf("默认倍速 Hook 失败")),
         Rule("double_tap_comment", "双击评论",
             listOf("rightViewAgency"), listOf("双击评论事件已发送"),
@@ -70,7 +72,35 @@ object FeatureDiagnostics {
         appendLine("可用日志行数=" + evidence.lineSequence().count())
         appendLine("发现模块初始化日志=" + evidence.contains("模块加载"))
         appendLine("发现业务 Hook 安装完成日志=" + evidence.contains("业务 Hook 安装完成"))
+        val mode = evidence.lineSequence().lastOrNull {
+            it.contains("目标运行模式=")
+        } ?: "未记录目标运行模式"
+        appendLine("版本映射：" + mode.trim().take(300))
+        appendLine("旧版本回退：" +
+            if (mode.contains("AUTO-")) "已禁止；仅通用模式" else "请核对是否使用精确旧版")
         appendLine("注意：开关已开≠Hook成功；Hook已安装≠功能运行成功。")
+        appendLine()
+        appendLine("通用运行时能力清单")
+        for (signal in listOf(
+            "Android framework UI/lifecycle",
+            "VideoShop playback and background",
+            "VideoShop play entity",
+            "VideoShop event controller",
+            "TTVideoEngine timeline",
+            "TTVideoEngine video identity",
+            "Native playback resolution",
+            "Native speed control",
+            "Full-series current episode",
+            "Official series title/poster",
+            "Settings screen",
+            "Download limit config"
+        )) {
+            val entry = evidence.lineSequence().lastOrNull {
+                it.contains("通用能力: $signal=")
+            }
+            appendLine("  " + (entry?.substringAfter("通用能力: ")?.take(190)
+                ?: "$signal=未看到探测记录"))
+        }
         appendLine()
         for (rule in rules) {
             val switched = master && pref.getBoolean(rule.key,
@@ -102,8 +132,8 @@ object FeatureDiagnostics {
             "系统媒体: 没有可用的原播放器",
             "系统媒体: 通知发布失败",
             "系统媒体: 全集 Activity 已销毁",
-            "系统媒体: 首页原生暂停",
-            "系统媒体: 首页后台检测晚于原生 pause",
+            "系统媒体: 原生播放器生命周期暂停",
+            "系统媒体: 后台检测晚于原生 pause",
             "系统媒体: 统一媒体信息采集",
             "系统媒体: 统一媒体元数据已绑定",
             "system media stable series DTO hooks",
