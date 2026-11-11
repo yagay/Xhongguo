@@ -14,6 +14,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * In-app (not system-overlay) mini video.
@@ -221,6 +222,8 @@ internal object InAppMiniPlayer {
         LogUtil.info("应用内小窗：已准备跨 Activity 剧集详情切换" +
             " nativeEngine=" + (current.nativeEngine.get() != null))
         LogUtil.incr("inAppMiniDetailsPrepared")
+        FeatureTrace.event("mini", "details_handoff", "prepared",
+            "enginePresent=" + (current.nativeEngine.get() != null))
         return true
     }
 
@@ -265,6 +268,7 @@ internal object InAppMiniPlayer {
             LogUtil.info("应用内小窗：详情页已接管原有视频窗口" +
                 " engineRetained=" + (current.nativeEngine.get() != null))
             LogUtil.incr("inAppMiniDetailsAttached")
+            FeatureTrace.event("mini", "details_handoff", "committed")
             true
         } catch (e: Throwable) {
             LogUtil.warn("应用内小窗：详情页视频窗口转移失败 " +
@@ -396,10 +400,14 @@ internal object InAppMiniPlayer {
             LogUtil.info("应用内小窗：已移动原生播放器到悬浮容器 " +
                 video.javaClass.name + " / parent=" + parent.javaClass.name)
             LogUtil.incr("inAppMiniDock")
+            FeatureTrace.event("mini", "dock", "committed",
+                "enginePresent=" + (current.nativeEngine.get() != null))
             return true
         } catch (e: Throwable) {
             LogUtil.warn("应用内小窗：移动播放器失败 " + e.javaClass.simpleName +
                 ": " + e.message)
+            FeatureTrace.event("mini", "dock", "fail",
+                "errorType=" + e.javaClass.simpleName)
             restore()
             return false
         }
@@ -636,6 +644,7 @@ internal object InAppMiniPlayer {
             (old.overlay.parent as? ViewGroup)?.removeView(old.overlay)
             old.source.requestLayout()
             LogUtil.incr("inAppMiniRestore")
+            FeatureTrace.event("mini", "restore", "committed")
         } catch (e: Throwable) {
             LogUtil.warn("应用内小窗：归位播放器失败 " + e.message)
             try { (old.overlay.parent as? ViewGroup)?.removeView(old.overlay) }
