@@ -56,6 +56,42 @@ internal object SystemMediaBridge {
     private var foregroundActivity = WeakReference<Activity>(null)
     private var lastDiscoveryAt = 0L
     private var lastNativeEngineAt = 0L
+    private var lastHomePauseAt = 0L
+    private var lastHomePauseEngine = WeakReference<Any>(null)
+    private var lastHomePauseWasPlaying = false
+    private var lastHomeUserLeaveAt = 0L
+    private var lastHomeUserLeaveWasPlaying = false
+    private var lastHomeUserLeaveEngine = WeakReference<Any>(null)
+    // Prevent the 2026-11-11 07:32:50 home playback feedback loop:
+    // every automatic play used to reset resumeAttempts to zero.
+    private var backgroundResumeBudget = 0
+    private var feedPauseGuardEngine = WeakReference<Any>(null)
+    private var feedPauseGuardUntil = 0L
+    private var feedPauseSuppressed = 0
+
+    /** Only suppress repeated lifecycle pause on the SAME current feed engine
+     * after background importance has actually been verified. Never block a
+     * user-requested media-session pause, foreground pause or preloading.
+     */
+    fun shouldSuppressFeedEnginePause(candidate: Any?): Boolean {
+        if (!enabled || candidate == null ||
+            !requestedBackgroundPlayback || !knownPlaying ||
+            feedPauseGuardEngine.get() !== candidate ||
+            videoEngine.get() !== candidate ||
+            SystemClock.uptimeMillis() > feedPauseGuardUntil) return false
+        feedPauseSuppressed++
+        if (feedPauseSuppressed <= 4 || feedPauseSuppressed % 20 == 0) {
+            LogUtil.info("系统媒体: 已保护首页后台播放器 pause #" +
+                feedPauseSuppressed)
+        }
+        LogUtil.incr("systemMediaFeedPauseSuppressed")
+        return true
+    }
+    private var lastVisibleInfoAt = 0L
+    private var lastVisibleInfoIdentity = ""
+    private var lastVisibleInfoSource = ""
+    private var currentEngineVideoIdentity: String? = null
+    private var lastNativeMetaProbeAt = 0L
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
     private var lastNativeEventAt = 0L
@@ -100,8 +136,16 @@ internal object SystemMediaBridge {
             progressPolling = false
             if (!enabled || session == null) return
             readCurrentTimeline()
+            captureNativePlayEntity("periodic")
             updateSessionMetadata()
             updateSessionState(knownPlaying)
+            val activeActivity = foregroundActivity.get()
+            val now = SystemClock.uptimeMillis()
+            if (knownPlaying && activeActivity?.hasWindowFocus() == true &&
+                now - lastVisibleInfoAt >= 3200L) {
+                lastVisibleInfoAt = now
+                captureVisibleMediaInfo(activeActivity)
+            }
             if (knownPlaying) scheduleTimelinePoll(1400L)
         }
     }
@@ -215,8 +259,56 @@ internal object SystemMediaBridge {
         }
     }
 
+    /**
+     * Capture the live VideoShop PlayEntity, matched to the TTVideoEngine by
+     * getVideoID() or exact engine identity. Unlike UI text heuristics, this
+     * cannot accidentally read a recommendation for another video.
+     */
+    private fun captureNativePlayEntity(reason: String) {
+        if (!enabled) return
+        val engine = videoEngine.get() ?: return
+        val now = SystemClock.uptimeMillis()
+        if (reason == "periodic" && now - lastNativeMetaProbeAt < 4000L) return
+        lastNativeMetaProbeAt = now
+
+        val videoId = try {
+            engine.javaClass.getMethod("getVideoID").invoke(engine)?.toString()
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) { null }
+        if (videoId != null && currentEngineVideoIdentity != null &&
+            videoId != currentEngineVideoIdentity) {
+            seriesTitle = null
+            episodeTitle = null
+            coverArt = null
+            durationMs = -1L
+            positionMs = -1L
+            bufferedMs = -1L
+            lastMetadataSignature = null
+            LogUtil.info("系统媒体: 同一引擎切换视频ID，清空旧剧名与集数")
+        }
+        if (videoId != null) currentEngineVideoIdentity = videoId
+        val info = NativePlayEntityInfo.readForEngine(
+            engine, videoContext.get(), controller.get(), layer.get())
+        var changed = false
+        if (info.title != null && info.title != seriesTitle) {
+            seriesTitle = info.title
+            changed = true
+        }
+        if (info.episode != null && info.episode != episodeTitle) {
+            episodeTitle = info.episode
+            changed = true
+        }
+        if (changed) {
+            LogUtil.info("系统媒体: 原生 PlayEntity 媒体信息已绑定 reason=$reason" +
+                " title=" + (info.title != null) +
+                " episode=" + (info.episode != null))
+            updateSessionMetadata()
+            if (reportedCard) updateMediaNotification(knownPlaying)
+        }
+    }
+
     private fun captureVisibleMediaInfo(activity: Activity?) {
-        if (!enabled || activity == null) return
+        if (!enabled || activity == null || !activity.hasWindowFocus()) return
         val info = NativeMediaInfo.read(activity)
         var changed = false
         if (info.title != null && info.title != seriesTitle) {
@@ -230,6 +322,19 @@ internal object SystemMediaBridge {
         if (info.artwork != null && info.artwork !== coverArt) {
             coverArt = info.artwork
             changed = true
+        }
+        val source = info.source
+        val identity = activity.javaClass.simpleName + "|" +
+            (info.title ?: "") + "|" + (info.episode ?: "")
+        if (identity != lastVisibleInfoIdentity || source != lastVisibleInfoSource) {
+            lastVisibleInfoIdentity = identity
+            lastVisibleInfoSource = source
+            LogUtil.info("系统媒体: 当前播放信息采集 page=" +
+                activity.javaClass.simpleName + " source=$source" +
+                " title=" + (info.title != null) +
+                " episode=" + (info.episode != null) +
+                " cover=" + (info.artwork != null))
+            LogUtil.incr("systemMediaVisibleInfoScan")
         }
         if (changed) {
             updateSessionMetadata()
@@ -345,6 +450,16 @@ internal object SystemMediaBridge {
                 lastMetadataSignature = null
                 lastMetadataArt = null
                 lastProgressDiagnosticAt = 0L
+                lastVisibleInfoAt = 0L
+                lastVisibleInfoIdentity = ""
+                lastVisibleInfoSource = ""
+                currentEngineVideoIdentity = null
+                lastNativeMetaProbeAt = 0L
+                if (feedPauseGuardEngine.get() !== candidate) {
+                    feedPauseGuardEngine.clear()
+                    feedPauseGuardUntil = 0L
+                    feedPauseSuppressed = 0
+                }
                 LogUtil.info("系统媒体: 发现新的原生播放器实例，清空旧剧集进度")
             }
             videoEngine = WeakReference(candidate)
@@ -361,15 +476,30 @@ internal object SystemMediaBridge {
         LogUtil.info("系统媒体: TTVideoEngine.$action invoked; state=" +
             (playbackState?.toString() ?: "?"))
         LogUtil.incr("systemMediaNativeEngineCommand")
+        if (action == "pause" && foregroundActivity.get()
+                ?.javaClass?.name?.contains("MainFragmentActivity") == true) {
+            lastHomePauseAt = SystemClock.uptimeMillis()
+            lastHomePauseEngine = WeakReference(candidate)
+            lastHomePauseWasPlaying = knownPlaying
+            LogUtil.info("系统媒体: 首页原生暂停，之前播放=" + lastHomePauseWasPlaying)
+        }
         if (action == "play") {
+            lastHomePauseWasPlaying = false
             onNativePlayback(true, "TTVideoEngine#play", candidate)
+            captureNativePlayEntity("engine-play")
             readCurrentTimeline()
             updateSessionMetadata()
             updateSessionState(true)
             scheduleTimelinePoll(600L)
             // The native Activity can still be drawing its title/episode overlay.
             val act = foregroundActivity.get()
-            handler.postDelayed({ captureVisibleMediaInfo(act) }, 700L)
+            for (delay in longArrayOf(600L, 1600L, 3000L)) {
+                handler.postDelayed({
+                    if (foregroundActivity.get() === act && act != null &&
+                        !act.isFinishing && act.hasWindowFocus())
+                        captureVisibleMediaInfo(act)
+                }, delay)
+            }
         } else if (action == "pause" || action == "stop") {
             onNativePlayback(false, "TTVideoEngine#$action", candidate)
         } else if (action.startsWith("release") && videoEngine.get() === candidate) {
@@ -404,11 +534,22 @@ internal object SystemMediaBridge {
         }
         if (candidate != null) {
             rememberVideoContext(candidate)
+            val playEntity = try {
+                candidate.javaClass.getMethod("getPlayEntity").invoke(candidate)
+            } catch (_: Throwable) { null }
+            NativePlayEntityInfo.remember(playEntity)
             val playing = nativeIsPlaying(candidate)
             val boundLayer = try {
                 candidate.javaClass.getMethod("getLayerHostMediaLayout").invoke(candidate)
             } catch (_: Throwable) { null }
-            if (boundLayer != null) rememberLayer(boundLayer)
+            if (boundLayer != null) {
+                rememberLayer(boundLayer)
+                val boundEntity = try {
+                    boundLayer.javaClass.getMethod("getBindPlayEntity").invoke(boundLayer)
+                } catch (_: Throwable) { null }
+                NativePlayEntityInfo.remember(boundEntity)
+            }
+            captureNativePlayEntity("context-discovery")
             LogUtil.info("系统媒体: 播放器快照 $reason context=" +
                 candidate.javaClass.simpleName + " isPlaying=" +
                 (playing?.toString() ?: "unknown") + " layer=" +
@@ -430,7 +571,13 @@ internal object SystemMediaBridge {
         discoverPlayingVideo(activity, "beforeActivityPause")
         captureVisibleMediaInfo(activity)
         val name = activity.javaClass.simpleName
-        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying")
+        val recentHomeLeave = activity.javaClass.name.contains("MainFragmentActivity") &&
+            SystemClock.uptimeMillis() - lastHomeUserLeaveAt in 0L..3000L &&
+            lastHomeUserLeaveWasPlaying &&
+            lastHomeUserLeaveEngine.get() === videoEngine.get()
+        val wasPlayingBeforePause = knownPlaying || recentHomeLeave
+        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying" +
+            " recentHomeLeave=$recentHomeLeave")
         handler.postDelayed({
             if (!enabled || foregroundActivity.get() !== activity) return@postDelayed
             val state = ActivityManager.RunningAppProcessInfo()
@@ -440,7 +587,40 @@ internal object SystemMediaBridge {
             val isBackground = state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
             LogUtil.info("系统媒体: Activity 暂停后进程 importance=" +
                 state.importance + " background=$isBackground activity=$name")
-            if (isBackground) onBackgroundTransition(activity, "Activity.onPause")
+            if (isBackground) {
+                val isHome = activity.javaClass.name.contains("MainFragmentActivity")
+                val recentPause = SystemClock.uptimeMillis() - lastHomePauseAt in 0L..1900L
+                val sameEngine = lastHomePauseEngine.get() === videoEngine.get() &&
+                    videoEngine.get() != null
+                val shouldRecoverFeed = isHome && wasPlayingBeforePause &&
+                    !knownPlaying && lastHomePauseWasPlaying &&
+                    recentPause && sameEngine && !userCommandInProgress
+                if (shouldRecoverFeed) {
+                    LogUtil.warn("系统媒体: 首页后台检测晚于原生 pause，恢复原播放器" +
+                        " elapsedMs=" + (SystemClock.uptimeMillis() - lastHomePauseAt))
+                    LogUtil.incr("systemMediaFeedBackgroundRecovery")
+                    // Genuine process background confirmed; this is not an
+                    // in-app navigation to fullscreen/series Activities.
+                    requestedBackgroundPlayback = true
+                    leaveAt = SystemClock.uptimeMillis()
+                    resumeAttempts = 0
+                    backgroundResumeBudget = 0 // one explicit recovery, no retry
+                    feedPauseGuardEngine = WeakReference(videoEngine.get())
+                    feedPauseGuardUntil = leaveAt + 10L * 60_000L
+                    feedPauseSuppressed = 0
+                    setNativeBackgroundAllowance(true)
+                    LogUtil.info("系统媒体: 首页后台只恢复一次，后续生命周期 pause" +
+                        " 将针对当前播放器阻止；用户暂停仍允许")
+                    requestTransport(true, "feed-background-recovery")
+                    lastHomePauseWasPlaying = false
+                } else {
+                    onBackgroundTransition(activity, "Activity.onPause")
+                    LogUtil.info("系统媒体: 首页恢复判定 background=$isBackground" +
+                        " home=$isHome wasPlaying=$wasPlayingBeforePause" +
+                        " knownPlaying=$knownPlaying recentPause=$recentPause" +
+                        " sameEngine=$sameEngine")
+                }
+            }
         }, 500L)
     }
 
@@ -461,6 +641,7 @@ internal object SystemMediaBridge {
         requestedBackgroundPlayback = true
         leaveAt = SystemClock.uptimeMillis()
         resumeAttempts = 0
+        backgroundResumeBudget = 1
         captureVisibleMediaInfo(activity)
         readCurrentTimeline()
         setNativeBackgroundAllowance(true)
@@ -560,24 +741,31 @@ internal object SystemMediaBridge {
         knownPlaying = playing
         if (playing) {
             scheduleTimelinePoll(900L)
-            resumeAttempts = 0
-            requestedBackgroundPlayback = requestedBackgroundPlayback &&
-                SystemClock.uptimeMillis() - leaveAt < 30_000L
+            if (!requestedBackgroundPlayback) resumeAttempts = 0
+            // Do not expire background mode after 30 seconds of successful
+            // playback. The callback is the live player, not a new session.
             if (stateChanged || !reportedCard) updateMediaNotification(true)
         } else {
             readCurrentTimeline()
             updateSessionMetadata()
             updateSessionState(false)
             lastPauseAt = SystemClock.uptimeMillis()
-            if (requestedBackgroundPlayback && resumeAttempts < 2 &&
-                lastPauseAt - leaveAt < 4000L && !userCommandInProgress) {
+            if (requestedBackgroundPlayback && backgroundResumeBudget > 0 &&
+                lastPauseAt - leaveAt in 0L..4000L &&
+                !userCommandInProgress && feedPauseGuardEngine.get() == null) {
+                backgroundResumeBudget--
                 resumeAttempts++
-                LogUtil.warn("系统媒体: 检测到切后台暂停; native=$source; 尝试恢复 #$resumeAttempts")
+                LogUtil.warn("系统媒体: 后台暂停，单次恢复尝试 #" + resumeAttempts)
                 handler.postDelayed({
-                    if (enabled && requestedBackgroundPlayback && !knownPlaying) {
+                    if (enabled && requestedBackgroundPlayback && !knownPlaying &&
+                        feedPauseGuardEngine.get() == null) {
                         requestTransport(true, "background-auto-resume")
                     }
-                }, if (resumeAttempts == 1) 180L else 650L)
+                }, 350L)
+            } else if (requestedBackgroundPlayback && !userCommandInProgress &&
+                feedPauseGuardEngine.get() != null) {
+                LogUtil.warn("系统媒体: 首页后台播放器仍被暂停；不进行重复 play 循环")
+                LogUtil.incr("systemMediaFeedPlaybackStopped")
             }
             if (stateChanged || reportedCard) updateMediaNotification(false)
         }
@@ -595,6 +783,16 @@ internal object SystemMediaBridge {
             activity.javaClass.simpleName + " knownPlaying=$knownPlaying" +
             " nativePlaying=" + (nativePlaying?.toString() ?: "?"))
         if (!knownPlaying && nativePlaying != true) return
+        if (activity.javaClass.name.contains("MainFragmentActivity")) {
+            // Hint can fire during an in-app transition. Do NOT activate
+            // background recovery until Activity.onPause confirms the process
+            // actually became background. Avoids a premature play/pause loop.
+            lastHomeUserLeaveAt = SystemClock.uptimeMillis()
+            lastHomeUserLeaveWasPlaying = true
+            lastHomeUserLeaveEngine = WeakReference(videoEngine.get())
+            LogUtil.info("系统媒体: 首页 onUserLeaveHint 已记录，等待真实后台确认")
+            return
+        }
         onBackgroundTransition(activity, "onUserLeaveHint")
     }
 
@@ -602,6 +800,18 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        if (!activity.javaClass.name.contains("MainFragmentActivity")) {
+            lastHomeUserLeaveAt = 0L
+            lastHomeUserLeaveWasPlaying = false
+            lastHomeUserLeaveEngine.clear()
+        }
+        if (feedPauseGuardEngine.get() != null) {
+            feedPauseGuardEngine.clear()
+            feedPauseGuardUntil = 0L
+            feedPauseSuppressed = 0
+            backgroundResumeBudget = 0
+            LogUtil.info("系统媒体: 红果恢复前台，解除首页播放器暂停保护")
+        }
         for (delay in longArrayOf(650L, 2100L)) {
             handler.postDelayed({
                 if (enabled && foregroundActivity.get() === activity && !activity.isFinishing)
@@ -764,6 +974,14 @@ internal object SystemMediaBridge {
         } else {
             listOf("pause", "pauseVideo", "pausePlayback")
         }
+        if (!play && reason.startsWith("system") ||
+            !play && reason == "notification-action") {
+            feedPauseGuardEngine.clear()
+            feedPauseGuardUntil = 0L
+            backgroundResumeBudget = 0
+            requestedBackgroundPlayback = false
+            LogUtil.info("系统媒体: 用户主动暂停，解除首页后台保护")
+        }
         userCommandInProgress = true
         try {
             for (target in targets) {
@@ -904,6 +1122,21 @@ internal object SystemMediaBridge {
         coverArt = null
         lastMetadataSignature = null
         lastMetadataArt = null
+        lastHomePauseAt = 0L
+        lastHomePauseWasPlaying = false
+        lastHomeUserLeaveAt = 0L
+        lastHomeUserLeaveWasPlaying = false
+        lastHomeUserLeaveEngine.clear()
+        backgroundResumeBudget = 0
+        feedPauseGuardEngine.clear()
+        feedPauseGuardUntil = 0L
+        feedPauseSuppressed = 0
+        lastHomePauseEngine.clear()
+        lastVisibleInfoAt = 0L
+        lastVisibleInfoIdentity = ""
+        lastVisibleInfoSource = ""
+        currentEngineVideoIdentity = null
+        lastNativeMetaProbeAt = 0L
         controller.clear()
         layer.clear()
         videoContext.clear()

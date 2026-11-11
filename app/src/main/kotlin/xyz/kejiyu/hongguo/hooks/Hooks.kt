@@ -5622,6 +5622,11 @@ object Hooks {
                         .setId("xhSystemMediaTTVideoEngine_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
+                            if (method.name == "pause" &&
+                                method.returnType == Void.TYPE &&
+                                SystemMediaBridge.shouldSuppressFeedEnginePause(chain.thisObject)) {
+                                return@Hooker null
+                            }
                             val result = chain.proceed()
                             try {
                                 SystemMediaBridge.onNativeEngineCommand(
@@ -5641,6 +5646,51 @@ object Hooks {
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
+        }
+
+        // Capture the original VideoShop PlayEntity model rather than
+        // guessing title/episode from currently visible recommendations.
+        // The PlayEntity APIs are present in the user's 7.3.5.32 APK.
+        try {
+            val entityClass = Class.forName(
+                "com.ss.android.videoshop.entity.PlayEntity", false, classLoader)
+            val controllerClass = Class.forName(
+                "com.ss.android.videoshop.controller.VideoController", false, classLoader)
+            var registrations = 0
+            for ((index, method) in controllerClass.declaredMethods
+                .filter { it.name == "setPlayEntity" && it.parameterCount == 1 }
+                .withIndex()) {
+                module.hook(method)
+                    .setId("xhMediaEntityBound_$index")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        try { NativePlayEntityInfo.remember(chain.getArg(0)) }
+                        catch (e: Throwable) {
+                            LogUtil.warn("系统媒体: PlayEntity 关联监听异常: " + e.message)
+                        }
+                        result
+                    })
+                registrations++
+            }
+            for ((index, method) in entityClass.declaredMethods
+                .filter { it.name in setOf("setTitle", "setVideoId",
+                    "setBusinessModel") && it.parameterCount == 1 }
+                .withIndex()) {
+                module.hook(method)
+                    .setId("xhMediaEntityChanged_$index")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        try { NativePlayEntityInfo.remember(chain.thisObject) }
+                        catch (_: Throwable) {}
+                        result
+                    })
+                registrations++
+            }
+            LogUtil.info("  ✓ system media original PlayEntity observers: $registrations")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media PlayEntity observers unavailable: " + e.message)
         }
 
         try {

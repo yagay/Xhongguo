@@ -101,7 +101,11 @@ object FeatureDiagnostics {
             "系统媒体: 原播放器控制成功",
             "系统媒体: 没有可用的原播放器",
             "系统媒体: 通知发布失败",
-            "系统媒体: 全集 Activity 已销毁"
+            "系统媒体: 全集 Activity 已销毁",
+            "系统媒体: 首页原生暂停",
+            "系统媒体: 首页后台检测晚于原生 pause",
+            "系统媒体: 当前播放信息采集",
+            "系统媒体: 播放进度采样"
         )) {
             appendLine((if (evidence.contains(signal)) "找到" else "未找到") + " - " + signal)
         }
