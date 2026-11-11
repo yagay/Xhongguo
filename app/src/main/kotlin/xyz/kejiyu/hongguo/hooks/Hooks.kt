@@ -6004,7 +6004,8 @@ object Hooks {
             LogUtil.warn("  mini player pause guard unavailable: " + e.message)
         }
 
-        val shortVideoHolderClasses = listOf(gNames.holderBaseS1)
+        val shortVideoHolderClasses =
+            listOf(gNames.holderBaseS1).filter { it.isNotBlank() }
         var shortPlaybackHookCount = 0
         shortVideoHolderClasses.forEachIndexed { classIndex, className ->
             try {
@@ -6031,7 +6032,7 @@ object Hooks {
                 shortPlaybackHookCount++
             } catch (_: Throwable) {}
         }
-        try {
+        if (gNames.shortHolder.isNotBlank()) try {
             val c = Class.forName(gNames.shortHolder, false, classLoader)
             hac(c, "shortHolderCtor") { chain ->
                 val result = chain.proceed()
@@ -6435,7 +6436,7 @@ object Hooks {
 
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 
-        try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
+        if (gNames.topZoneTouch.isNotBlank()) try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)
             module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java))
@@ -6767,7 +6768,8 @@ object Hooks {
         }
         if (settingsHookCount == 0) LogUtil.warn("  设置页 Activity 未找到")
 
-        try {
+        if (gNames.oledBright.isNotBlank() &&
+            gNames.oledBrightAction.isNotBlank()) try {
             val hClass = Class.forName(gNames.oledBright, false, classLoader)
             val brightActionClass = Class.forName(gNames.oledBrightAction, false, classLoader)
             module.hook(hClass.getDeclaredMethod("a", java.util.List::class.java)).setId("oled").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
@@ -6789,7 +6791,9 @@ object Hooks {
             LogUtil.info("  ✓ OLED 亮度拦截（默认关闭）")
         } catch (e: Exception) { LogUtil.warn("  ${gNames.oledBright} OLED 未找到: $e") }
 
-        try { val c = Class.forName(gNames.pauseAdEntryClass, false, classLoader)
+        if (gNames.pauseAdEntryClass.isNotBlank() &&
+            gNames.pauseAdEntryMethod.isNotBlank()) try {
+            val c = Class.forName(gNames.pauseAdEntryClass, false, classLoader)
             ham(c, gNames.pauseAdEntryMethod, "pauseAdEntry") { chain -> if (gMasterOn && gAdOn) null else chain.proceed() }
             LogUtil.info("  ✓ 暂停广告入口 ${gNames.pauseAdEntryClass}.${gNames.pauseAdEntryMethod}")
         } catch (e: Exception) {
@@ -6850,7 +6854,8 @@ object Hooks {
             ham(c, "isVipUser", "comicVip") { chain -> if (gMasterOn && gVipOn) true else chain.proceed() }
             LogUtil.info("  ✓ NsComicAdDependImpl.isVipUser") } catch (e: Exception) { LogUtil.warn("  NsComicAdDependImpl 未找到: $e") }
 
-        try {
+        if (gNames.kmpVipModel.isNotBlank() &&
+            gNames.kmpAcctService.isNotEmpty()) try {
             val eCls = Class.forName(gNames.kmpVipModel, false, classLoader)
             val eCtor = eCls.getDeclaredConstructor(String::class.java, String::class.java, String::class.java, java.lang.Boolean::class.java, java.lang.Boolean::class.java, Integer::class.java, java.lang.Boolean::class.java, Integer::class.java, java.lang.Boolean::class.java, Integer::class.java, java.lang.Boolean::class.java)
             eCtor.isAccessible = true
