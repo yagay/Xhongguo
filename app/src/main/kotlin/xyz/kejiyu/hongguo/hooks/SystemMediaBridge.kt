@@ -1255,6 +1255,9 @@ internal object SystemMediaBridge {
         coverArt = null
         lastMetadataSignature = null
         lastMetadataArt = null
+        lastNotifiedMetadataSignature = null
+        metadataRevision = 0L
+        lastDeliveryDiagnosticAt = 0L
         lastHomePauseAt = 0L
         lastHomePauseWasPlaying = false
         lastHomeUserLeaveAt = 0L
