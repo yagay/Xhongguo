@@ -35,7 +35,10 @@ The 2026-11-11 21:33 diagnostic showed these distinct problems:
 4. `HomeFeedMediaInfo` uses a native ViewPager2 active adapter rather than
    a fixed obfuscated adapter base class. It additionally checks the selected
    RecyclerView holder when available, rejects non-idle pages, and throttles
-   full-tree fallback scans.
+   full-tree fallback scans. `VideoIdentityAgreement` permits video ID
+   namespace mismatches only after independently selected pager data stays
+   stable for at least 800 ms across multiple probes. Never trust an
+   uncorroborated `getCurrentData()` mismatch.
 5. `HookCircuitBreaker` protects optional `ham`/`hac` hooks. A repeatedly
    failing hook is bypassed while the original call is left intact. A failed
    callback is never retried by calling `chain.proceed()` a second time.
