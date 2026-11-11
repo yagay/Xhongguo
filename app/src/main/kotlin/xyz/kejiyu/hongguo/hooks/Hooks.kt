@@ -4706,8 +4706,9 @@ object Hooks {
             try {
                 @Suppress("DEPRECATION")
                 val pi = ctx.packageManager.getPackageInfo(pkg, 0)
+                @Suppress("DEPRECATION")
                 val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
-                    else @Suppress("DEPRECATION") pi.versionCode.toLong()
+                    else pi.versionCode.toLong()
                 LogUtil.info("目标版本通过 Context 识别: " + pi.versionName +
                     " versionCode=" + code)
                 return pi.versionName to code
@@ -4726,8 +4727,10 @@ object Hooks {
             @Suppress("DEPRECATION")
             val pi = activity.packageManager.getPackageInfo(gPkg, 0)
             gTargetVersionName = pi.versionName ?: "未知"
-            gTargetVersionCode = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
-                else @Suppress("DEPRECATION") pi.versionCode.toLong()
+            @Suppress("DEPRECATION")
+            val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                else pi.versionCode.toLong()
+            gTargetVersionCode = code
             LogUtil.info("Activity 验证目标版本=" + gTargetVersionName +
                 " versionCode=" + gTargetVersionCode + " installedProfile=" +
                 gNames.profileId)
