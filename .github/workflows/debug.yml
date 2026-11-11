@@ -2,7 +2,7 @@ name: Debug APK
 
 on:
   push:
-    branches: [main, feature/module-settings-app]
+    branches: [main, beta, feature/module-settings-app]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -29,6 +29,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Prevent legacy profile fallback
         run: python3 tools/verify_universal_mapping.py
+      - name: Run beta media policy unit tests
+        run: bash ./gradlew :app:testDebugUnitTest --stacktrace
       - name: Build Debug only
         run: bash ./gradlew :app:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
