@@ -1,6 +1,7 @@
 package xyz.kejiyu.hongguo.hooks
 
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * Runtime binding contract for changing Hongguo APKs.
@@ -101,6 +102,9 @@ internal object RuntimeCapabilities {
         for (c in a) {
             LogUtil.info("通用能力: " + c.name + "=" +
                 (if (c.available) "可尝试" else "接口未发现") + " | " + c.evidence)
+            FeatureTrace.event("hook", "capability",
+                if (c.available) "available" else "missing",
+                "name=" + c.name.replace(' ', '_'))
         }
         return a
     }
