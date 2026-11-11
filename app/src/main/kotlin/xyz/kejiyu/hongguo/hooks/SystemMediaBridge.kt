@@ -264,6 +264,23 @@ internal object SystemMediaBridge {
      * getVideoID() or exact engine identity. Unlike UI text heuristics, this
      * cannot accidentally read a recommendation for another video.
      */
+    private fun selectEpisodeLabel(fullSeries: String?, other: String?): String? {
+        if (fullSeries == null) return other
+        val hasCurrent = fullSeries.trim().startsWith("第") ||
+            fullSeries.trim().startsWith("EP", ignoreCase = true)
+        if (hasCurrent) return fullSeries
+        // A verified total ("全80集") must not obscure an exact episode
+        // found on the same active player via its UI or PlayEntity.
+        val alternative = other?.trim()
+        if (alternative != null && (alternative.startsWith("第") ||
+                alternative.startsWith("EP", ignoreCase = true))) {
+            return if (fullSeries.startsWith("全") &&
+                !alternative.contains("全")) alternative + " · " + fullSeries
+                else alternative
+        }
+        return fullSeries
+    }
+
     private fun captureNativePlayEntity(reason: String) {
         if (!enabled) return
         val engine = videoEngine.get() ?: return
@@ -294,7 +311,7 @@ internal object SystemMediaBridge {
         // Prefer it when available; do not replace its verified episode with
         // a generic PlayEntity title or a different preloaded episode.
         val title = fullSeries.title ?: playEntity.title
-        val episode = fullSeries.episode ?: playEntity.episode
+        val episode = selectEpisodeLabel(fullSeries.episode, playEntity.episode)
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
@@ -327,7 +344,7 @@ internal object SystemMediaBridge {
         val ui = if (activity.hasWindowFocus()) NativeMediaInfo.read(activity)
             else NativeMediaInfo.Info()
         val title = fullSeries.title ?: ui.title
-        val episode = fullSeries.episode ?: ui.episode
+        val episode = selectEpisodeLabel(fullSeries.episode, ui.episode)
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
