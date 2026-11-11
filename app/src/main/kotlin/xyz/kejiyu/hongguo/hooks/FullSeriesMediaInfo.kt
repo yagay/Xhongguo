@@ -831,7 +831,7 @@ internal object FullSeriesMediaInfo {
             ?: episodeFromPager(pager, stableTotal)
             ?: stableTotal?.let { "全" + it + "集" }
 
-        if (playingModel != null && presenterVideoId != null) {
+        if (playingModel != null && presenterVideoId != null && engine != null) {
             boundPresenterActivity = WeakReference(activity)
             boundPresenterEngine = WeakReference(engine)
             boundPresenterVideoId = vid(playingModel)
