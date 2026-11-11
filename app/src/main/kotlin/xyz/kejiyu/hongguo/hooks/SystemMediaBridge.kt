@@ -93,6 +93,29 @@ internal object SystemMediaBridge {
     private var lastVisibleInfoSource = ""
     private var currentEngineVideoIdentity: String? = null
     private var lastNativeMetaProbeAt = 0L
+    private val dtoRefreshLock = Any()
+    private var nextDtoRefreshAt = 0L
+
+    /** Native detail/video DTOs can finish loading AFTER the engine begins
+     * playback. Refresh the SINGLE media resolver on completed model changes;
+     * never depend on the UI becoming visible or another episode starting. */
+    fun onNativeSeriesMetadataAvailable() {
+        if (!enabled) return
+        val now = SystemClock.uptimeMillis()
+        val schedule = synchronized(dtoRefreshLock) {
+            if (now < nextDtoRefreshAt) false
+            else {
+                nextDtoRefreshAt = now + 1500L
+                true
+            }
+        }
+        if (!schedule) return
+        handler.postDelayed({
+            if (!enabled || videoEngine.get() == null) return@postDelayed
+            captureNativePlayEntity("dto-observed")
+            updateSessionMetadata()
+        }, 260L)
+    }
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
     private var lastNativeEventAt = 0L
