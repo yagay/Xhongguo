@@ -256,9 +256,14 @@ internal object FullSeriesMediaInfo {
         val fragmentTotal = number(field(model, "episodesCount"))
             ?.takeIf { it in 1..5000L }
         val modelTitle = str(field(model, "seriesName"))
-        val fragmentCover = listOf("cover", "episodeCover")
-            .mapNotNull { field(model, it) as? String }
-            .firstOrNull { it.isNotBlank() }
+        // The Saas model separates the drama's 'cover' from the individual
+        // episode's 'episodeCover' (often a frame still). Accept 'cover'
+        // only when distinct from 'episodeCover', never the frame still.
+        val poster = field(model, "cover") as? String
+        val frameStill = field(model, "episodeCover") as? String
+        val fragmentCover: String? = poster?.takeIf {
+            it.isNotBlank() && it != frameStill
+        }
         val matchedEpisode = if (current != null && current >= 1 &&
             (total == null || current <= total)) {
             "第" + current + "集" +
@@ -279,7 +284,9 @@ internal object FullSeriesMediaInfo {
     ): Pair<String?, Long?> {
         if (cachedActivity.get() !== activity ||
             seriesKey != null && cachedSeriesKey != null &&
-                cachedSeriesKey != seriesKey) {
+                cachedSeriesKey != seriesKey ||
+            newTitle != null && cachedSeriesTitle != null &&
+                newTitle != cachedSeriesTitle) {
             cachedActivity = WeakReference(activity)
             cachedSeriesTitle = null
             cachedTotal = null
@@ -289,7 +296,13 @@ internal object FullSeriesMediaInfo {
         if (seriesKey != null) cachedSeriesKey = seriesKey
         if (newTitle != null) cachedSeriesTitle = newTitle
         if (newTotal != null && newTotal in 1..5000L) cachedTotal = newTotal
-        if (!newCover.isNullOrBlank()) cachedCoverUrl = newCover
+        // Freeze the first verified series poster for this Activity/series.
+        // The transient detail/fragment may later expose a different video
+        // still; never replace the poster mid-episode or mid-series.
+        if (cachedCoverUrl.isNullOrBlank() && !newCover.isNullOrBlank()) {
+            cachedCoverUrl = newCover
+            LogUtil.info("系统媒体: 已锁定当前短剧正式封面来源；等待下载")
+        }
         return cachedSeriesTitle to cachedTotal
     }
 
@@ -421,13 +434,19 @@ internal object FullSeriesMediaInfo {
         // 7.3.5.32's official Saas model has URL strings for both full-sized
         // and compact series posters. The detail is a transient Runnable
         // payload, so preserve its URL for the currently displayed series.
+        // Prefer the explicitly named series poster in the detail model.
+        // When transient detail is unavailable, SaasVideoData.cover is the
+        // series image; episodeCover is the individual-video thumbnail.
+        val videoData = active ?: current.firstOrNull()
+        val seriesCover = field(videoData, "cover") as? String
+        val episodeFrame = field(videoData, "episodeCover") as? String
+        val safeDataCover = seriesCover?.takeIf {
+            it.isNotBlank() && it != episodeFrame
+        }
         val freshCoverUrl = listOfNotNull(
             field(detail, "episodesCover") as? String,
             field(detail, "smallEpisodesCover") as? String,
-            field(active, "cover") as? String,
-            field(active, "episodeCover") as? String,
-            field(current.firstOrNull(), "cover") as? String,
-            field(current.firstOrNull(), "episodeCover") as? String,
+            safeDataCover,
             fragment.artworkUrl
         ).firstOrNull { it.isNotBlank() }
         val retained = preserveCurrentSeries(activity, seriesKey,

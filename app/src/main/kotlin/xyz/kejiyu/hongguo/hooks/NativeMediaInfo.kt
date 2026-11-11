@@ -3,10 +3,8 @@ package xyz.kejiyu.hongguo.hooks
 import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Rect
-import android.graphics.drawable.BitmapDrawable
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ImageView
 import android.widget.TextView
 import java.util.ArrayDeque
 
@@ -44,10 +42,6 @@ internal object NativeMediaInfo {
     private val episodeIdKeys = listOf(
         "episode_title", "episode_name", "episode_number", "episode_index",
         "current_episode", "current_ep", "chapter_title", "chapter_number"
-    )
-    private val coverIdKeys = listOf(
-        "series_cover", "book_cover", "album_cover", "drama_cover",
-        "series_poster", "album_poster", "cover_image", "cover_view"
     )
     private val episodePattern = Regex(
         """(?:^|[\s·•|：:/])((?:第\s*[0-9一二三四五六七八九十百千]+\s*集)|(?:EP\s*\.?\s*\d+)|(?:Episode\s+\d+))(?=$|[\s·•|：:/—\-])""",
@@ -94,21 +88,6 @@ internal object NativeMediaInfo {
         if (view.id == View.NO_ID) null
         else view.resources.getResourceEntryName(view.id).lowercase()
     } catch (_: Throwable) { null }
-
-    private fun cover(image: ImageView): Bitmap? {
-        return try {
-            val src = (image.drawable as? BitmapDrawable)?.bitmap ?: return null
-            if (src.width < 72 || src.height < 72 || src.isRecycled) return null
-            if (src.width <= 320 && src.height <= 320) src
-            else {
-                val ratio = minOf(320f / src.width, 320f / src.height)
-                Bitmap.createScaledBitmap(
-                    src, (src.width * ratio).toInt().coerceAtLeast(1),
-                    (src.height * ratio).toInt().coerceAtLeast(1), true
-                )
-            }
-        } catch (_: Throwable) { null }
-    }
 
     private fun homeScore(c: Candidate): Int {
         val text = parseTitle(c.text) ?: return -100
@@ -157,7 +136,6 @@ internal object NativeMediaInfo {
         var title: String? = null
         var episode: String? = null
         var total: String? = null
-        var artwork: Bitmap? = null
         var source = "none"
         // The home feed updates in-place as the user swipes. Its Activity
         // launch Intent is NOT a trustworthy identity for the current video.
@@ -171,17 +149,18 @@ internal object NativeMediaInfo {
         }
 
         val root = try { activity.window?.decorView } catch (_: Throwable) { null }
-            ?: return Info(title, episode, artwork, source)
+            ?: return Info(title, episode, null, source)
         val bounds = Rect()
         val rootBounds = Rect()
         if (!root.getGlobalVisibleRect(rootBounds) ||
             rootBounds.width() <= 0 || rootBounds.height() <= 0)
-            return Info(title, episode, artwork, source)
+            return Info(title, episode, null, source)
         val candidates = ArrayList<Candidate>()
         val queue = ArrayDeque<View>()
         queue.add(root)
         var examined = 0
-        while (queue.isNotEmpty() && examined++ < 2200) {
+        while (queue.isNotEmpty() && examined++ < 2200 &&
+            (title == null || episode == null)) {
             val view = queue.removeFirst()
             if (!view.isShown || !view.getGlobalVisibleRect(bounds)) continue
             if (view is TextView) {
@@ -207,10 +186,6 @@ internal object NativeMediaInfo {
                     }
                     if (total == null) total = totalPattern.find(v)?.value
                 }
-            } else if (view is ImageView && artwork == null) {
-                val name = id(view)
-                if (name != null && coverIdKeys.any { name.contains(it) })
-                    artwork = cover(view)
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) {
@@ -232,6 +207,6 @@ internal object NativeMediaInfo {
             }
         }
         if (episode != null && total != null) episode += " · " + total
-        return Info(title, episode, artwork, source)
+        return Info(title, episode, null, source)
     }
 }
