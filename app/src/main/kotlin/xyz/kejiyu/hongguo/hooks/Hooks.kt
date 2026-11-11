@@ -38,6 +38,7 @@ import io.github.libxposed.api.XposedInterface.Hooker
 object Hooks {
 
     private var gPrefs: SharedPreferences? = null
+    private var lastSettingsSnapshot: Map<String, Boolean> = emptyMap()
     private var gSettingsObserver: android.database.ContentObserver? = null
 
     // Capture window state only when the module actually changes the status bar.
@@ -304,6 +305,24 @@ object Hooks {
         gDownloadOneDayEpisode = prefs.getInt(DOWNLOAD_LIMIT_EPISODE_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
         gDownloadOneDaySeries = prefs.getInt(DOWNLOAD_LIMIT_SERIES_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
         gDownloadTotalSeries = prefs.getInt(DOWNLOAD_LIMIT_TOTAL_PREF, DOWNLOAD_LIMIT_DEFAULT_VALUE)
+
+        // The host receives changes from the module ContentProvider as
+        // well as its in-app settings sheet. Record initial observed state
+        // and later differences without logging user/account data.
+        val previousSettings = lastSettingsSnapshot
+        val newSettings = SettingsCatalog.allItems
+            .filter { it.kind == SettingsCatalog.Kind.SWITCH }
+            .associate { it.key to prefs.getBoolean(it.key, it.defaultValue) }
+        for ((key, active) in newSettings) {
+            val before = previousSettings[key]
+            if (before == null || before != active) {
+                FeatureTrace.event(
+                    xyz.kejiyu.hongguo.FeatureTraceCatalog.forSetting(key),
+                    "setting_state", if (before == null) "observed" else "changed",
+                    "key=" + key + ",enabled=" + active + ",source=host")
+            }
+        }
+        lastSettingsSnapshot = newSettings
 
         // The generic View/Window and Android navigation hooks have no
         // dependence on old obfuscated IDs. Only unsafe hardcoded navigation
