@@ -427,12 +427,53 @@ object Hooks {
         }
     }
 
+    /** The same stable VideoShop speed path for feed and full series.
+     * Does not depend on a percentage-player/controller's obfuscated name. */
+    private fun applyUniversalSpeed(reason: String): Boolean {
+        if (!TargetNames.isUniversal(gNames) || !defaultSpeedEnabledNow()) return false
+        val activity = gCurrentActivity ?: return false
+        return try {
+            val loader = activity.classLoader
+            val klass = Class.forName(
+                "com.ss.android.videoshop.context.VideoContext", false, loader)
+            val context = try {
+                klass.getMethod("getResumedVideoContext").invoke(null)
+            } catch (_: Throwable) { null } ?: klass
+                .getMethod("getVideoContext", Context::class.java)
+                .invoke(null, activity) ?: return false
+            val playing = try {
+                context.javaClass.getMethod("isPlaying").invoke(context) as? Boolean
+            } catch (_: Throwable) { null }
+            if (playing != true) return false
+            val ptype = Class.forName("com.ss.ttm.player.PlaybackParams", false, loader)
+            val existing = try {
+                context.javaClass.getMethod("getPlayBackParams").invoke(context)
+            } catch (_: Throwable) { null }
+            val params = existing ?: ptype.getDeclaredConstructor().newInstance()
+            val old = try {
+                (ptype.getMethod("getSpeed").invoke(params) as? Number)?.toFloat()
+            } catch (_: Throwable) { null }
+            if (old != null && kotlin.math.abs(old - gDefaultSpeed) < 0.005f)
+                return true
+            ptype.getMethod("setSpeed", java.lang.Float.TYPE).invoke(params, gDefaultSpeed)
+            context.javaClass.getMethod("setPlayBackParams", ptype)
+                .invoke(context, params)
+            LogUtil.info("通用默认倍速: ${formatSpeed(gDefaultSpeed)} source=$reason")
+            LogUtil.incr("defaultSpeedUniversalApply")
+            true
+        } catch (e: Throwable) {
+            LogUtil.debug("通用默认倍速暂不可用: " + e.javaClass.simpleName)
+            false
+        }
+    }
+
     private fun applyDefaultSpeedNow(reason: String) {
         if (!defaultSpeedEnabledNow()) return
         val run = Runnable {
             var applied = 0
             weakPlayerSnapshot(gKnownPercentSpeedPlayers).forEach { if (applySpeedToPercentPlayer(it, reason)) applied++ }
             weakPlayerSnapshot(gKnownFloatSpeedPlayers).forEach { if (applySpeedToFloatPlayer(it, reason)) applied++ }
+            if (applyUniversalSpeed(reason)) applied++
             LogUtil.info("默认倍速立即应用 | speed=${formatSpeed(gDefaultSpeed)} | players=$applied | reason=$reason")
         }
         if (Looper.myLooper() == Looper.getMainLooper()) run.run() else mainHandler.post(run)
@@ -5384,7 +5425,35 @@ object Hooks {
             LogUtil.info("  ✓ UIKit StatusBarUtils")
         } catch (e: Exception) { LogUtil.warn("  UIKit StatusBarUtils 未找到: $e") }
 
-        try {
+        if (TargetNames.isUniversal(gNames)) {
+            // PlaybackParams is a stable, inspectable SDK type in 7.3.5.32.
+            // Observe changes rather than guessing percentage-player classes.
+            try {
+                val paramsClass = Class.forName(
+                    "com.ss.ttm.player.PlaybackParams", false, classLoader)
+                module.hook(paramsClass.getDeclaredMethod(
+                    "setSpeed", java.lang.Float.TYPE))
+                    .setId("universalPlaybackParamsSpeed")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (!defaultSpeedEnabledNow()) return@Hooker chain.proceed()
+                        val requested = chain.getArg(0) as? Float
+                        if (requested == null ||
+                            kotlin.math.abs(requested - gDefaultSpeed) < 0.001f)
+                            chain.proceed()
+                        else {
+                            val args = (chain.args as Array<Any?>).copyOf()
+                            args[0] = gDefaultSpeed
+                            LogUtil.incr("defaultSpeedUniversalForce")
+                            chain.proceed(args)
+                        }
+                    })
+                LogUtil.info("  ✓ 通用默认倍速 PlaybackParams.setSpeed(float)" +
+                    " + VideoContext.setPlayBackParams")
+            } catch (e: Throwable) {
+                LogUtil.warn("  通用默认倍速 Hook 无法绑定: " + e.javaClass.simpleName)
+            }
+        } else try {
             val isNewCn = gNames.profileId == "CN-7.3.3.18"
             val isOversea = gNames.profileId == "OVERSEA-7.3.1.32"
 
