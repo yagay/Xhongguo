@@ -4,6 +4,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * Isolate failing optional hooks from the host application.
@@ -40,6 +41,8 @@ internal object HookCircuitBreaker {
             state.disabled.compareAndSet(false, true)) {
             LogUtil.warn("可选 Hook 已自动隔离 id=$id；后续调用原方法")
             LogUtil.incr("hookCircuitBreakerOpened")
+            FeatureTrace.event("hook", "circuit_breaker", "degraded",
+                "hook=" + id.take(60) + ",failures=" + count)
         }
     }
 }
