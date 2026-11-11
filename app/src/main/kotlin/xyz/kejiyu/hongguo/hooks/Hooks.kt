@@ -6660,6 +6660,14 @@ object Hooks {
                         ensureReceiver(a.applicationContext)
                     }
                 } catch (_: Exception) {}
+                // The source screen may start playing during its own onCreate,
+                // before onResume. Reserve the navigation owner first.
+                if (a != null && gMasterOn && (gMiniPlayerOn || gSystemMediaOn)) {
+                    try { SinglePlaybackOwner.onActivityResuming(a) }
+                    catch (e: Throwable) {
+                        LogUtil.warn("单播放器: onCreate 路由登记失败 " + e.message)
+                    }
+                }
                 val result = chain.proceed()
                 try {
                     if (a != null) {
