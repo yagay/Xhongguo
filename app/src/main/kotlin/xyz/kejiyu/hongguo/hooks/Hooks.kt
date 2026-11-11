@@ -5470,6 +5470,119 @@ object Hooks {
         hookPlaybackState("com.ss.android.videoshop.controller.VideoController", "vcState")
         hookPlaybackState(gNames.playbackState, "nsState")
 
+        // 7.3.5.32 APK confirms these stable VideoShop APIs. The older
+        // obfuscated shortHolder (7.3.3.18) no longer exists, so callback
+        // observation must not rely on gNames.shortHolder or gVideoPaused.
+        try {
+            val videoContextClass = Class.forName(
+                "com.ss.android.videoshop.context.VideoContext", false, classLoader
+            )
+            var mediaHookCount = 0
+            for ((methodIndex, method) in videoContextClass.declaredMethods
+                .filter { it.name in setOf("onVideoPlay", "onVideoPause",
+                    "onEnginePlayStart", "onVideoReleased") }
+                .withIndex()) {
+                try {
+                    module.hook(method)
+                        .setId("xhNativeVideoContext_${method.name}_$methodIndex")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                val action = method.name
+                                when (action) {
+                                    "onVideoPlay", "onEnginePlayStart" -> {
+                                        SystemMediaBridge.onNativeVideoEvent(
+                                            chain.thisObject, "VideoContext#$action", true)
+                                        SystemMediaBridge.onNativeVideoStart(
+                                            chain.thisObject, "VideoContext#$action")
+                                        setVideoPaused(false, "VideoContext#$action")
+                                    }
+                                    "onVideoPause", "onVideoReleased" -> {
+                                        SystemMediaBridge.onNativeVideoEvent(
+                                            chain.thisObject, "VideoContext#$action", false)
+                                        setVideoPaused(true, "VideoContext#$action")
+                                    }
+                                }
+                            } catch (e: Throwable) {
+                                LogUtil.warn("系统媒体: VideoContext 事件异常: " + e.message)
+                            }
+                            result
+                        })
+                    mediaHookCount++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: VideoContext 回调 Hook 失败 "+
+                        method.name + ": " + e.message)
+                }
+            }
+            for (name in listOf("onLifeCycleOnPause", "onLifeCycleOnStop")) {
+                videoContextClass.declaredMethods.filter { it.name == name }
+                    .forEachIndexed { index, method ->
+                        try {
+                            module.hook(method)
+                                .setId("xhNativeVideoLifecycle_${name}_$index")
+                                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                                .intercept(Hooker { chain ->
+                                    LogUtil.info("系统媒体: VideoContext.$name before" +
+                                        " isEnabled=" + SystemMediaBridge.enabled)
+                                    val result = chain.proceed()
+                                    LogUtil.info("系统媒体: VideoContext.$name after")
+                                    result
+                                })
+                        } catch (e: Throwable) {
+                            LogUtil.warn("系统媒体: VideoContext lifecycle Hook " +
+                                name + " failed: " + e.message)
+                        }
+                    }
+            }
+            for ((i, method) in videoContextClass.declaredMethods
+                .filter { it.name in setOf("play", "pause") &&
+                    it.parameterCount == 0 }.withIndex()) {
+                module.hook(method)
+                    .setId("xhNativeVideoTransport_$i")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (method.name == "pause" &&
+                            SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
+                            return@Hooker null
+                        }
+                        val result = chain.proceed()
+                        if (method.name == "play") {
+                            SystemMediaBridge.onNativeVideoStart(chain.thisObject, "VideoContext#play")
+                        } else {
+                            SystemMediaBridge.onNativeVideoEvent(
+                                chain.thisObject, "VideoContext#pause", false)
+                        }
+                        result
+                    })
+                mediaHookCount++
+            }
+            LogUtil.info("  ✓ system media native VideoContext hooks: $mediaHookCount")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media VideoContext hooks missing: " + e)
+        }
+
+        try {
+            val controller = Class.forName(
+                "com.ss.android.videoshop.controller.VideoController", false, classLoader
+            )
+            for ((i, method) in controller.declaredMethods
+                .filter { it.name == "play" && it.parameterCount == 0 }.withIndex()) {
+                module.hook(method)
+                    .setId("xhSystemMediaControllerPlay_$i")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        SystemMediaBridge.onNativeVideoStart(
+                            chain.thisObject, "VideoController#play")
+                        result
+                    })
+            }
+            LogUtil.info("  ✓ system media native VideoController.play observer")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media VideoController.play observer unavailable: " + e.message)
+        }
+
         try {
             val controller = Class.forName("com.ss.android.videoshop.controller.VideoController", false, classLoader)
             val pausingMethods = controller.declaredMethods.filter { method ->
@@ -5485,7 +5598,12 @@ object Hooks {
                             null
                         } else if (SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
                             null
-                        } else chain.proceed()
+                        } else {
+                            val result = chain.proceed()
+                            SystemMediaBridge.onNativeVideoEvent(
+                                chain.thisObject, "VideoController#pause", false)
+                            result
+                        }
                     })
             }
             LogUtil.info("  ✓ mini player native pause guards: " + pausingMethods.size)
@@ -5632,21 +5750,45 @@ object Hooks {
             ham(c, "onVideoPause", "videoPauseDirect") { chain ->
                 val result = chain.proceed()
                 SystemMediaBridge.rememberLayer(chain.thisObject)
-                SystemMediaBridge.onNativePlayback(false,
-                    "LayerHostMediaLayout#onVideoPause", chain.thisObject)
+                SystemMediaBridge.onNativeVideoEvent(chain.thisObject,
+                    "LayerHostMediaLayout#onVideoPause", false)
                 setVideoPaused(true, "LayerHostMediaLayout#onVideoPause")
                 result
             }
             ham(c, "onVideoPlay", "videoPlayDirect") { chain ->
                 val result = chain.proceed()
                 SystemMediaBridge.rememberLayer(chain.thisObject)
-                SystemMediaBridge.onNativePlayback(true,
-                    "LayerHostMediaLayout#onVideoPlay", chain.thisObject)
+                SystemMediaBridge.onNativeVideoEvent(chain.thisObject,
+                    "LayerHostMediaLayout#onVideoPlay", true)
+                SystemMediaBridge.onNativeVideoStart(
+                    chain.thisObject, "LayerHostMediaLayout#onVideoPlay")
                 setVideoPaused(false, "LayerHostMediaLayout#onVideoPlay")
                 scheduleDefaultSpeedApply("LayerHostMediaLayout#onVideoPlay")
                 result
             }
-            LogUtil.info("  ✓ video command detector")
+            ham(c, "onEnginePlayStart", "xhMediaLayerEngineStart") { chain ->
+                val result = chain.proceed()
+                SystemMediaBridge.rememberLayer(chain.thisObject)
+                SystemMediaBridge.onNativeVideoEvent(chain.thisObject,
+                    "LayerHostMediaLayout#onEnginePlayStart", true)
+                SystemMediaBridge.onNativeVideoStart(chain.thisObject,
+                    "LayerHostMediaLayout#onEnginePlayStart")
+                result
+            }
+            ham(c, "onVideoReleased", "xhMediaLayerReleased") { chain ->
+                val result = chain.proceed()
+                SystemMediaBridge.onNativeVideoEvent(chain.thisObject,
+                    "LayerHostMediaLayout#onVideoReleased", false)
+                result
+            }
+            ham(c, "setCanPlayBackground", "xhNativeVideoBackgroundPermission") { chain ->
+                try {
+                    SystemMediaBridge.rememberOriginalBackgroundSetting(
+                        chain.thisObject, chain.getArg(0) as? Boolean)
+                } catch (_: Throwable) {}
+                chain.proceed()
+            }
+            LogUtil.info("  ✓ video command detector + native background allowance observer")
         } catch (e: Throwable) { LogUtil.warn("  video command detector missing: $e") }
 
         fun hookToolbarLayer(className: String, hookId: String) {
