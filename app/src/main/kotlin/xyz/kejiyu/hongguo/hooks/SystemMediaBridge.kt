@@ -59,6 +59,9 @@ internal object SystemMediaBridge {
     private var lastHomePauseAt = 0L
     private var lastHomePauseEngine = WeakReference<Any>(null)
     private var lastHomePauseWasPlaying = false
+    private var lastHomeUserLeaveAt = 0L
+    private var lastHomeUserLeaveWasPlaying = false
+    private var lastHomeUserLeaveEngine = WeakReference<Any>(null)
     // Prevent the 2026-11-11 07:32:50 home playback feedback loop:
     // every automatic play used to reset resumeAttempts to zero.
     private var backgroundResumeBudget = 0
@@ -568,8 +571,13 @@ internal object SystemMediaBridge {
         discoverPlayingVideo(activity, "beforeActivityPause")
         captureVisibleMediaInfo(activity)
         val name = activity.javaClass.simpleName
-        val wasPlayingBeforePause = knownPlaying
-        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying")
+        val recentHomeLeave = activity.javaClass.name.contains("MainFragmentActivity") &&
+            SystemClock.uptimeMillis() - lastHomeUserLeaveAt in 0L..3000L &&
+            lastHomeUserLeaveWasPlaying &&
+            lastHomeUserLeaveEngine.get() === videoEngine.get()
+        val wasPlayingBeforePause = knownPlaying || recentHomeLeave
+        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying" +
+            " recentHomeLeave=$recentHomeLeave")
         handler.postDelayed({
             if (!enabled || foregroundActivity.get() !== activity) return@postDelayed
             val state = ActivityManager.RunningAppProcessInfo()
@@ -775,6 +783,16 @@ internal object SystemMediaBridge {
             activity.javaClass.simpleName + " knownPlaying=$knownPlaying" +
             " nativePlaying=" + (nativePlaying?.toString() ?: "?"))
         if (!knownPlaying && nativePlaying != true) return
+        if (activity.javaClass.name.contains("MainFragmentActivity")) {
+            // Hint can fire during an in-app transition. Do NOT activate
+            // background recovery until Activity.onPause confirms the process
+            // actually became background. Avoids a premature play/pause loop.
+            lastHomeUserLeaveAt = SystemClock.uptimeMillis()
+            lastHomeUserLeaveWasPlaying = true
+            lastHomeUserLeaveEngine = WeakReference(videoEngine.get())
+            LogUtil.info("系统媒体: 首页 onUserLeaveHint 已记录，等待真实后台确认")
+            return
+        }
         onBackgroundTransition(activity, "onUserLeaveHint")
     }
 
@@ -782,6 +800,11 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        if (!activity.javaClass.name.contains("MainFragmentActivity")) {
+            lastHomeUserLeaveAt = 0L
+            lastHomeUserLeaveWasPlaying = false
+            lastHomeUserLeaveEngine.clear()
+        }
         if (feedPauseGuardEngine.get() != null) {
             feedPauseGuardEngine.clear()
             feedPauseGuardUntil = 0L
@@ -1101,6 +1124,9 @@ internal object SystemMediaBridge {
         lastMetadataArt = null
         lastHomePauseAt = 0L
         lastHomePauseWasPlaying = false
+        lastHomeUserLeaveAt = 0L
+        lastHomeUserLeaveWasPlaying = false
+        lastHomeUserLeaveEngine.clear()
         backgroundResumeBudget = 0
         feedPauseGuardEngine.clear()
         feedPauseGuardUntil = 0L
