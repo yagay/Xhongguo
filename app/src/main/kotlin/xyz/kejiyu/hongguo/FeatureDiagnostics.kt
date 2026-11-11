@@ -94,6 +94,36 @@ object FeatureDiagnostics {
             if (mode.contains("AUTO-")) "已禁止；仅通用模式" else "请核对是否使用精确旧版")
         appendLine("注意：开关已开≠Hook成功；Hook已安装≠功能运行成功。")
         appendLine()
+        appendLine("我的页面精简设置（默认隐藏，逐项独立）")
+        for ((key, label) in listOf(
+            "mine_hide_welfare" to "福利",
+            "mine_hide_orders" to "订单",
+            "mine_hide_messages" to "消息",
+            "mine_hide_games" to "游戏",
+            "mine_hide_following" to "追更",
+            "mine_hide_wallet" to "右侧菜单·我的钱包",
+            "mine_hide_membership" to "右侧菜单·会员中心",
+            "mine_hide_game_center" to "右侧菜单·游戏中心",
+            "mine_hide_creator_center" to "右侧菜单·创作中心"
+        )) {
+            appendLine("  " + label + "=" +
+                if (master && pref.getBoolean(key, true)) "隐藏" else "显示")
+        }
+        appendLine("我的页面精简 Hook 证据（安装不代表效果）：")
+        for (signal in listOf(
+            "mine page fragment scoped observers installed=",
+            "mine sidebar native/KMP item boundaries installed=",
+            "mine KMP typed JgZoneItemId state observers",
+            "mine KMP semantic zone actions guarded=",
+            "我的页面精简: 数据入口已过滤",
+            "我的页面精简: 原生入口已隐藏",
+            "我的页面精简: 已阻止隐藏捷径点击",
+            "我的页面精简: KMP 列表写入失败"
+        )) {
+            appendLine("  " + (if (evidence.contains(signal, true))
+                "已观察到" else "未观察到") + " " + signal)
+        }
+        appendLine()
         appendLine("通用运行时能力清单")
         for (signal in listOf(
             "Android framework UI/lifecycle",
