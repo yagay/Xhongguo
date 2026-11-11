@@ -199,6 +199,15 @@ object ModuleDiagnostics {
         }
         files["feature/TRACE_EVENTS.log"] = trace.events
         files["feature/TRACE_ERRORS.log"] = trace.errors
+        val crashSignals = listOf("FATAL EXCEPTION", "AndroidRuntime",
+            "ANR in ", "OutOfMemoryError", "NoSuchMethodError",
+            "VerifyError", "ClassNotFoundException", "LinkageError")
+        val crashLines = evidence.lineSequence()
+            .filter { line -> crashSignals.any { line.contains(it, true) } }
+            .take(250).toList()
+        files["feature/RUNTIME_FAULTS.log"] =
+            if (crashLines.isEmpty()) "No matched crash/ANR/linkage errors in collected evidence."
+            else crashLines.joinToString("\n")
         files["feature/README.txt"] = (
             "Structured events: XH_TRACE feature=... stage=... result=... flow=...\n" +
             "observed = evidence only, not proof of successful behavior.\n" +
