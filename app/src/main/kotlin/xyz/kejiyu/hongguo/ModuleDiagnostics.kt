@@ -193,7 +193,8 @@ object ModuleDiagnostics {
                 val category = FeatureTraceCatalog.forSetting(item.key)
                 val observed = trace.events.contains("feature=" + category + " ")
                 appendLine(item.key + " configured=" + configured +
-                    " effective=" + (master && configured) +
+                    " effective=" +
+                    (configured && (master || item.key == "diagnostic_verbose")) +
                     " category=" + category + " categoryObserved=" + observed)
             }
         }
