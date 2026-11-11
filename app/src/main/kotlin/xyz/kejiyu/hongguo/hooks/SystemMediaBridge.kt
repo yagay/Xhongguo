@@ -1165,6 +1165,58 @@ internal object SystemMediaBridge {
                 "preserved", "engine=true,playReplay=false", flow = mediaFlow)
             updateMediaNotification(true)
             scheduleTimelinePoll(400L)
+            // Even with native lifecycle protection, some host versions may
+            // pause audio through a second route. Check measured progress
+            // instead of assuming TTVideoEngine.isPlaying() (unsupported here).
+            // One bounded host-level resume is safer than replaying the bare
+            // engine with no autoplay controller attached.
+            val checkpoint = reflectNumber(engine,
+                "getCurrentPlaybackTimeAsync")?.toLong()
+            val originalContext = videoContext.get()
+            handler.postDelayed({
+                if (!enabled || !requestedBackgroundPlayback ||
+                    videoEngine.get() !== engine ||
+                    videoContext.get() !== originalContext ||
+                    snapshot.explicitPauseEpochAtCapture != explicitPauseEpoch ||
+                    !knownPlaying || userCommandInProgress) return@postDelayed
+                val after = reflectNumber(engine,
+                    "getCurrentPlaybackTimeAsync")?.toLong()
+                val progressed = checkpoint != null && after != null &&
+                    after - checkpoint >= 400L
+                if (progressed) {
+                    FeatureTrace.event("background", "native_progress", "ok",
+                        "elapsedCheckMs=2200", flow = mediaFlow)
+                    return@postDelayed
+                }
+                val nearEnd = durationMs in 5000L..86_400_000L &&
+                    (after ?: positionMs) >= durationMs - 2000L
+                if (nearEnd || checkpoint == null || after == null ||
+                    originalContext == null) {
+                    FeatureTrace.event("background", "native_progress",
+                        "degraded", "nearEnd=" + nearEnd +
+                            ",hasContext=" + (originalContext != null),
+                        flow = mediaFlow)
+                    return@postDelayed
+                }
+                try {
+                    val hostPlay = originalContext.javaClass.methods.firstOrNull {
+                        it.name == "play" && it.parameterCount == 0 &&
+                            it.returnType == Void.TYPE
+                    }
+                    if (hostPlay != null) {
+                        hostPlay.invoke(originalContext)
+                        LogUtil.warn("系统媒体: 宿主播放器未前进，已通过原 VideoContext 恢复一次")
+                        FeatureTrace.event("background", "native_progress_recovery",
+                            "requested", "route=video_context", flow = mediaFlow)
+                    }
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 宿主级恢复失败 " +
+                        e.javaClass.simpleName)
+                    FeatureTrace.event("background", "native_progress_recovery",
+                        "fail", "errorType=" + e.javaClass.simpleName,
+                        flow = mediaFlow)
+                }
+            }, 2200L)
             return
         }
         if (current == true) {
