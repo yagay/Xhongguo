@@ -10,6 +10,7 @@ import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.WeakHashMap
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * Scope-limited My-page cleanup for the official Hongguo APK.
@@ -66,10 +67,15 @@ internal object MinePageCleaner {
     private var lastScanAt = 0L
 
     fun configure(prefs: SharedPreferences, master: Boolean) {
+        val oldEnabled = enabled
+        val oldHidden = hidden
         enabled = master
         hidden = if (!master) emptySet()
         else allEntries.filter { prefs.getBoolean(it.key, true) }
             .mapTo(linkedSetOf()) { it.key }
+        if (oldEnabled != enabled || oldHidden != hidden)
+            FeatureTrace.event("mine", "policy", "changed",
+                "enabled=" + enabled + ",hidden=" + hidden.size)
     }
 
     private fun disabled(area: Area): List<Entry> =
@@ -173,6 +179,9 @@ internal object MinePageCleaner {
         if (removed == 0) return list
         LogUtil.info("我的页面精简: 数据入口已过滤" +
             " source=$source area=$area count=$removed")
+        FeatureTrace.event("mine", "data_filter", "committed",
+            "area=" + area + ",removed=" + removed + ",remaining=" +
+                retained.size, minIntervalMs = 750L)
         return retained
     }
 
@@ -194,6 +203,8 @@ internal object MinePageCleaner {
                 } catch (e: Throwable) {
                     LogUtil.warn("我的页面精简: KMP 列表写入失败 " +
                         e.javaClass.simpleName)
+                    FeatureTrace.event("mine", "kmp_write", "fail",
+                        "errorType=" + e.javaClass.simpleName)
                 }
             }
         }
@@ -333,6 +344,9 @@ internal object MinePageCleaner {
             LogUtil.info("我的页面精简: 原生入口已隐藏 " +
                 entry.area + "/" + entry.title)
             LogUtil.incr("mineEntryViewHidden")
+            FeatureTrace.event("mine", "view_hide", "committed",
+                "area=" + entry.area + ",item=" + entry.key,
+                minIntervalMs = 1000L)
         }
     }
 
@@ -380,5 +394,7 @@ internal object MinePageCleaner {
         hiddenClickRoots.clear()
         lastScanAt = 0L
         scanVisibleMine(activity, force = true)
+        FeatureTrace.event("mine", "restore_and_rescan", "committed",
+            "restored=" + toRestore.size, minIntervalMs = 1000L)
     }
 }
