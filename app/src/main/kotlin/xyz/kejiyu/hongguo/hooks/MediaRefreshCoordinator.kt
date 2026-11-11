@@ -5,6 +5,7 @@ import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import xyz.kejiyu.hongguo.FeatureTrace
+import xyz.kejiyu.hongguo.LogUtil
 
 /**
  * One metadata refresh lane for home feed, full-series and autoplay.
