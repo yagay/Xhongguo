@@ -126,8 +126,15 @@ internal object SystemMediaBridge {
     fun onNativeEngineCommand(candidate: Any?, action: String) {
         if (!enabled || candidate == null) return
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
-        videoEngine = WeakReference(candidate)
-        lastNativeEngineAt = SystemClock.uptimeMillis()
+        if (action == "play") {
+            videoEngine = WeakReference(candidate)
+            lastNativeEngineAt = SystemClock.uptimeMillis()
+        } else if (videoEngine.get() !== candidate) {
+            // Preloading / old video engines may be torn down in parallel.
+            // Do not pause the active media session for a different instance.
+            LogUtil.info("系统媒体: 忽略非当前 TTVideoEngine." + action)
+            return
+        }
         val playbackState = try {
             candidate.javaClass.getMethod("getPlaybackState").invoke(candidate)
         } catch (_: Throwable) { null }
@@ -503,8 +510,13 @@ internal object SystemMediaBridge {
 
     private fun requestTransport(play: Boolean, reason: String) {
         if (!enabled) return
-        val targets = listOfNotNull(videoContext.get(), controller.get(),
-            layer.get(), videoEngine.get()).distinct()
+        val latestEngine = videoEngine.get()
+        val targets = if (latestEngine != null &&
+            SystemClock.uptimeMillis() - lastNativeEngineAt < 180_000L) {
+            listOfNotNull(latestEngine, videoContext.get(), controller.get(), layer.get())
+                .distinct()
+        } else listOfNotNull(videoContext.get(), controller.get(),
+            layer.get(), latestEngine).distinct()
         LogUtil.info("系统媒体: 控制请求 reason=$reason play=$play targets=" +
             targets.joinToString { it.javaClass.simpleName })
         val methodNames = if (play) {
