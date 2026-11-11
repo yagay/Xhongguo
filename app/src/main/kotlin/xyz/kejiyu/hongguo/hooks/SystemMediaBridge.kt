@@ -240,8 +240,9 @@ internal object SystemMediaBridge {
     }
 
     /**
-     * Covers come from the currently bound native Saas detail / PlayEntity,
-     * not random recommendation ImageViews or video-frame screenshots.
+     * Artwork MUST come from official *series-level* Saas fields
+     * (episodesCover/smallEpisodesCover), never from a playing video frame,
+     * episodeCover, generic cover or UI ImageViews.
      * Guard each asynchronous bitmap with both engine identity and generation:
      * a previous drama must never overwrite the active media notification.
      */
@@ -266,7 +267,7 @@ internal object SystemMediaBridge {
         artworkRequestedAt = now
         val generation = artworkGeneration
         val ownerEngine = videoEngine.get()
-        LogUtil.info("系统媒体: 已发现原生剧集封面，准备异步读取 reason=$reason")
+        LogUtil.info("系统媒体: 已发现原生系列海报，准备异步读取 reason=$reason")
         LogUtil.incr("systemMediaArtworkRequested")
         MediaArtworkLoader.load(ctx, url) { bitmap, source ->
             if (!enabled || generation != artworkGeneration ||
@@ -447,10 +448,10 @@ internal object SystemMediaBridge {
             episodeTitle = episode
             changed = true
         }
-        if (ui.artwork != null && ui.artwork !== coverArt) {
-            coverArt = ui.artwork
-            changed = true
-        }
+        // A video surface / episode-frame ImageView is NOT the series
+        // poster. Never let UI bitmaps replace artwork downloaded from the
+        // native SaasVideoDetailModel. If no trusted poster exists, leave
+        // MediaSession artwork empty.
         val source = if (fullSeries.title != null || fullSeries.episode != null)
             fullSeries.source else ui.source
         val identity = activity.javaClass.simpleName + "|" +
@@ -462,7 +463,7 @@ internal object SystemMediaBridge {
                 activity.javaClass.simpleName + " source=$source" +
                 " title=" + (title != null) +
                 " episode=" + (episode != null) +
-                " cover=" + (ui.artwork != null))
+                " officialPoster=" + (coverArt != null))
             LogUtil.incr("systemMediaVisibleInfoScan")
         }
         if (changed) {
