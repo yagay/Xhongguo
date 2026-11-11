@@ -153,9 +153,17 @@ internal object NativePlayEntityInfo {
             remember(entity)
             val entityId = id(entity, "getVideoId")
             val boundEngine = invoke(owner, "getVideoEngine")
-            if (entityId != null && engineId != null && entityId == engineId ||
-                boundEngine === engine &&
-                    entity.javaClass.name == "com.ss.android.videoshop.entity.PlayEntity") {
+            // During automatic NEXT-drama playback the native engine may
+            // be reused while its VideoContext still exposes the PREVIOUS
+            // PlayEntity. Same engine instance does NOT override mismatched
+            // concrete video IDs; otherwise the old drama title leaks into
+            // the new MediaSession.
+            val exactIdMatch = entityId != null && engineId != null &&
+                entityId == engineId
+            val boundWithoutComparableIds = boundEngine === engine &&
+                (entityId == null || engineId == null) &&
+                entity.javaClass.name == "com.ss.android.videoshop.entity.PlayEntity"
+            if (exactIdMatch || boundWithoutComparableIds) {
                 found = entity
                 break
             }
