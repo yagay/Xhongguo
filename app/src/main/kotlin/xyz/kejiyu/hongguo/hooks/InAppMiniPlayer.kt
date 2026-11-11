@@ -39,7 +39,8 @@ internal object InAppMiniPlayer {
         val nativeEngine: WeakReference<Any>,
         var nativePauseGuardsUsed: Int = 0,
         @Volatile var userPaused: Boolean = false,
-        var snapAnimation: ValueAnimator? = null
+        var snapAnimation: ValueAnimator? = null,
+        var playbackButton: WeakReference<TextView> = WeakReference(null)
     )
 
     @Volatile private var session: Session? = null
@@ -110,6 +111,7 @@ internal object InAppMiniPlayer {
     fun shouldKeepPlaying(controller: Any?): Boolean {
         val s = session ?: return false
         if (!enabled || restoreInProgress || s.userPaused ||
+            SystemMediaBridge.isExplicitMediaCommandInProgress() ||
             s.activity.isFinishing) return false
         if (controller !== lastPlayingController) return false
         return android.os.SystemClock.uptimeMillis() <= suppressPauseUntil
@@ -171,6 +173,23 @@ internal object InAppMiniPlayer {
             }
         }
         LogUtil.warn("应用内小窗：播放器没有找到无参 resume/play 方法")
+    }
+
+    /** Keep mini playback controls in sync with the native engine and
+     * notification media actions, without polling or creating a player. */
+    fun onNativeEngineAction(candidate: Any?, action: String) {
+        val current = session ?: return
+        if (candidate !== current.nativeEngine.get()) return
+        if (action !in setOf("play", "pause", "stop")) return
+        val button = current.playbackButton.get() ?: return
+        val paused = action != "play"
+        button.post {
+            if (session === current) {
+                button.text = if (paused) "▶" else "Ⅱ"
+                button.contentDescription =
+                    if (paused) "继续播放" else "暂停播放"
+            }
+        }
     }
 
     fun hasWindow(): Boolean = session != null
@@ -478,7 +497,11 @@ internal object InAppMiniPlayer {
         // Native transport is optional. Do not display a dead pause button
         // if the actual playing engine was not observed at docking time.
         if (current.nativeEngine.get() != null) {
-            val pause = textButton(activity, "Ⅱ", "暂停播放")
+            val paused = nativeEnginePlaying(current.nativeEngine.get()) == false
+            val pause = textButton(activity,
+                if (paused) "▶" else "Ⅱ",
+                if (paused) "继续播放" else "暂停播放")
+            current.playbackButton = WeakReference(pause)
             pause.setOnClickListener { togglePlayback(current, pause) }
             container.addView(pause, FrameLayout.LayoutParams(
                 controlSize, controlSize, Gravity.BOTTOM or Gravity.END
