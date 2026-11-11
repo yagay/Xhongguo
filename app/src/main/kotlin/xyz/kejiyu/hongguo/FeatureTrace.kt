@@ -51,8 +51,11 @@ object FeatureTrace {
         if (minIntervalMs > 0L) {
             val key = category + ":" + step + ":" + state
             val now = SystemClock.elapsedRealtime()
-            val before = lastEventAt.put(key, now)
+            // Do not update the timestamp for a suppressed event: otherwise
+            // a busy hook could silence diagnostics indefinitely.
+            val before = lastEventAt[key]
             if (before != null && now - before in 0L until minIntervalMs) return
+            lastEventAt[key] = now
         }
         val label = buildString {
             append("XH_TRACE feature=").append(category)
