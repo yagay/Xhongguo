@@ -5648,73 +5648,98 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
-        // The original series detail is often a transient uo4.y0.x Runnable.
-        // By the time MediaSession polls ShortSeriesActivity, presenter.x.b
-        // may already be null. Snapshot only title/official poster/total when
-        // the host constructs or applies that model; do not retain the model.
+        // Read stable SaasVideoDetailModel objects rather than guessing an
+        // obfuscated uo4.y0.x Runnable which is absent in Hongguo 7.3.5.32.
+        // Constructor observation is a fallback; Gson.fromJson captures the
+        // fully populated DTO before the host releases its temporary reference.
         try {
-            val detailRunner = Class.forName("uo4.y0.x", false, classLoader)
-            var installed = 0
-            detailRunner.declaredConstructors.forEachIndexed { index, ctor ->
+            val detailClass = Class.forName(
+                "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDetailModel",
+                false, classLoader)
+            var modelHooks = 0
+            detailClass.declaredConstructors.forEachIndexed { index, ctor ->
                 try {
                     module.hook(ctor)
-                        .setId("xhSeriesDetailConstruct_$index")
+                        .setId("xhMediaSeriesModelCtor_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) {
                                 try {
-                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
-                                } catch (e: Throwable) {
-                                    LogUtil.warn("系统媒体: 全集详情创建捕获异常 " +
-                                        e.javaClass.simpleName)
-                                }
+                                    FullSeriesMediaInfo.observeDetailModel(chain.thisObject)
+                                } catch (_: Throwable) { }
                             }
                             result
                         })
-                    installed++
+                    modelHooks++
                 } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: 全集详情构造 Hook 失败: " + e.message)
+                    LogUtil.warn("系统媒体: 原生详情构造 Hook 失败: " +
+                        e.javaClass.simpleName)
                 }
             }
-            detailRunner.declaredMethods.filter {
-                it.name == "run" && it.parameterCount == 0
+            // Named setters/getters are bound to the host's actual model,
+            // independently of its obfuscated presenter/fragment classes.
+            detailClass.declaredMethods.filter {
+                it.name in setOf("setEpisodesTitle", "setEpisodesCover",
+                    "setSmallEpisodesCover", "setEpisodesId",
+                    "getEpisodesTitle", "getEpisodesCover",
+                    "getSmallEpisodesCover") 
             }.forEachIndexed { index, method ->
                 try {
                     module.hook(method)
-                        .setId("xhSeriesDetailApplied_$index")
+                        .setId("xhMediaSeriesModelAccess_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
-                            // Run may release its detail field before returning.
-                            // Capture both sides, without altering host logic.
-                            if (gMasterOn && gSystemMediaOn) {
-                                try {
-                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
-                                } catch (e: Throwable) {
-                                    LogUtil.warn("系统媒体: 全集详情执行前捕获异常 " +
-                                        e.javaClass.simpleName)
-                                }
-                            }
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) {
                                 try {
-                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
+                                    FullSeriesMediaInfo.observeDetailModel(chain.thisObject)
+                                } catch (_: Throwable) { }
+                            }
+                            result
+                        })
+                    modelHooks++
+                } catch (_: Throwable) { }
+            }
+            LogUtil.info("  ✓ system media stable series DTO hooks: $modelHooks")
+        } catch (e: Throwable) {
+            LogUtil.warn("  system media stable series DTO unavailable: " +
+                e.javaClass.simpleName)
+        }
+        try {
+            val gsonClass = Class.forName("com.google.gson.Gson", false, classLoader)
+            var installed = 0
+            gsonClass.declaredMethods.filter {
+                it.name == "fromJson" &&
+                    it.returnType != Void.TYPE
+            }.forEachIndexed { index, method ->
+                try {
+                    module.hook(method)
+                        .setId("xhMediaSeriesGsonResult_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            // Do not inspect JSON, arguments, requests, or
+                            // unrelated DTOs. Only the completed series model.
+                            if (gMasterOn && gSystemMediaOn &&
+                                result?.javaClass?.name ==
+                                    "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDetailModel") {
+                                try {
+                                    FullSeriesMediaInfo.observeDetailModel(result)
                                 } catch (e: Throwable) {
-                                    LogUtil.warn("系统媒体: 全集详情执行后捕获异常 " +
+                                    LogUtil.warn("系统媒体: 系列详情读取失败 " +
                                         e.javaClass.simpleName)
                                 }
                             }
                             result
                         })
                     installed++
-                } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: 全集详情应用 Hook 失败: " + e.message)
-                }
+                } catch (_: Throwable) { }
             }
-            LogUtil.info("  ✓ system media native series-detail observers: $installed")
+            LogUtil.info("  ✓ system media series JSON result observers: $installed")
         } catch (e: Throwable) {
-            LogUtil.warn("  system media series-detail observer unavailable: " +
-                e.javaClass.simpleName + ": " + e.message)
+            LogUtil.info("  system media Gson series observer unavailable: " +
+                e.javaClass.simpleName)
         }
 
         // Capture the original VideoShop PlayEntity model rather than
