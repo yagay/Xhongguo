@@ -142,6 +142,22 @@ internal object SinglePlaybackOwner {
         }
     }
 
+    /**
+     * Settings can disable BOTH media and mini-player without killing the
+     * host process. Drop stale route/engine bookkeeping so re-enabling either
+     * feature cannot inherit an old owner. Never pause or release the real
+     * playback engine here: this module no longer owns it.
+     */
+    @Synchronized fun reset() {
+        owner.clear()
+        route = Route.OTHER
+        ownerRoute = Route.OTHER
+        synchronized(routes) { routes.clear() }
+        transitioning.remove()
+        lastHandoffAt = 0L
+        LogUtil.info("单播放器: 已清理模块播放权状态（不干预宿主播放）")
+    }
+
     fun isOwner(engine: Any?): Boolean = engine != null && owner.get() === engine
 
     /** Called at release, never drop the current owner when an older engine
