@@ -1493,10 +1493,12 @@ object Hooks {
 
         // Holder classes change between Hongguo versions. Treat the actual
         // attached rendering tree as authoritative, not obfuscated holder IDs.
-        for ((holder, state) in shortVideoHolderSnapshot().asReversed()) {
-            if (state == 2 || !isShortVideoHolderVisible(holder)) continue
-            find(shortVideoHolderRoot(holder), 0)
-            if (candidates.isNotEmpty()) break
+        if (act.javaClass.name == MAIN_TAB_ACTIVITY) {
+            for ((holder, state) in shortVideoHolderSnapshot().asReversed()) {
+                if (state == 2 || !isShortVideoHolderVisible(holder)) continue
+                find(shortVideoHolderRoot(holder), 0)
+                if (candidates.isNotEmpty()) break
+            }
         }
         if (candidates.isEmpty()) {
             find(act.window.decorView, 0)
@@ -1687,7 +1689,9 @@ object Hooks {
                 MAIN_TAB_ACTIVITY,
                 "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
             )) return
-        val destination = intent?.component?.className ?: return
+        val destination = intent?.component?.className ?:
+            try { intent?.resolveActivity(owner.packageManager)?.className }
+            catch (_: Throwable) { null } ?: return
         if (destination !in setOf(
             "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
             "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity"
