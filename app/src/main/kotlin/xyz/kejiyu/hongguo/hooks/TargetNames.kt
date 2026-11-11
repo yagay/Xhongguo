@@ -334,6 +334,7 @@ object TargetNames {
         packageName = CN_PACKAGE,
         versionName = "",
         structuralFullscreenWatch = true,
+        seriesToolbarProfile = "auto",
         shortHolder = "",
         holderBaseS1 = "",
         shortStateMethod = "",
