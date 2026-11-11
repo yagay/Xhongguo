@@ -441,6 +441,48 @@ internal object SystemMediaBridge {
     }
 
     /**
+     * A final-episode autoplay can switch to the NEXT drama in the SAME
+     * Activity and sometimes the SAME native TTVideoEngine. Old metadata must
+     * disappear before the new DTO is available; otherwise Android continues
+     * showing the previous poster/title indefinitely.
+     *
+     * Only preserve series artwork when the new video is positively matched
+     * to the exact same series ID. A missing/unknown ID is not evidence.
+     */
+    private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
+        episodeTitle = null
+        if (!sameSeries) {
+            seriesTitle = null
+            coverArt = null
+            currentSeriesIdentity = null
+        }
+        durationMs = -1L
+        positionMs = -1L
+        bufferedMs = -1L
+        actualPlaybackSpeed = 1f
+        artworkGeneration++
+        artworkRequestUrl = null
+        artworkRequestedAt = 0L
+        lastMetadataArt = null
+        lastMetadataSignature = null
+        metadataSyncGeneration++
+        handler.removeCallbacks(delayedMetadataSync)
+        lastVisibleInfoAt = 0L
+        lastVisibleInfoIdentity = ""
+        lastVisibleInfoSource = ""
+        lastNativeMetaProbeAt = 0L
+
+        // Publish the cleared record NOW: neither notification nor MediaSession
+        // should retain last drama's title/poster while the new drama loads.
+        updateSessionMetadata(force = true)
+        if (reportedCard) updateMediaNotification(knownPlaying)
+        LogUtil.info("系统媒体: 剧集切换已清理旧元数据" +
+            " reason=$reason sameSeries=$sameSeries" +
+            " retainedPoster=" + (coverArt != null))
+        LogUtil.incr("systemMediaDramaTransitionInvalidated")
+    }
+
+    /**
      * Capture the live VideoShop PlayEntity, matched to the TTVideoEngine by
      * getVideoID() or exact engine identity. Unlike UI text heuristics, this
      * cannot accidentally read a recommendation for another video.
@@ -482,29 +524,30 @@ internal object SystemMediaBridge {
             videoContext.get(), controller.get(), layer.get())
         val ui = if (includeUi && activity?.hasWindowFocus() == true)
             NativeMediaInfo.read(activity) else NativeMediaInfo.Info()
-        val title = if (isFullSeries)
-            full.title ?: observed.title ?: ui.title ?: play.title
-        else home.title ?: observed.title ?: play.title ?: ui.title
-        val episode = selectEpisodeLabel(full.episode,
-            play.episode ?: ui.episode)
+        // The old ShortSeriesActivity's TextViews/PlayEntity can lag behind
+        // the new engine after final-episode autoplay. FullSeriesMediaInfo
+        // explicitly marks an engine video ID with no matching Saas model.
+        // In that state NONE of those unrelated old UI fallbacks are trusted.
+        val seriesUnverified = isFullSeries &&
+            full.source == "series-video-unverified"
+        val title = when {
+            seriesUnverified -> null
+            isFullSeries -> full.title ?: observed.title ?: play.title ?: ui.title
+            else -> home.title ?: observed.title ?: play.title ?: ui.title
+        }
+        val episode = if (seriesUnverified) null
+            else selectEpisodeLabel(full.episode, play.episode ?: ui.episode)
         // Only true native series posters: never use a playing frame still or
         // the video Surface as Android MediaMetadata art.
-        val artworkUrl = full.artworkUrl ?: home.artworkUrl ?:
-            observed.artworkUrl ?: play.artworkUrl
-        val resolvedSeriesId = full.seriesId ?: home.seriesId ?:
-            observed.seriesId
+        val artworkUrl = if (seriesUnverified) null
+            else full.artworkUrl ?: home.artworkUrl ?:
+                observed.artworkUrl ?: play.artworkUrl
+        val resolvedSeriesId = if (seriesUnverified) null
+            else full.seriesId ?: home.seriesId ?: observed.seriesId
         if (resolvedSeriesId != null && currentSeriesIdentity != null &&
             resolvedSeriesId != currentSeriesIdentity) {
-            // One Activity may navigate to another drama. A confirmed ID
-            // change must invalidate the old title, poster and late callback.
-            seriesTitle = null
-            episodeTitle = null
-            coverArt = null
-            artworkGeneration++
-            artworkRequestUrl = null
-            artworkRequestedAt = 0L
-            lastMetadataArt = null
-            lastMetadataSignature = null
+            // Only the current playing model may confirm a changed series.
+            invalidateForVideoTransition(false, "verified-series-change")
         }
         if (resolvedSeriesId != null) currentSeriesIdentity = resolvedSeriesId
         if (activity != null) currentMetadataPage =
@@ -579,20 +622,7 @@ internal object SystemMediaBridge {
             }
             val sameSeries = incoming.seriesId != null &&
                 incoming.seriesId == currentSeriesIdentity
-            episodeTitle = null
-            if (!sameSeries) {
-                seriesTitle = null
-                coverArt = null
-                currentSeriesIdentity = null
-            }
-            artworkGeneration++
-            artworkRequestUrl = null
-            artworkRequestedAt = 0L
-            durationMs = -1L
-            positionMs = -1L
-            bufferedMs = -1L
-            lastMetadataArt = null
-            lastMetadataSignature = null
+            invalidateForVideoTransition(sameSeries, "same-engine-video-id")
             LogUtil.info("系统媒体: 同引擎切换视频 ID" +
                 " sameSeries=$sameSeries posterRetained=" + (coverArt != null))
         }
@@ -722,29 +752,9 @@ internal object SystemMediaBridge {
                 }
                 val sameSeries = incomingSeries != null &&
                     incomingSeries == currentSeriesIdentity
-                durationMs = -1L
-                positionMs = -1L
-                bufferedMs = -1L
-                actualPlaybackSpeed = 1f
-                if (!sameSeries) {
-                    seriesTitle = null
-                    coverArt = null
-                    currentSeriesIdentity = null
-                }
-                episodeTitle = null
-                artworkGeneration++
-                artworkRequestUrl = null
-                artworkRequestedAt = 0L
-                handler.removeCallbacks(delayedMetadataSync)
-                metadataSyncGeneration++
-                lastMetadataSignature = null
-                lastMetadataArt = null
+                invalidateForVideoTransition(sameSeries, "new-native-engine")
                 lastProgressDiagnosticAt = 0L
-                lastVisibleInfoAt = 0L
-                lastVisibleInfoIdentity = ""
-                lastVisibleInfoSource = ""
                 currentEngineVideoIdentity = null
-                lastNativeMetaProbeAt = 0L
                 if (backgroundPauseGuardEngine.get() !== candidate) {
                     backgroundPauseGuardEngine.clear()
                     backgroundPauseGuardUntil = 0L
