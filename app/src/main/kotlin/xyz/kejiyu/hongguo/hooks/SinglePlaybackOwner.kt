@@ -5,6 +5,7 @@ import android.os.SystemClock
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * Playback ownership, ported as a POLICY from hongguo-android's
@@ -64,6 +65,8 @@ internal object SinglePlaybackOwner {
         if (previous != null && oldRoute != Route.OTHER && oldRoute != next) {
             pauseCurrent(previous, "navigate:$oldRoute->$next")
             LogUtil.incr("singlePlaybackRouteHandoff")
+            FeatureTrace.event("playback", "route_handoff", "observed",
+                "from=" + oldRoute + ",to=" + next)
         }
         LogUtil.info("单播放器: 前台播放路由=$next old=$oldRoute")
     }
@@ -117,6 +120,8 @@ internal object SinglePlaybackOwner {
             LogUtil.incr("singlePlaybackEngineHandoff")
         }
         lastHandoffAt = SystemClock.uptimeMillis()
+        FeatureTrace.event("playback", "owner_change", "committed",
+            "route=" + nextRoute + ",replaced=" + (old != null))
         LogUtil.info("单播放器: 已接管播放权" +
             " route=$ownerRoute replaced=" + (old != null) +
             " playing=" + (playing(engine)?.toString() ?: "unknown"))
@@ -139,6 +144,8 @@ internal object SinglePlaybackOwner {
             LogUtil.incr("singlePlaybackOldPaused")
         } catch (e: Throwable) {
             LogUtil.warn("单播放器: 暂停旧引擎失败 " + e.javaClass.simpleName)
+            FeatureTrace.event("playback", "old_engine_pause", "fail",
+                "errorType=" + e.javaClass.simpleName)
         }
     }
 
@@ -158,6 +165,7 @@ internal object SinglePlaybackOwner {
         transitioning.remove()
         lastHandoffAt = 0L
         LogUtil.info("单播放器: 已清理模块播放权状态（不干预宿主播放）")
+        FeatureTrace.event("playback", "owner_reset", "committed")
     }
 
     fun isOwner(engine: Any?): Boolean = engine != null && owner.get() === engine
