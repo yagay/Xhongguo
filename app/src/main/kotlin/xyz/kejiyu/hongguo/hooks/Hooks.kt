@@ -5685,12 +5685,22 @@ object Hooks {
                         .setId("xhSeriesDetailApplied_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
+                            // Run may release its detail field before returning.
+                            // Capture both sides, without altering host logic.
+                            if (gMasterOn && gSystemMediaOn) {
+                                try {
+                                    FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 全集详情执行前捕获异常 " +
+                                        e.javaClass.simpleName)
+                                }
+                            }
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) {
                                 try {
                                     FullSeriesMediaInfo.observeDetailRunnable(chain.thisObject)
                                 } catch (e: Throwable) {
-                                    LogUtil.warn("系统媒体: 全集详情应用捕获异常 " +
+                                    LogUtil.warn("系统媒体: 全集详情执行后捕获异常 " +
                                         e.javaClass.simpleName)
                                 }
                             }
