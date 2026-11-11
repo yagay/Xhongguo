@@ -68,6 +68,34 @@ The 2026-11-11 21:33 diagnostic showed these distinct problems:
 - A build is **not** evidence that background/lock-screen, home feed,
   final-episode autoplay or actual UI behavior passed device testing.
 
+## 2026-11-11 22:40:37 series metadata recovery
+
+The user's exported diagnostic ZIP confirmed that, at 22:40:27, a new
+TTVideoEngine replaced the active series player while `SaasVideoData` and
+the short-lived `SaasVideoDetailModel` did not expose a comparable engine
+video ID. `series-video-unverified` then erased all media-card fields, even
+though the native host subsequently observed an official series model and
+poster.
+
+The beta resolver now tracks a *native engine transition epoch*, separates
+DTOs actually consumed by host callbacks from passive polling of recycled
+presenters, and correlates a single fresh series with a captured official
+detail. This can safely recover the series title, poster, and total count
+without comparing incompatible video ID namespaces. It does **not** claim a
+current episode number from a possibly preloaded video.
+
+`native_handoff_match` means the cross-namespace series evidence passed
+the conservative guard. `native_handoff_probe` reports the number of fresh
+native models and official-detail matches when it fails. If the data remains
+ambiguous or missing, the media card switches from temporary “正在获取” to
+an explicit “剧集信息暂不可用” message after 12 seconds. This is a presentation
+fallback, not evidence that the real metadata was resolved.
+
+Native data may still be too ambiguous to bind when the host preloads
+multiple dramas or never supplies a matching official detail. The result
+must be checked with an actual beta Debug build and new on-device diagnostics
+before treating this change as validated.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
