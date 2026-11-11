@@ -679,17 +679,39 @@ internal object FullSeriesMediaInfo {
         // to stale presenter.x.b, intent extras or old cached title.
         // With no trustworthy matching DTO, temporarily publish blanks.
         if (videoId != null && matchedSeriesKey == null) {
+            // A SaasVideoData matched by exact video ID can still carry a
+            // correct title/poster even if the backend omitted episodesId.
+            // Use those fields directly; NEVER substitute old Activity
+            // detail or a prior series cache.
+            val titleByVideoId = str(field(active, "seriesName")) ?:
+                fragment.title ?: observed.title
+            val sourceCover = field(active, "cover") as? String
+            val frameCover = field(active, "episodeCover") as? String
+            val artworkByVideoId = listOfNotNull(
+                sourceCover?.takeIf {
+                    it.isNotBlank() && it != frameCover
+                }, fragment.artworkUrl, observed.artworkUrl
+            ).firstNotNullOfOrNull(MediaArtworkLoader::normalize)
+            val episodeByVideoId =
+                episodeFromIndex(active, null) ?: fragment.episode
+            val matchedByVideoId = titleByVideoId != null ||
+                artworkByVideoId != null || episodeByVideoId != null
             val now = SystemClock.uptimeMillis()
             if (now - lastDiagnosticAt > 4000L) {
                 lastDiagnosticAt = now
-                LogUtil.info("系统媒体: 全集新视频尚无匹配剧集数据" +
+                LogUtil.info("系统媒体: 全集新视频剧集 ID 未就绪" +
                     " engineVideoId=true candidateCount=" + current.size +
                     " detailPresent=" + (detailKey != null) +
-                    " fragmentMatch=" + (fragment.videoId == videoId) +
-                    " observedMatch=" + (observed.seriesId != null))
+                    " videoMatched=" + (active != null ||
+                        fragment.videoId == videoId ||
+                        observed.title != null || observed.artworkUrl != null) +
+                    " safeMetadata=$matchedByVideoId")
                 LogUtil.incr("systemMediaSeriesUnverifiedTransition")
             }
-            return Info(source = "series-video-unverified")
+            return Info(titleByVideoId, episodeByVideoId,
+                if (matchedByVideoId) "series-video-id-only"
+                else "series-video-unverified",
+                artworkByVideoId)
         }
 
         // With a blank engine ID, a single truly visible active fragment
