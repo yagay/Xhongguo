@@ -35,6 +35,10 @@ object FeatureTraceCatalog {
         name.startsWith("systemMediaArtwork") -> "artwork"
         name.startsWith("systemMediaBackground") ||
             name.startsWith("systemMediaAppSwitch") ||
+            name.startsWith("systemMediaHostLifecycle") ||
+            name.startsWith("systemMediaEarly") ||
+            name.startsWith("systemMediaEpisodeEndStall") ||
+            name.startsWith("systemMediaNativeCompletionHook") ||
             name.startsWith("systemMediaFeedPause") ||
             name.startsWith("systemMediaLifecyclePause") ||
             name.startsWith("systemMediaPrePause") -> "background"
