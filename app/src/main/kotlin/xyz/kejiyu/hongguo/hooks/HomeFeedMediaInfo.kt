@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * Associates the official home feed's currently VISIBLE pager item with
@@ -232,7 +233,14 @@ internal object HomeFeedMediaInfo {
                 " ambiguous=$ambiguous verified=$verified")
             LogUtil.incr("systemMediaHomePagerProbe")
         }
-        if (!verified) return FullSeriesMediaInfo.Info()
+        if (!verified) {
+            FeatureTrace.event("media", "feed_candidate", "degraded",
+                "candidates=" + candidates.size + ",ambiguous=" + ambiguous +
+                    ",pagerVideo=" + (activeVideoId != null) +
+                    ",engineVideo=" + (engineId != null),
+                minIntervalMs = 4000L)
+            return FullSeriesMediaInfo.Info()
+        }
         val info = FullSeriesMediaInfo.infoForVideoData(selected!!.data)
         val signature = activeVideoId + "|" + info.seriesId + "|" +
             (info.title != null) + "|" + (info.artworkUrl != null)
@@ -243,6 +251,10 @@ internal object HomeFeedMediaInfo {
                 " officialPoster=" + (info.artworkUrl != null) +
                 " seriesId=" + (info.seriesId != null))
             LogUtil.incr("systemMediaHomeModelBound")
+            FeatureTrace.event("media", "feed_candidate", "bound",
+                "title=" + (info.title != null) +
+                    ",poster=" + (info.artworkUrl != null) +
+                    ",series=" + (info.seriesId != null))
         }
         return info
     }
