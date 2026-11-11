@@ -3,6 +3,7 @@ package xyz.kejiyu.hongguo.hooks
 import android.os.Handler
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * One metadata refresh lane for home feed, full-series and autoplay.
@@ -23,19 +24,29 @@ internal class MediaRefreshCoordinator(
     private val generation = AtomicLong(0L)
     private val dtoEvent = AtomicLong(0L)
     private val lastLeadingDtoAt = AtomicLong(0L)
+    private val transitionCallbacks =
+        AtomicReference<List<Runnable>>(emptyList())
+    private val trailingDtoCallback = AtomicReference<Runnable?>(null)
 
     fun onPlaybackTransition(reason: String) {
         val epoch = generation.incrementAndGet()
-        dtoEvent.incrementAndGet() // invalidate pending DTO pulses
-        // Cover a delayed original-app presenter swap, network/JSON callback,
-        // background playback, and final-episode autoplay without polling forever.
-        for (delay in longArrayOf(160L, 650L, 1600L, 3500L,
-            7500L, 15000L, 30000L)) {
-            main.postDelayed({
+        dtoEvent.incrementAndGet()
+        transitionCallbacks.getAndSet(emptyList()).forEach(main::removeCallbacks)
+        trailingDtoCallback.getAndSet(null)?.let(main::removeCallbacks)
+        // Cover late original-app presenter swaps and final-episode autoplay
+        // without leaving hundreds of obsolete callbacks after rapid swipes.
+        val delays = longArrayOf(160L, 650L, 1600L, 3500L,
+            7500L, 15000L, 30000L)
+        val callbacks = delays.map { delay ->
+            Runnable {
                 if (generation.get() == epoch && isActive()) {
                     safelyRefresh("transition:$reason:$delay")
                 }
-            }, delay)
+            }
+        }
+        transitionCallbacks.set(callbacks)
+        callbacks.forEachIndexed { index, callback ->
+            main.postDelayed(callback, delays[index])
         }
     }
 
@@ -54,17 +65,21 @@ internal class MediaRefreshCoordinator(
                 }
             }, 80L)
         }
-        main.postDelayed({
+        val trailing = Runnable {
             if (epoch == generation.get() && request == dtoEvent.get() &&
                 isActive()) {
                 safelyRefresh("dto-trailing")
             }
-        }, 240L)
+        }
+        trailingDtoCallback.getAndSet(trailing)?.let(main::removeCallbacks)
+        main.postDelayed(trailing, 240L)
     }
 
     fun cancel() {
         generation.incrementAndGet()
         dtoEvent.incrementAndGet()
+        transitionCallbacks.getAndSet(emptyList()).forEach(main::removeCallbacks)
+        trailingDtoCallback.getAndSet(null)?.let(main::removeCallbacks)
     }
 
     private fun safelyRefresh(reason: String) {
