@@ -530,18 +530,32 @@ internal object SystemMediaBridge {
         // In that state NONE of those unrelated old UI fallbacks are trusted.
         val seriesUnverified = isFullSeries &&
             full.source == "series-video-unverified"
+        val observedSameSeries = !isFullSeries ||
+            full.seriesId == null || observed.seriesId == full.seriesId
+        // In full-series playback, the old Activity's on-screen text can
+        // linger for one frame (or indefinitely in the background) after
+        // final-episode autoplay. Only media tied to the playing video/series
+        // is safe: do not re-import that stale UI label when the new engine
+        // already has a verified series identity.
+        val trustedObservedTitle =
+            if (observedSameSeries) observed.title else null
+        val trustedObservedPoster =
+            if (observedSameSeries) observed.artworkUrl else null
+        val uiAllowed = !isFullSeries || full.seriesId == null
         val title = when {
             seriesUnverified -> null
-            isFullSeries -> full.title ?: observed.title ?: play.title ?: ui.title
+            isFullSeries -> full.title ?: trustedObservedTitle ?:
+                play.title ?: if (uiAllowed) ui.title else null
             else -> home.title ?: observed.title ?: play.title ?: ui.title
         }
         val episode = if (seriesUnverified) null
-            else selectEpisodeLabel(full.episode, play.episode ?: ui.episode)
+            else selectEpisodeLabel(full.episode, play.episode ?:
+                if (uiAllowed) ui.episode else null)
         // Only true native series posters: never use a playing frame still or
         // the video Surface as Android MediaMetadata art.
         val artworkUrl = if (seriesUnverified) null
             else full.artworkUrl ?: home.artworkUrl ?:
-                observed.artworkUrl ?: play.artworkUrl
+                trustedObservedPoster ?: play.artworkUrl
         val resolvedSeriesId = if (seriesUnverified) null
             else full.seriesId ?: home.seriesId ?: observed.seriesId
         if (resolvedSeriesId != null && currentSeriesIdentity != null &&
