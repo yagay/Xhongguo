@@ -2,6 +2,7 @@ package xyz.kejiyu.hongguo.hooks
 
 import android.app.Activity
 import android.os.SystemClock
+import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
 
 /**
@@ -28,6 +29,86 @@ internal object FullSeriesMediaInfo {
         "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDetailModel"
 
     private var lastDiagnosticAt = 0L
+    // uo4.y0.x is only a short-lived Runnable holding SaasVideoDetailModel.
+    // Cache only non-sensitive metadata for the same ShortSeriesActivity, not
+    // the transient Runnable or the whole model (avoids retaining its video list).
+    private var cachedActivity = WeakReference<Activity>(null)
+    private var cachedSeriesKey: String? = null
+    private var cachedSeriesTitle: String? = null
+    private var cachedTotal: Long? = null
+
+    private data class PagerState(
+        val currentItem: Int? = null,
+        val adapterCount: Int? = null,
+        val listCount: Int? = null,
+        val currentPageModel: Any? = null,
+        val pageAligned: Boolean = false
+    )
+
+    private fun pagerState(presenter: Any?, detail: Any?, total: Long?): PagerState {
+        // uo4.y0.h is j25.d, which extends j25.e -> AndroidX ViewPager.
+        // getCurrentItem() is an actual selected page, unlike the cached
+        // uo4.y0.z model that is only set during presenter initialization.
+        val pager = field(presenter, "h") ?: return PagerState()
+        if (!pager.javaClass.name.contains("ViewPager") &&
+            !pager.javaClass.name.startsWith("j25.")) return PagerState()
+        val item = number(call(pager, "getCurrentItem"))?.toInt()
+            ?.takeIf { it in 0..5000 }
+        val adapter = call(pager, "getAdapter")
+        val count = number(call(adapter, "getCount"))?.toInt()
+            ?.takeIf { it in 1..5000 }
+
+        val list = listOf("episodesList", "playerSerialVideoList",
+            "episodesListWithTrail", "episodesListWithTrailAfterCut")
+            .mapNotNull { field(detail, it) as? List<*> }
+            .firstOrNull { it.isNotEmpty() && it.size <= 5000 &&
+                (it.size == count || total != null && it.size.toLong() == total) }
+
+        val listSize = list?.size
+        val aligned = item != null && count != null && item < count &&
+            (total != null && count.toLong() == total ||
+             listSize != null && count == listSize && count >= 2)
+        val model = if (aligned && list != null && item < list.size)
+            list[item] else null
+        return PagerState(item, count, listSize, model, aligned)
+    }
+
+    private fun episodeFromPager(pager: PagerState, total: Long?): String? {
+        val item = pager.currentItem ?: return null
+        if (!pager.pageAligned) return null
+
+        // The real ViewPager adapter must represent the same complete
+        // episodes list or an exact copy of the series detail's list. A
+        // three-page recycler with 80 episodes is NOT an episode counter.
+        val selected = pager.currentPageModel
+        val indexInList = number(field(selected, "indexInList"))
+        val verified = if (indexInList != null &&
+            indexInList in 0..4999L &&
+            indexInList < (total ?: 5000L)) indexInList + 1
+            else item.toLong() + 1L
+        if (verified <= 0 || verified > 5000 ||
+            total != null && verified > total) return null
+        return "第" + verified + "集" +
+            (if (total != null) " · 全" + total + "集" else "")
+    }
+
+    private fun preserveCurrentSeries(
+        activity: Activity, seriesKey: String?, newTitle: String?,
+        newTotal: Long?
+    ): Pair<String?, Long?> {
+        if (cachedActivity.get() !== activity ||
+            seriesKey != null && cachedSeriesKey != null &&
+                cachedSeriesKey != seriesKey) {
+            cachedActivity = WeakReference(activity)
+            cachedSeriesTitle = null
+            cachedTotal = null
+            cachedSeriesKey = seriesKey
+        }
+        if (seriesKey != null) cachedSeriesKey = seriesKey
+        if (newTitle != null) cachedSeriesTitle = newTitle
+        if (newTotal != null && newTotal in 1..5000L) cachedTotal = newTotal
+        return cachedSeriesTitle to cachedTotal
+    }
 
     private fun field(receiver: Any?, name: String): Any? {
         if (receiver == null) return null
@@ -124,32 +205,45 @@ internal object FullSeriesMediaInfo {
             vid(it) == videoId
         } else null
 
-        val total = listOfNotNull(
+        val freshTotal = listOfNotNull(
             number(field(active, "episodesCount")),
             number(field(detail, "episodeTotalCnt")),
-            number(field(detail, "episodeCnt"))
+            number(field(detail, "episodeCnt")),
+            // When the engine's videoID is an internal player identifier,
+            // data.vid won't match; series-level episodesCount is still
+            // reliable if it belongs to this ShortSeriesActivity.
+            number(field(current.firstOrNull(), "episodesCount"))
         ).firstOrNull { it in 1..5000L }
 
         // Detail metadata belongs to this ShortSeriesActivity rather than an
         // unrelated home recommendation; its title can be shown even if the
         // exact episode is not yet available from the active video model.
-        val seriesTitle =
+        val latestTitle =
             str(field(active, "seriesName")) ?:
             str(field(detail, "episodesTitle")) ?:
             str(field(active, "title")) ?:
             str(field(current.firstOrNull(), "seriesName"))
+        val seriesKey = str(field(detail, "episodesId")) ?:
+            str(field(current.firstOrNull(), "episodesId"))
+        val retained = preserveCurrentSeries(activity, seriesKey,
+            latestTitle, freshTotal)
+        val seriesTitle = retained.first
+        val total = retained.second
+        val pager = pagerState(presenter, detail, total)
 
         // Reading the active SaasVideoData is O(1). Avoid scanning hundreds
         // of playlist items on every ~1.4s media timeline tick.
         val fromActive = episodeFromIndex(active, total)
-        val episode = if (fromActive != null) fromActive else {
-            val episodeNumber = indexFromList(detail, videoId)
-            if (episodeNumber != null) {
+        val episode = fromActive
+            ?: indexFromList(detail, videoId)?.let { episodeNumber ->
                 "第" + episodeNumber + "集" +
                     (if (total != null && total >= episodeNumber)
                         " · 全" + total + "集" else "")
-            } else null
-        }
+            }
+            ?: episodeFromPager(pager, total)
+            // The total episode count is independently verified by the
+            // series data model. Show it even if the active index is unknown.
+            ?: total?.let { "全" + it + "集" }
 
         val now = SystemClock.uptimeMillis()
         if (now - lastDiagnosticAt > 12000L) {
@@ -161,11 +255,18 @@ internal object FullSeriesMediaInfo {
                 " videoMatched=" + (active != null) +
                 " title=" + (seriesTitle != null) +
                 " episode=" + (episode != null) +
-                " total=" + (total != null))
+                " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
+                " total=" + (total != null) +
+                " pagerIndex=" + (pager.currentItem?.toString() ?: "?") +
+                " pagerCount=" + (pager.adapterCount?.toString() ?: "?") +
+                " detailListCount=" + (pager.listCount?.toString() ?: "?") +
+                " pagerAligned=" + pager.pageAligned)
             LogUtil.incr("systemMediaFullSeriesNativeProbe")
         }
         return Info(seriesTitle, episode,
-            if (active != null) "saas-current-video" else if (detail != null)
-                "saas-series-detail" else "none")
+            if (active != null) "saas-current-video"
+            else if (pager.pageAligned) "saas-fullseries-pager"
+            else if (seriesTitle != null || total != null) "saas-series-detail"
+            else "none")
     }
 }
