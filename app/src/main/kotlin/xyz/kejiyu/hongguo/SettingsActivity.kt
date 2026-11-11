@@ -19,6 +19,8 @@ import android.widget.Toast
 /** Standalone settings UI. Nothing needs to be opened inside the target app. */
 class SettingsActivity : Activity() {
     private lateinit var root: LinearLayout
+    private lateinit var scroll: ScrollView
+    private var currentGroup: SettingsCatalog.Group? = null
     private val prefs by lazy { ModuleSettingsStore.prefs(this) }
     private var speedText: TextView? = null
     private var speedSwitch: Switch? = null
@@ -42,89 +44,112 @@ class SettingsActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = color(R.color.app_bg)
         window.navigationBarColor = color(R.color.app_bg)
-        val scroll = ScrollView(this).apply {
+        scroll = ScrollView(this).apply {
             setBackgroundColor(color(R.color.app_bg))
             isVerticalScrollBarEnabled = false
+            isFillViewport = false
         }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(32))
+            setPadding(dp(18), dp(14), dp(18), dp(30))
         }
         scroll.addView(root)
         setContentView(scroll)
-
-        root.addView(label("‹  返回", 15, R.color.accent, true).apply {
-            setPadding(0, 0, 0, dp(18))
-            setOnClickListener { finish() }
-        })
-        root.addView(label("Xhongguo 设置", 26, R.color.text_primary, true))
-        root.addView(label("直接在模块 App 中管理红果的 LSPosed 功能", 13, R.color.text_secondary).apply {
-            setPadding(0, dp(5), 0, dp(15))
-        })
-        root.addView(label(
-            "保存后会同步到红果。部分启动时安装的 Hook 需要完全关闭红果并重新打开才会生效。",
-            12, R.color.text_secondary
-        ).apply {
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = background(R.color.accent_soft)
-        })
-
-        section("核心")
-        toggle("模块总开关", "统一启用或停用模块功能", "master_on")
-
-        section("界面精简")
-        toggle("隐藏状态栏", "视频页面沉浸显示", "status_bar")
-        toggle("隐藏控件", "三键导航下保留首页底部栏和全集入口", "control_hide")
-        toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
-        toggle("隐藏视频进度条", "隐藏已适配的视频进度条", "progress_off")
-        toggle("隐藏系统小白条", "仅手势导航有效，三键导航始终保留按键", "nav_bar_off")
-        toggle("视频长按菜单入口", "在原生视频长按菜单中添加 Xhongguo 设置", "video_longpress_settings", true)
-        toggle("禁用商城", "隐藏底部「商城」Tab，并阻止打开独立商城页面；不影响剧场", "disable_shopping_mall", true)
-        toggle("应用内小窗继续播放", "实验功能：从首页切到剧场、我的等页面时尝试保留原视频；可拖动、返回、关闭", "in_app_mini_player")
-        toggle("系统媒体后台播放", "实验功能：使用红果原播放器，通知栏显示系统媒体卡片（播放/暂停/返回），无悬浮图标；后台仍可能受原生播放器生命周期限制", "system_media_playback")
-        toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
-
-        section("播放与手势")
-        toggle("自动最高画质", "使用当前视频支持的最高画质", "max_quality")
-        speedSwitch = toggle("默认播放倍速", "可在下一项选择具体倍速", "default_speed")
-        speedText = action("选择倍速", speedDescription()) { chooseSpeed() }
-        toggle("双击打开评论", "替换默认的双击点赞", "double_tap_comment")
-        toggle("禁用下拉刷新", "禁用刷新手势与提示区域", "pull_refresh")
-        toggle("拦截顶部下滑", "拦截顶部区域的下滑手势", "top_zone")
-
-        section("内容与账号")
-        toggle("拦截广告与挂件", "使用现有的广告层与挂件 Hook", "ad_block")
-        toggle("VIP 状态 Hook", "启用现有的 VIP 适配逻辑", "vip_unlock")
-        toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
-
-        section("我的页面 · 快捷入口")
-        toggle("隐藏福利", "隐藏「我的」页面的福利入口，并禁止点击", "mine_hide_welfare", true)
-        toggle("隐藏订单", "隐藏「我的」页面的订单入口，并禁止点击", "mine_hide_orders", true)
-        toggle("隐藏消息", "隐藏「我的」页面的消息入口，并禁止点击", "mine_hide_messages", true)
-        toggle("隐藏游戏", "隐藏「我的」页面的游戏入口，并禁止点击", "mine_hide_games", true)
-        toggle("隐藏追更", "隐藏「我的」页面的追更入口，并禁止点击", "mine_hide_following", true)
-
-        section("我的页面 · 右侧菜单")
-        toggle("隐藏我的钱包", "隐藏右上角三横线菜单中的我的钱包入口", "mine_hide_wallet", true)
-        toggle("隐藏会员中心", "隐藏右上角三横线菜单中的会员中心入口", "mine_hide_membership", true)
-        toggle("隐藏游戏中心", "隐藏右上角三横线菜单中的游戏中心入口", "mine_hide_game_center", true)
-        toggle("隐藏创作中心", "隐藏右上角三横线菜单中的创作中心入口", "mine_hide_creator_center", true)
-
-        section("诊断与日志")
-        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
-            ModuleDiagnostics.chooseDestination(this)
+        currentGroup = SettingsCatalog.groups.firstOrNull {
+            it.id == savedInstanceState?.getString("settings_group")
         }
+        renderSettings()
+    }
 
-        section("工具及实验功能")
-        toggle("OLED 亮度保护", "实验性亮度拦截", "oled_protect")
-        toggle("通知栏快捷菜单", "红果需要授予通知权限", "notification_menu")
-        toggle("自定义下载数量限制", "覆盖默认的下载数量限制", "download_limit_unlimit")
-        limitText = action("下载限制数值", limitDescription()) { editLimits() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("settings_group", currentGroup?.id)
+        super.onSaveInstanceState(outState)
+    }
 
+    @Deprecated("Android back press")
+    override fun onBackPressed() {
+        if (currentGroup != null) {
+            currentGroup = null
+            renderSettings()
+        } else super.onBackPressed()
+    }
+
+    private fun renderSettings() {
+        root.removeAllViews()
+        speedText = null
+        speedSwitch = null
+        limitText = null
+
+        val group = currentGroup
+        root.addView(label(if (group == null) "‹ 返回" else "‹ 设置分类",
+            14, R.color.accent, true).apply {
+            setPadding(0, 0, 0, dp(12))
+            setOnClickListener {
+                if (currentGroup == null) finish()
+                else {
+                    currentGroup = null
+                    renderSettings()
+                }
+            }
+        })
+        root.addView(label(group?.title ?: "Xhongguo 设置",
+            24, R.color.text_primary, true))
         root.addView(label(
-            "原红果内设置首次启动红果后会尝试迁移。请在 LSPosed 中启用 Xhongguo 并选择相应的红果作用域。",
+            group?.detail ?: "常用设置在首页，其余选项按功能分类",
             12, R.color.text_secondary
-        ).apply { setPadding(dp(4), dp(22), dp(4), 0) })
+        ).apply { setPadding(0, dp(4), 0, dp(14)) })
+
+        if (group == null) {
+            toggle(SettingsCatalog.master.title,
+                SettingsCatalog.master.detail, SettingsCatalog.master.key)
+            root.addView(label(
+                "设置直接同步到红果；无需离开当前模块页面。",
+                12, R.color.text_secondary
+            ).apply { setPadding(dp(4), dp(11), dp(4), dp(7)) })
+            SettingsCatalog.groups.forEach { category ->
+                val container = row()
+                val icon = label(category.icon, 23, R.color.accent, true).apply {
+                    gravity = Gravity.CENTER
+                }
+                container.addView(icon, LinearLayout.LayoutParams(
+                    dp(38), dp(40)).apply { rightMargin = dp(7) })
+                addText(container, category.title, category.detail)
+                container.addView(label("›", 24, R.color.text_secondary))
+                container.setOnClickListener {
+                    currentGroup = category
+                    renderSettings()
+                }
+                append(container)
+            }
+        } else {
+            var subsection = ""
+            for (item in group.items) {
+                if (item.subsection.isNotBlank() && item.subsection != subsection) {
+                    subsection = item.subsection
+                    section(subsection)
+                }
+                when (item.kind) {
+                    SettingsCatalog.Kind.SWITCH -> {
+                        val sw = toggle(item.title, item.detail, item.key,
+                            item.defaultValue)
+                        if (item.key == "default_speed") speedSwitch = sw
+                    }
+                    SettingsCatalog.Kind.SPEED ->
+                        speedText = action(item.title, speedDescription()) { chooseSpeed() }
+                    SettingsCatalog.Kind.DOWNLOAD_VALUES ->
+                        limitText = action(item.title, limitDescription()) { editLimits() }
+                    SettingsCatalog.Kind.DIAGNOSTICS ->
+                        action(item.title, item.detail) {
+                            ModuleDiagnostics.chooseDestination(this)
+                        }
+                }
+            }
+            root.addView(label(
+                "部分 Hook 更改需强制停止红果并重新打开后生效。",
+                11, R.color.text_secondary
+            ).apply { setPadding(dp(4), dp(20), dp(4), 0) })
+        }
+        scroll.scrollTo(0, 0)
     }
 
     @Deprecated("Android document picker result")
@@ -142,8 +167,8 @@ class SettingsActivity : Activity() {
     private fun row(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(14), dp(12), dp(14), dp(12))
-        minimumHeight = dp(64)
+        setPadding(dp(13), dp(9), dp(13), dp(9))
+        minimumHeight = dp(54)
         background = background(R.color.surface)
         isClickable = true
         isFocusable = true
