@@ -85,8 +85,10 @@ internal object NativePlayEntityInfo {
                 }
             }
         }
-        val artUrl = listOf("episodes_cover", "episodesCover", "cover",
-            "cover_url", "coverUrl", "episodeCover", "smallEpisodesCover")
+        // Only explicit series-cover keys. "cover"/"episodeCover" may
+        // refer to a frame of the current video, NOT its official poster.
+        val artUrl = listOf("episodes_cover", "episodesCover",
+            "smallEpisodesCover", "small_episodes_cover")
             .firstNotNullOfOrNull { key ->
                 bundle.getString(key)?.takeIf { it.isNotBlank() }
             }
@@ -109,8 +111,7 @@ internal object NativePlayEntityInfo {
         val extras = (invoke(entity, "getBundle") as? Bundle)?.let {
             fromBundle(it)
         } ?: Info()
-        val artUrl = listOf("getEpisodesCover", "getSmallEpisodesCover",
-            "getCoverUrl", "getCover", "getEpisodeCover", "getPoster")
+        val artUrl = listOf("getEpisodesCover", "getSmallEpisodesCover")
             .firstNotNullOfOrNull { method ->
                 (invoke(business ?: entity, method) as? String)
                     ?.takeIf { it.isNotBlank() }
