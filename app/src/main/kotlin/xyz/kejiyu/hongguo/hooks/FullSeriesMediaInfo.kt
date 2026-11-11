@@ -323,7 +323,8 @@ internal object FullSeriesMediaInfo {
         val episode: String? = null,
         val artworkUrl: String? = null,
         val total: Long? = null,
-        val seriesId: String? = null
+        val seriesId: String? = null,
+        val videoId: String? = null
     )
 
     private fun currentFragmentEntries(
@@ -400,9 +401,11 @@ internal object FullSeriesMediaInfo {
     private fun mediaFromActiveFragment(
         activity: Activity,
         seriesKey: String?,
-        total: Long?
+        total: Long?,
+        engineVideoId: String? = null
     ): FragmentMedia {
         val entries = currentFragmentEntries(activity, seriesKey, total)
+            .filter { engineVideoId == null || vid(it.video) == engineVideoId }
         val sorted = entries.sortedWith(compareByDescending<ActiveFragmentEntry> {
             it.score
         }.thenByDescending { it.seriesVerified })
@@ -478,7 +481,9 @@ internal object FullSeriesMediaInfo {
             episode = matchedEpisode,
             artworkUrl = fragmentCover,
             total = fragmentTotal,
-            seriesId = seriesId(field(model, "episodesId"))
+            seriesId = seriesId(field(model, "episodesId")) ?:
+                seriesId(field(model, "seriesId")),
+            videoId = vid(model)
         )
     }
 
@@ -634,147 +639,164 @@ internal object FullSeriesMediaInfo {
         return null
     }
 
+    /**
+     * In the final-episode autoplay case the SAME ShortSeriesActivity can
+     * contain two generations of DTOs: its old SaasVideoDetailModel and
+     * the new video's TTVideoEngine/SaasVideoData. The playing video's
+     * exact ID wins. Never use the old Activity detail to choose/filter the
+     * active fragment, or to repopulate its old title and cover.
+     */
     fun read(activity: Activity?, engine: Any?): Info {
         if (activity?.javaClass?.name != ACTIVITY) return Info()
         val presenter = field(activity, "a")
         val detailHolder = field(presenter, "x")
         val detail = field(detailHolder, "b")?.takeIf(::isDetailModel)
         rememberDetail(detail)
-        val videoId = call(engine, "getVideoID")?.toString()
-            ?.takeIf { it.isNotBlank() && it != "null" }
+        val videoId = seriesId(call(engine, "getVideoID"))
 
         val current = listOf("I", "z")
             .mapNotNull { key -> field(presenter, key) }
             .filter { it.javaClass.name == DATA }
         current.forEach(::observeVideoData)
 
-        // A prepared next episode can coexist with the active video. Never
-        // use its index or episode title without an exact ID match.
+        // A presenter can still hold the LAST drama's current/next model.
+        // Verify exact video identity before using either one.
         val active = if (videoId != null) current.firstOrNull {
             vid(it) == videoId
         } else null
-
-        // IDs are frequently numeric strings; the title validator deliberately
-        // rejects numeric names and must NOT be used to validate series IDs.
-        val detailSeriesKey = seriesId(detailField(detail, "episodesId")) ?:
-            seriesId(field(active, "episodesId")) ?:
-            seriesId(field(current.firstOrNull(), "episodesId"))
-        val provisionalTotal = listOfNotNull(
-            number(field(active, "episodesCount")),
-            number(detailField(detail, "episodeTotalCnt")),
-            number(detailField(detail, "episodeCnt")),
-            number(field(current.firstOrNull(), "episodesCount"))
-        ).firstOrNull { it in 1..5000L }
-        // The active fragment supplied the *correct current episode* in the
-        // 16:41 diagnostics. Read its series name and art at the same time.
-        // Unlike the transient detail Runnable, this model stays attached to
-        // the current playing video's internal list.
-        val previousSeriesKey = if (cachedActivity.get() === activity)
-            cachedSeriesKey else null
-        val previousTotal = if (cachedActivity.get() === activity)
-            cachedTotal else null
+        val observed = observedForEngine(engine)
         val fragment = mediaFromActiveFragment(activity,
-            detailSeriesKey ?: previousSeriesKey, provisionalTotal ?: previousTotal)
-        val seriesKey = detailSeriesKey ?: fragment.seriesId ?:
-            observedForEngine(engine).seriesId
-        val capturedDetail = detailForSeries(seriesKey)
-        val observedVideo = observedForEngine(engine)
-        val freshTotal = provisionalTotal ?: fragment.total ?: capturedDetail?.total
+            seriesKey = null, total = null, engineVideoId = videoId)
 
-        // Detail metadata belongs to this ShortSeriesActivity rather than an
-        // unrelated home recommendation; its title can be shown even if the
-        // exact episode is not yet available from the active video model.
-        // A stable series ID validates the DTO snapshot, including its title
-        // and official poster. The currently visible fragment is the second
-        // authoritative source; transient selected-video DTO may be empty.
-        val intentTitle = if (activity.intent != null) {
-            listOf("episodesTitle", "seriesName", "series_name", "bookName",
-                "book_name", "shortSeriesName", "dramaName")
+        val matchedSeriesKey =
+            seriesId(field(active, "episodesId")) ?:
+            seriesId(field(active, "seriesId")) ?:
+            fragment.seriesId ?: observed.seriesId
+        val detailKey = seriesId(detailField(detail, "episodesId")) ?:
+            seriesId(detailField(detail, "seriesId"))
+
+        // An engine that identifies its current video must NOT fall back
+        // to stale presenter.x.b, intent extras or old cached title.
+        // With no trustworthy matching DTO, temporarily publish blanks.
+        if (videoId != null && matchedSeriesKey == null) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastDiagnosticAt > 4000L) {
+                lastDiagnosticAt = now
+                LogUtil.info("系统媒体: 全集新视频尚无匹配剧集数据" +
+                    " engineVideoId=true candidateCount=" + current.size +
+                    " detailPresent=" + (detailKey != null) +
+                    " fragmentMatch=" + (fragment.videoId == videoId) +
+                    " observedMatch=" + (observed.seriesId != null))
+                LogUtil.incr("systemMediaSeriesUnverifiedTransition")
+            }
+            return Info(source = "series-video-unverified")
+        }
+
+        // With a blank engine ID, a single truly visible active fragment
+        // is better evidence than a recycled detail. Otherwise the detail
+        // remains an acceptable fallback for the initial series.
+        val seriesKey = matchedSeriesKey ?: detailKey
+        val trustedDetail = detail?.takeIf {
+            detailKey != null && detailKey == seriesKey
+        }
+        val staleDetail = detailKey != null && seriesKey != null &&
+            detailKey != seriesKey
+        val captured = detailForSeries(seriesKey)
+
+        val total = listOfNotNull(
+            number(field(active, "episodesCount")),
+            fragment.total,
+            number(detailField(trustedDetail, "episodeTotalCnt")),
+            number(detailField(trustedDetail, "episodeCnt")),
+            captured?.total,
+            if (videoId == null)
+                number(field(current.firstOrNull(), "episodesCount"))
+            else null
+        ).firstOrNull { it in 1..5000L }
+
+        val intentTitle = if (videoId == null && !staleDetail) {
+            listOf("episodesTitle", "seriesName", "series_name",
+                "bookName", "book_name", "shortSeriesName", "dramaName")
                 .firstNotNullOfOrNull { key ->
                     try { str(activity.intent?.getStringExtra(key)) }
                     catch (_: Throwable) { null }
                 }
         } else null
-        val latestTitle =
-            str(detailField(detail, "episodesTitle")) ?:
-            capturedDetail?.title ?:
+        val freshTitle =
             str(field(active, "seriesName")) ?:
             fragment.title ?:
+            captured?.title ?:
+            str(detailField(trustedDetail, "episodesTitle")) ?:
             intentTitle ?:
             str(field(active, "title")) ?:
-            str(field(current.firstOrNull(), "seriesName")) ?:
-            observedVideo.title
-        // 7.3.5.32's official Saas model has URL strings for both full-sized
-        // and compact series posters. The detail is a transient Runnable
-        // payload, so preserve its URL for the currently displayed series.
-        // Prefer the explicitly named series poster in the detail model.
-        // When transient detail is unavailable, SaasVideoData.cover is the
-        // series image; episodeCover is the individual-video thumbnail.
-        val videoData = active ?: current.firstOrNull()
-        val seriesCover = field(videoData, "cover") as? String
-        val episodeFrame = field(videoData, "episodeCover") as? String
-        val safeDataCover = seriesCover?.takeIf {
-            it.isNotBlank() && it != episodeFrame
+            (if (videoId == null)
+                str(field(current.firstOrNull(), "seriesName"))
+            else null) ?: observed.title
+
+        val model = active ?: if (videoId == null) current.firstOrNull()
+            else null
+        val cover = field(model, "cover") as? String
+        val episodeCover = field(model, "episodeCover") as? String
+        val nativeSeriesCover = cover?.takeIf {
+            it.isNotBlank() && it != episodeCover
         }
-        val verifiedCoverUrl = listOfNotNull(
-            detailField(detail, "episodesCover") as? String,
-            detailField(detail, "smallEpisodesCover") as? String,
-            capturedDetail?.artworkUrl
+        val verifiedPoster = listOfNotNull(
+            detailField(trustedDetail, "episodesCover") as? String,
+            detailField(trustedDetail, "smallEpisodesCover") as? String,
+            captured?.artworkUrl
         ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
-        val freshCoverUrl = verifiedCoverUrl ?: listOfNotNull(
-            safeDataCover, fragment.artworkUrl, observedVideo.artworkUrl
+        val freshCover = verifiedPoster ?: listOfNotNull(
+            nativeSeriesCover, fragment.artworkUrl, observed.artworkUrl
         ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
         val retained = preserveCurrentSeries(activity, seriesKey,
-            latestTitle, freshTotal, freshCoverUrl,
-            verifiedPoster = verifiedCoverUrl != null)
+            freshTitle, total, freshCover, verifiedPoster != null)
         val seriesTitle = retained.first
-        val total = retained.second
-        val pager = pagerState(presenter, detail, total)
+        val stableTotal = retained.second
 
-        // Reading the active SaasVideoData is O(1). Avoid scanning hundreds
-        // of playlist items on every ~1.4s media timeline tick.
-        val fromActive = episodeFromIndex(active, total)
-        val episode = fromActive
-            ?: indexFromList(detail, videoId)?.let { episodeNumber ->
-                "第" + episodeNumber + "集" +
-                    (if (total != null && total >= episodeNumber)
-                        " · 全" + total + "集" else "")
+        // The outer pager is only episode-index evidence when it is
+        // aligned with a detail model for the SAME actual playing series.
+        val pager = if (trustedDetail != null)
+            pagerState(presenter, trustedDetail, stableTotal)
+            else PagerState()
+        val episode = episodeFromIndex(active, stableTotal)
+            ?: indexFromList(trustedDetail, videoId)?.let { index ->
+                "第" + index + "集" +
+                    (if (stableTotal != null && stableTotal >= index)
+                        " · 全" + stableTotal + "集" else "")
             }
             ?: fragment.episode
-            ?: episodeFromPager(pager, total)
-            // The total episode count is independently verified by the
-            // series data model. Show it even if the active index is unknown.
-            ?: total?.let { "全" + it + "集" }
+            ?: episodeFromPager(pager, stableTotal)
+            ?: stableTotal?.let { "全" + it + "集" }
 
         val now = SystemClock.uptimeMillis()
-        if (now - lastDiagnosticAt > 12000L) {
+        if (now - lastDiagnosticAt > 9000L) {
             lastDiagnosticAt = now
-            LogUtil.info("系统媒体: 全集原生元数据解析 presenter=" +
-                (presenter != null) + " detail=" + (detail != null) +
-                " activeVideoId=" + (videoId != null) +
-                " candidateCount=" + current.size +
-                " videoMatched=" + (active != null) +
+            LogUtil.info("系统媒体: 全集播放身份校验" +
+                " videoId=" + (videoId != null) +
+                " presenterMatched=" + (active != null) +
+                " fragmentMatched=" + (fragment.videoId != null &&
+                    (videoId == null || fragment.videoId == videoId)) +
+                " observedMatched=" + (observed.seriesId != null) +
+                " seriesId=" + (seriesKey != null) +
+                " staleDetail=$staleDetail" +
+                " cacheCover=" + (cachedCoverUrl != null) +
                 " title=" + (seriesTitle != null) +
-                " fragmentTitle=" + (fragment.title != null) +
-                " seriesIdPresent=" + (seriesKey != null) +
-                " capturedDetail=" + (capturedDetail != null) +
-                " intentTitle=" + (intentTitle != null) +
-                " coverUrl=" + (cachedCoverUrl != null) +
-                " episode=" + (episode != null) +
-                " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
-                " total=" + (total != null) +
-                " pagerIndex=" + (pager.currentItem?.toString() ?: "?") +
-                " pagerCount=" + (pager.adapterCount?.toString() ?: "?") +
-                " detailListCount=" + (pager.listCount?.toString() ?: "?") +
-                " pagerAligned=" + pager.pageAligned +
-                " innerEpisodeProbe=" + (episode?.startsWith("第") == true))
-            LogUtil.incr("systemMediaFullSeriesNativeProbe")
+                " episode=" + (episode != null))
+            LogUtil.incr("systemMediaSeriesPlaybackIdentity")
         }
-        return Info(seriesTitle, episode,
-            if (active != null) "saas-current-video"
-            else if (pager.pageAligned) "saas-fullseries-pager"
-            else if (seriesTitle != null || total != null) "saas-series-detail"
-            else "none",
-            cachedCoverUrl, seriesKey)
+        return Info(
+            title = seriesTitle,
+            episode = episode,
+            source = when {
+                active != null -> "saas-current-video-verified"
+                fragment.videoId != null -> "saas-visible-fragment-verified"
+                observed.seriesId != null -> "saas-observed-video-id"
+                trustedDetail != null -> "saas-current-detail"
+                else -> "none"
+            },
+            artworkUrl = cachedCoverUrl,
+            seriesId = seriesKey
+        )
     }
+
 }
