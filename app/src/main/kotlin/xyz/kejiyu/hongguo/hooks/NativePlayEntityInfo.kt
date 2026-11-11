@@ -8,7 +8,8 @@ import xyz.kejiyu.hongguo.LogUtil
 /** Match the original VideoShop PlayEntity to the CURRENT TTVideoEngine. */
 internal object NativePlayEntityInfo {
     data class Info(val title: String? = null,
-        val episode: String? = null, val source: String = "none")
+        val episode: String? = null, val source: String = "none",
+        val artworkUrl: String? = null)
 
     private val tracked = LinkedHashMap<String, WeakReference<Any>>()
     private val lock = Any()
@@ -84,7 +85,12 @@ internal object NativePlayEntityInfo {
                 }
             }
         }
-        return Info(title, episode, "play-entity-bundle")
+        val artUrl = listOf("episodes_cover", "episodesCover", "cover",
+            "cover_url", "coverUrl", "episodeCover", "smallEpisodesCover")
+            .firstNotNullOfOrNull { key ->
+                bundle.getString(key)?.takeIf { it.isNotBlank() }
+            }
+        return Info(title, episode, "play-entity-bundle", artUrl)
     }
 
     private fun metadata(entity: Any): Info {
@@ -103,8 +109,14 @@ internal object NativePlayEntityInfo {
         val extras = (invoke(entity, "getBundle") as? Bundle)?.let {
             fromBundle(it)
         } ?: Info()
+        val artUrl = listOf("getEpisodesCover", "getSmallEpisodesCover",
+            "getCoverUrl", "getCover", "getEpisodeCover", "getPoster")
+            .firstNotNullOfOrNull { method ->
+                (invoke(business ?: entity, method) as? String)
+                    ?.takeIf { it.isNotBlank() }
+            } ?: extras.artworkUrl
         return Info(cleanTitle ?: extras.title, episode ?: extras.episode,
-            "play-entity")
+            "play-entity", artUrl)
     }
 
     fun remember(entity: Any?) {
