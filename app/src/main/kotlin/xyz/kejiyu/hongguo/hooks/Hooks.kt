@@ -6243,6 +6243,86 @@ object Hooks {
                 }
             }
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
+
+            // Observe the SDK's actual VideoEngineCallback.onCompletion,
+            // not the SeekCompletionListener callback used by seekTo().
+            // Never replace the callback or call it manually. The host owns
+            // all end-of-episode and next-episode navigation.
+            try {
+                val sdkCallback = Class.forName(
+                    "com.ss.ttvideoengine.VideoEngineCallback", false, classLoader)
+                val observed = java.util.Collections.synchronizedSet(
+                    mutableSetOf<java.lang.reflect.Method>())
+                val registrationMethods = engine.declaredMethods.filter { m ->
+                    m.name in setOf("setVideoEngineCallback",
+                        "addVideoEngineCallback") &&
+                        m.parameterCount == 1 &&
+                        sdkCallback.isAssignableFrom(m.parameterTypes[0])
+                }
+                for ((i, registration) in registrationMethods.withIndex()) {
+                    try {
+                        module.hook(registration)
+                            .setId("xhNativeCompletionRegistration_$i")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val result = chain.proceed()
+                                try {
+                                    val callback = chain.getArg(0)
+                                    val completion = callback?.javaClass?.methods
+                                        ?.firstOrNull { m ->
+                                            m.name == "onCompletion" &&
+                                                m.parameterCount == 1 &&
+                                                m.parameterTypes[0].name ==
+                                                    "com.ss.ttvideoengine.TTVideoEngine" &&
+                                                !java.lang.reflect.Modifier
+                                                    .isAbstract(m.modifiers)
+                                        }
+                                    if (completion != null &&
+                                        observed.add(completion)) {
+                                        try {
+                                            module.hook(completion)
+                                                .setId("xhNativeEpisodeCompleted_" +
+                                                    completion.declaringClass.name.hashCode())
+                                                .setExceptionMode(
+                                                    XposedInterface.ExceptionMode.PROTECTIVE)
+                                                .intercept(Hooker { callbackChain ->
+                                                    val completed = callbackChain.proceed()
+                                                    try {
+                                                        SystemMediaBridge.onNativeCompletion(
+                                                            callbackChain.getArg(0))
+                                                    } catch (e: Throwable) {
+                                                        LogUtil.warn(
+                                                            "系统媒体: completion 观察失败 " +
+                                                            e.javaClass.simpleName)
+                                                    }
+                                                    completed
+                                                })
+                                            LogUtil.info(
+                                                "系统媒体: 原生结束回调已监听（不会修改原生连播）")
+                                            LogUtil.incr("systemMediaNativeCompletionHook")
+                                        } catch (e: Throwable) {
+                                            observed.remove(completion)
+                                            LogUtil.warn("系统媒体: 原生结束回调 Hook 失败 " +
+                                                e.javaClass.simpleName)
+                                        }
+                                    }
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 绑定结束回调异常 " +
+                                        e.javaClass.simpleName)
+                                }
+                                result
+                            })
+                    } catch (e: Throwable) {
+                        LogUtil.warn("系统媒体: 回调注册 Hook 安装失败 " +
+                            e.javaClass.simpleName)
+                    }
+                }
+                LogUtil.info("系统媒体: 视频结束监听入口数=" +
+                    registrationMethods.size)
+            } catch (e: Throwable) {
+                LogUtil.warn("系统媒体: 视频结束监听接口不可用 " +
+                    e.javaClass.simpleName)
+            }
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
