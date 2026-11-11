@@ -1,5 +1,6 @@
 package xyz.kejiyu.hongguo.hooks
 
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -8,6 +9,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import android.widget.TextView
 import java.lang.ref.WeakReference
@@ -35,7 +37,9 @@ internal object InAppMiniPlayer {
         val originalLayoutParams: ViewGroup.LayoutParams,
         val overlay: FrameLayout,
         val nativeEngine: WeakReference<Any>,
-        var nativePauseGuardsUsed: Int = 0
+        var nativePauseGuardsUsed: Int = 0,
+        @Volatile var userPaused: Boolean = false,
+        var snapAnimation: ValueAnimator? = null
     )
 
     @Volatile private var session: Session? = null
@@ -75,7 +79,8 @@ internal object InAppMiniPlayer {
      * Never block user media commands after the transition or app background. */
     fun shouldKeepNativeEnginePlaying(candidate: Any?): Boolean {
         val current = session ?: return false
-        if (!enabled || restoreInProgress || current.activity.isFinishing ||
+        if (!enabled || restoreInProgress || current.userPaused ||
+            current.activity.isFinishing ||
             !current.activity.hasWindowFocus() ||
             candidate == null || candidate !== current.nativeEngine.get() ||
             android.os.SystemClock.uptimeMillis() > suppressPauseUntil)
@@ -104,7 +109,8 @@ internal object InAppMiniPlayer {
 
     fun shouldKeepPlaying(controller: Any?): Boolean {
         val s = session ?: return false
-        if (!enabled || restoreInProgress || s.activity.isFinishing) return false
+        if (!enabled || restoreInProgress || s.userPaused ||
+            s.activity.isFinishing) return false
         if (controller !== lastPlayingController) return false
         return android.os.SystemClock.uptimeMillis() <= suppressPauseUntil
     }
@@ -118,7 +124,7 @@ internal object InAppMiniPlayer {
      */
     fun resumeAfterTabSwitch() {
         val active = session ?: return
-        if (!enabled || active.activity.isFinishing) return
+        if (!enabled || active.activity.isFinishing || active.userPaused) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastResumeAttemptAt < 1000L) return
         lastResumeAttemptAt = now
@@ -234,6 +240,7 @@ internal object InAppMiniPlayer {
             clipChildren = true
             clipToPadding = true
             background = roundedBackground()
+            clipToOutline = true
             elevation = dp(activity, 16f).toFloat()
             isClickable = true
         }
@@ -273,7 +280,7 @@ internal object InAppMiniPlayer {
         }
     }
 
-    private fun textButton(activity: Activity, label: String): TextView =
+    private fun textButton(activity: Activity, label: String, description: String): TextView =
         TextView(activity).apply {
             text = label
             textSize = 17f
@@ -281,71 +288,204 @@ internal object InAppMiniPlayer {
             gravity = Gravity.CENTER
             isClickable = true
             isFocusable = true
-            contentDescription = when (label) {
-                "×" -> "关闭悬浮窗"
-                "⤢" -> "返回播放页"
-                else -> "拖动悬浮窗"
-            }
-            background = roundedBackground(195)
+            contentDescription = description
+            background = roundedBackground(200)
         }
 
+    /** The mini view floats over the native tab layout; keep its whole
+     * rectangle inside Activity content and above the bottom navigation. */
+    private data class DragLimits(
+        val minRight: Int,
+        val maxRight: Int,
+        val minBottom: Int,
+        val maxBottom: Int
+    )
+
+    private fun dragLimits(current: Session): DragLimits {
+        val parent = current.overlay.parent as? ViewGroup
+        val w = (parent?.width ?: current.activity.resources.displayMetrics.widthPixels)
+            .coerceAtLeast(0)
+        val h = (parent?.height ?: current.activity.resources.displayMetrics.heightPixels)
+            .coerceAtLeast(0)
+        val maxRightEdge = (w - current.overlay.width).coerceAtLeast(0)
+        val minRight = dp(current.activity, 6f).coerceAtMost(maxRightEdge)
+        val maxRight = (maxRightEdge - dp(current.activity, 6f))
+            .coerceAtLeast(minRight)
+        val maxBottomEdge = (h - current.overlay.height).coerceAtLeast(0)
+        val minBottom = dp(current.activity, 72f).coerceAtMost(maxBottomEdge)
+        val maxBottom = (maxBottomEdge - dp(current.activity, 8f))
+            .coerceAtLeast(minBottom)
+        return DragLimits(minRight, maxRight, minBottom, maxBottom)
+    }
+
+    /** Smooth native-PiP-style left/right edge snap. Position is held in
+     * FrameLayout margins so the window survives normal page relayouts. */
+    private fun snapToEdge(current: Session) {
+        if (session !== current) return
+        val frame = current.overlay
+        val params = frame.layoutParams as? FrameLayout.LayoutParams ?: return
+        val limits = dragLimits(current)
+        val nearestRight = if (params.rightMargin <=
+            (limits.minRight + limits.maxRight) / 2) limits.minRight
+            else limits.maxRight
+        current.snapAnimation?.cancel()
+        if (params.rightMargin == nearestRight) return
+        val anim = ValueAnimator.ofInt(params.rightMargin, nearestRight)
+        current.snapAnimation = anim
+        anim.duration = 170L
+        anim.addUpdateListener { value ->
+            if (session === current) {
+                val lp = frame.layoutParams as? FrameLayout.LayoutParams
+                if (lp != null) {
+                    lp.rightMargin = value.animatedValue as Int
+                    frame.layoutParams = lp
+                }
+            }
+        }
+        anim.start()
+        LogUtil.incr("inAppMiniEdgeSnap")
+    }
+
+    private fun invokeNative(current: Session, name: String): Boolean {
+        val engine = current.nativeEngine.get() ?: return false
+        return try {
+            val method = engine.javaClass.methods.firstOrNull {
+                it.name == name && it.parameterCount == 0
+            } ?: return false
+            method.invoke(engine)
+            true
+        } catch (e: Throwable) {
+            LogUtil.warn("应用内小窗：原生播放操作 " + name +
+                " 失败: " + e.javaClass.simpleName)
+            false
+        }
+    }
+
+    private fun togglePlayback(current: Session, button: TextView) {
+        if (session !== current || !enabled) return
+        val currentlyPlaying = nativeEnginePlaying(current.nativeEngine.get())
+        val pause = when (currentlyPlaying) {
+            true -> true
+            false -> false
+            null -> !current.userPaused
+        }
+        // Explicit user pause must bypass the navigation pause guard.
+        if (pause) {
+            current.userPaused = true
+            suppressPauseUntil = 0L
+        }
+        if (invokeNative(current, if (pause) "pause" else "play")) {
+            current.userPaused = pause
+            button.text = if (pause) "▶" else "Ⅱ"
+            button.contentDescription = if (pause) "继续播放" else "暂停播放"
+            LogUtil.info("应用内小窗：用户" + if (pause) "暂停" else "继续播放")
+            LogUtil.incr("inAppMiniUserPlaybackAction")
+        } else {
+            if (pause) current.userPaused = false
+            LogUtil.warn("应用内小窗：未找到当前引擎的播放控制方法")
+        }
+    }
+
+    /** Closing a native-style mini player dismisses it AND pauses the
+     * pinned video. Merely returning Home uses restore() without pausing. */
+    private fun dismiss(current: Session) {
+        if (session !== current) return
+        val wasPlaying = nativeEnginePlaying(current.nativeEngine.get()) != false &&
+            !current.userPaused
+        restore()
+        if (wasPlaying) invokeNative(current, "pause")
+        LogUtil.info("应用内小窗：用户关闭，已归位并暂停当前视频=" + wasPlaying)
+        LogUtil.incr("inAppMiniDismiss")
+    }
+
+    /** One single tap returns to the native playing page; dragging the
+     * entire video area moves the window. The tiny drag-only handle is gone.
+     * Close/pause controls are independent, so taps on them never expand. */
     private fun addControls(current: Session) {
         val activity = current.activity
         val container = current.overlay
-        val drag = textButton(activity, "⋮⋮").apply {
-            contentDescription = "拖动悬浮窗"
-            textSize = 16f
+        val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
+        val gestures = View(activity).apply {
+            isClickable = true
+            contentDescription = "应用内小窗，点击返回播放页，拖动移动位置"
+            setOnClickListener {
+                if (session === current) returnToVideo()
+            }
         }
-        val expand = textButton(activity, "⤢")
-        val close = textButton(activity, "×")
-        val controlSize = dp(activity, 35f)
-
-        container.addView(drag, FrameLayout.LayoutParams(
-            dp(activity, 46f), controlSize, Gravity.TOP or Gravity.START
+        container.addView(gestures, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        container.addView(close, FrameLayout.LayoutParams(
-            controlSize, controlSize, Gravity.TOP or Gravity.END
-        ))
-        container.addView(expand, FrameLayout.LayoutParams(
-            controlSize, controlSize, Gravity.BOTTOM or Gravity.END
-        ))
-
-        var startX = 0f
-        var startY = 0f
-        var baseRight = 0
-        var baseBottom = 0
-        drag.setOnTouchListener { _, event ->
-            val params = container.layoutParams as? FrameLayout.LayoutParams
+        var downX = 0f
+        var downY = 0f
+        var startRight = 0
+        var startBottom = 0
+        var moving = false
+        gestures.setOnTouchListener { view, event ->
+            val lp = container.layoutParams as? FrameLayout.LayoutParams
                 ?: return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    startX = event.rawX
-                    startY = event.rawY
-                    baseRight = params.rightMargin
-                    baseBottom = params.bottomMargin
+                    current.snapAnimation?.cancel()
+                    downX = event.rawX
+                    downY = event.rawY
+                    startRight = lp.rightMargin
+                    startBottom = lp.bottomMargin
+                    moving = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dm = activity.resources.displayMetrics
-                    val dx = (event.rawX - startX).toInt()
-                    val dy = (event.rawY - startY).toInt()
-                    params.rightMargin = (baseRight - dx).coerceIn(
-                        dp(activity, 4f), (dm.widthPixels - container.width).coerceAtLeast(dp(activity, 4f))
-                    )
-                    params.bottomMargin = (baseBottom - dy).coerceIn(
-                        dp(activity, 70f), (dm.heightPixels - container.height).coerceAtLeast(dp(activity, 70f))
-                    )
-                    container.layoutParams = params
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (!moving && dx * dx + dy * dy > touchSlop * touchSlop)
+                        moving = true
+                    if (moving && session === current) {
+                        val limits = dragLimits(current)
+                        lp.rightMargin = (startRight - dx.toInt())
+                            .coerceIn(limits.minRight, limits.maxRight)
+                        lp.bottomMargin = (startBottom - dy.toInt())
+                            .coerceIn(limits.minBottom, limits.maxBottom)
+                        container.layoutParams = lp
+                    }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+                MotionEvent.ACTION_UP -> {
+                    if (moving) {
+                        snapToEdge(current)
+                        LogUtil.incr("inAppMiniDragged")
+                    } else {
+                        view.performClick()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (moving) snapToEdge(current)
+                    true
+                }
                 else -> false
             }
         }
-        expand.setOnClickListener { returnToVideo() }
-        close.setOnClickListener {
-            restore()
-            LogUtil.info("应用内小窗：用户关闭")
+
+        val controlSize = dp(activity, 34f)
+        val close = textButton(activity, "×", "关闭小窗").apply {
+            setOnClickListener { dismiss(current) }
+        }
+        container.addView(close, FrameLayout.LayoutParams(
+            controlSize, controlSize, Gravity.TOP or Gravity.END
+        ).apply {
+            topMargin = dp(activity, 3f)
+            rightMargin = dp(activity, 3f)
+        })
+        // Native transport is optional. Do not display a dead pause button
+        // if the actual playing engine was not observed at docking time.
+        if (current.nativeEngine.get() != null) {
+            val pause = textButton(activity, "Ⅱ", "暂停播放")
+            pause.setOnClickListener { togglePlayback(current, pause) }
+            container.addView(pause, FrameLayout.LayoutParams(
+                controlSize, controlSize, Gravity.BOTTOM or Gravity.END
+            ).apply {
+                bottomMargin = dp(activity, 3f)
+                rightMargin = dp(activity, 3f)
+            })
         }
     }
 
@@ -355,6 +495,7 @@ internal object InAppMiniPlayer {
         session = null
         restoreInProgress = true
         suppressPauseUntil = 0L
+        old.snapAnimation?.cancel()
         try {
             val currentParent = old.source.parent as? ViewGroup
             currentParent?.removeView(old.source)
