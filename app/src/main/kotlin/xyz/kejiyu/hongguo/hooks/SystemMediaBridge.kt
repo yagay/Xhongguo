@@ -120,6 +120,11 @@ internal object SystemMediaBridge {
             override fun onActivityPrePaused(activity: Activity) {
                 if (!enabled || !isVideoActivity(activity)) return
                 try {
+                    if (foregroundActivity.get() === activity &&
+                        lastUserLeaveEngine.get() === videoEngine.get() &&
+                        lastUserLeaveWasPlaying) {
+                        userLeavePrePauseAt = SystemClock.uptimeMillis()
+                    }
                     rememberExitSnapshot(activity, "Application.prePause")
                 } catch (e: Throwable) {
                     LogUtil.warn("系统媒体: PrePause 快照失败 " +
@@ -147,6 +152,7 @@ internal object SystemMediaBridge {
     private var earlyHandoffEngine = WeakReference<Any>(null)
     private var earlyHandoffSuppressed = 0
     private var leaveExplicitPauseEpoch = 0L
+    private var userLeavePrePauseAt = 0L
 
     /** Protect only the exact engine captured at a genuine user-leave hint.
      * The host can otherwise release its completion dispatcher before
@@ -164,7 +170,9 @@ internal object SystemMediaBridge {
                 explicitPauseEpoch != leaveExplicitPauseEpoch,
             ownershipTransition = SinglePlaybackOwner.isOwnershipTransition(),
             samePinnedEngine = sameEngine,
-            sameVideoActivity = isVideoActivity(foregroundActivity.get()),
+            sameVideoActivity = isVideoActivity(foregroundActivity.get()) &&
+                userLeavePrePauseAt >= lastUserLeaveAt &&
+                SystemClock.uptimeMillis() - userLeavePrePauseAt in 0L..2500L,
             elapsedMs = SystemClock.uptimeMillis() - lastUserLeaveAt)
         if (hold) {
             earlyHandoffEngine = WeakReference(owner)
@@ -1465,6 +1473,7 @@ internal object SystemMediaBridge {
         // Real background confirmation happens after onPause / onStop.
         lastUserLeaveAt = SystemClock.uptimeMillis()
         leaveExplicitPauseEpoch = explicitPauseEpoch
+        userLeavePrePauseAt = 0L
         earlyHandoffSuppressed = 0
         earlyHandoffEngine.clear()
         lastUserLeaveWasPlaying = true
@@ -1485,6 +1494,7 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         earlyHandoffEngine.clear()
         earlyHandoffSuppressed = 0
+        userLeavePrePauseAt = 0L
         episodeMonitor.reset()
         if (backgroundPauseGuardEngine.get() != null) {
             backgroundPauseGuardEngine.clear()
@@ -1839,6 +1849,7 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         earlyHandoffEngine.clear()
         earlyHandoffSuppressed = 0
+        userLeavePrePauseAt = 0L
         episodeMonitor.reset()
         pendingExit = null
         backgroundResumeBudget = 0
