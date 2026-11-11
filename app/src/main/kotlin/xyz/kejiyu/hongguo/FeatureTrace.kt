@@ -57,6 +57,9 @@ object FeatureTrace {
             val before = lastEventAt[key]
             if (before != null && now - before in 0L until minIntervalMs) return
             lastEventAt[key] = now
+            // Flow IDs change on every video; cap throttle bookkeeping.
+            // Clearing only loses suppression history, never event data.
+            if (lastEventAt.size > 512) lastEventAt.clear()
         }
         val label = buildString {
             append("XH_TRACE feature=").append(category)
