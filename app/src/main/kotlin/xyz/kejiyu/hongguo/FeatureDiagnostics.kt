@@ -140,6 +140,8 @@ object FeatureDiagnostics {
             "system media series JSON result observers",
             "system media typed series consumers",
             "系统媒体: 原生视频数据已观察",
+            "系统媒体: 首页当前播放器模型",
+            "系统媒体: 首页已绑定当前原生视频",
             "系统媒体: 已捕获官方全集详情",
             "系统媒体: 播放进度采样",
             "系统媒体: 全集原生元数据解析",
