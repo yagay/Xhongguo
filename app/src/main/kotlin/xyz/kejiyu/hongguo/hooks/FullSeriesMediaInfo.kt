@@ -117,6 +117,37 @@ internal object FullSeriesMediaInfo {
         if (newMetadata) SystemMediaBridge.onNativeSeriesMetadataAvailable()
     }
 
+    /**
+     * The feed's native ViewPager2 can identify the *visible* data model
+     * even when TTVideoEngine.getVideoID() is blank. A series detail
+     * snapshot may then supply the official title and full-size poster,
+     * but ONLY if its real series ID matches this current model.
+     */
+    fun infoForVideoData(model: Any?): Info {
+        if (model?.javaClass?.name != DATA) return Info()
+        val videoId = seriesId(field(model, "vid")) ?: return Info()
+        observeVideoData(model)
+        val cached = synchronized(detailLock) {
+            observedVideos[videoId]?.takeIf {
+                SystemClock.uptimeMillis() - it.observedAt in 0L..VIDEO_TTL_MS
+            }
+        }
+        val modelSeriesId = seriesId(field(model, "episodesId")) ?:
+            seriesId(field(model, "seriesId")) ?: cached?.seriesId
+        val detail = detailForSeries(modelSeriesId)
+        val modelCover = (field(model, "cover") as? String)
+            ?.takeIf { it.isNotBlank() &&
+                it != (field(model, "episodeCover") as? String) }
+            ?.let(MediaArtworkLoader::normalize)
+        return Info(
+            title = detail?.title ?: str(field(model, "seriesName")) ?:
+                cached?.title,
+            source = "home-native-current-item",
+            artworkUrl = detail?.artworkUrl ?: modelCover ?: cached?.poster,
+            seriesId = modelSeriesId
+        )
+    }
+
     fun observedForEngine(engine: Any?): Info {
         val videoId = seriesId(call(engine, "getVideoID")) ?: return Info()
         val now = SystemClock.uptimeMillis()
