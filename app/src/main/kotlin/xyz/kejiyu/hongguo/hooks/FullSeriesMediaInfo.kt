@@ -39,6 +39,13 @@ internal object FullSeriesMediaInfo {
     private var cachedSeriesTitle: String? = null
     private var cachedTotal: Long? = null
     private var cachedCoverUrl: String? = null
+    // Playback on the official series page uses a VideoShop video ID which
+    // is not always equal to SaasVideoData.vid (confirmed by 21:18 ZIP).
+    // Track the actual presenter model across engine handoffs. A recycled
+    // model from the old drama is not valid evidence for a NEW engine.
+    private var boundPresenterActivity = WeakReference<Activity>(null)
+    private var boundPresenterEngine = WeakReference<Any>(null)
+    private var boundPresenterVideoId: String? = null
 
     // The 7.3.5.32 detail is often held only by a short-lived uo4.y0.x
     // Runnable. Retain safe metadata keyed by the actual series ID, never
@@ -668,9 +675,43 @@ internal object FullSeriesMediaInfo {
         val fragment = mediaFromActiveFragment(activity,
             seriesKey = null, total = null, engineVideoId = videoId)
 
+        // The engine's getVideoID is NOT directly comparable to the
+        // official presenter SaasVideoData.vid on all video routes.
+        // Accept a unique presenter model only if it has an independently
+        // captured detail for the same series. Across a different native
+        // engine in the SAME Activity, its model video ID must also advance.
+        // That extra condition prevents the final-episode autoplay from
+        // recycling the PREVIOUS drama's title/poster.
+        val distinctCandidates = current.mapNotNull(::vid).distinct()
+        val presenterModel = current.firstOrNull()?.takeIf {
+            distinctCandidates.size == 1
+        }
+        val presenterVideoId = vid(presenterModel)
+        val presenterSeriesId =
+            seriesId(field(presenterModel, "episodesId")) ?:
+            seriesId(field(presenterModel, "seriesId"))
+        val lastInSameActivity = boundPresenterActivity.get() === activity
+        val newEngineSameActivity = lastInSameActivity &&
+            boundPresenterEngine.get() != null &&
+            boundPresenterEngine.get() !== engine
+        val modelAdvanced = !newEngineSameActivity ||
+            boundPresenterVideoId == null ||
+            presenterVideoId != boundPresenterVideoId
+        val presenterDetail = detailForSeries(presenterSeriesId)
+        val safePresenter = if (active == null &&
+            presenterVideoId != null && presenterSeriesId != null &&
+            presenterDetail != null && modelAdvanced) presenterModel else null
+        val playingModel = active ?: safePresenter
+        if (safePresenter != null) {
+            LogUtil.info("系统媒体: 全集使用当前 Presenter 及匹配详情" +
+                " engineIdComparable=false" +
+                " modelAdvanced=$modelAdvanced" +
+                " seriesId=true")
+            LogUtil.incr("systemMediaPresenterDetailFallback")
+        }
         val matchedSeriesKey =
-            seriesId(field(active, "episodesId")) ?:
-            seriesId(field(active, "seriesId")) ?:
+            seriesId(field(playingModel, "episodesId")) ?:
+            seriesId(field(playingModel, "seriesId")) ?:
             fragment.seriesId ?: observed.seriesId
         val detailKey = seriesId(detailField(detail, "episodesId")) ?:
             seriesId(detailField(detail, "seriesId"))
@@ -726,7 +767,7 @@ internal object FullSeriesMediaInfo {
         val captured = detailForSeries(seriesKey)
 
         val total = listOfNotNull(
-            number(field(active, "episodesCount")),
+            number(field(playingModel, "episodesCount")),
             fragment.total,
             number(detailField(trustedDetail, "episodeTotalCnt")),
             number(detailField(trustedDetail, "episodeCnt")),
@@ -745,18 +786,18 @@ internal object FullSeriesMediaInfo {
                 }
         } else null
         val freshTitle =
-            str(field(active, "seriesName")) ?:
+            str(field(playingModel, "seriesName")) ?:
             fragment.title ?:
             captured?.title ?:
             str(detailField(trustedDetail, "episodesTitle")) ?:
             intentTitle ?:
-            str(field(active, "title")) ?:
+            str(field(playingModel, "title")) ?:
             (if (videoId == null)
                 str(field(current.firstOrNull(), "seriesName"))
             else null) ?: observed.title
 
-        val model = active ?: if (videoId == null) current.firstOrNull()
-            else null
+        val model = playingModel ?: if (videoId == null)
+            current.firstOrNull() else null
         val cover = field(model, "cover") as? String
         val episodeCover = field(model, "episodeCover") as? String
         val nativeSeriesCover = cover?.takeIf {
@@ -780,7 +821,7 @@ internal object FullSeriesMediaInfo {
         val pager = if (trustedDetail != null)
             pagerState(presenter, trustedDetail, stableTotal)
             else PagerState()
-        val episode = episodeFromIndex(active, stableTotal)
+        val episode = episodeFromIndex(playingModel, stableTotal)
             ?: indexFromList(trustedDetail, videoId)?.let { index ->
                 "第" + index + "集" +
                     (if (stableTotal != null && stableTotal >= index)
@@ -790,12 +831,19 @@ internal object FullSeriesMediaInfo {
             ?: episodeFromPager(pager, stableTotal)
             ?: stableTotal?.let { "全" + it + "集" }
 
+        if (playingModel != null && presenterVideoId != null) {
+            boundPresenterActivity = WeakReference(activity)
+            boundPresenterEngine = WeakReference(engine)
+            boundPresenterVideoId = vid(playingModel)
+        }
         val now = SystemClock.uptimeMillis()
         if (now - lastDiagnosticAt > 9000L) {
             lastDiagnosticAt = now
             LogUtil.info("系统媒体: 全集播放身份校验" +
                 " videoId=" + (videoId != null) +
                 " presenterMatched=" + (active != null) +
+                " presenterFallback=" + (safePresenter != null) +
+                " modelAdvanced=$modelAdvanced" +
                 " fragmentMatched=" + (fragment.videoId != null &&
                     (videoId == null || fragment.videoId == videoId)) +
                 " observedMatched=" + (observed.seriesId != null) +
@@ -811,6 +859,7 @@ internal object FullSeriesMediaInfo {
             episode = episode,
             source = when {
                 active != null -> "saas-current-video-verified"
+                safePresenter != null -> "saas-presenter-matched-detail"
                 fragment.videoId != null -> "saas-visible-fragment-verified"
                 observed.seriesId != null -> "saas-observed-video-id"
                 trustedDetail != null -> "saas-current-detail"
