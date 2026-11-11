@@ -40,7 +40,9 @@ internal object InAppMiniPlayer {
         var nativePauseGuardsUsed: Int = 0,
         @Volatile var userPaused: Boolean = false,
         var snapAnimation: ValueAnimator? = null,
-        var playbackButton: WeakReference<TextView> = WeakReference(null)
+        var playbackButton: WeakReference<TextView> = WeakReference(null),
+        var presentedActivity: Activity = activity,
+        var detailTransitionUntil: Long = 0L
     )
 
     @Volatile private var session: Session? = null
@@ -80,11 +82,13 @@ internal object InAppMiniPlayer {
      * Never block user media commands after the transition or app background. */
     fun shouldKeepNativeEnginePlaying(candidate: Any?): Boolean {
         val current = session ?: return false
+        val now = android.os.SystemClock.uptimeMillis()
+        val inDetailsTransition = now <= current.detailTransitionUntil
         if (!enabled || restoreInProgress || current.userPaused ||
             current.activity.isFinishing ||
-            !current.activity.hasWindowFocus() ||
+            !(current.presentedActivity.hasWindowFocus() || inDetailsTransition) ||
             candidate == null || candidate !== current.nativeEngine.get() ||
-            android.os.SystemClock.uptimeMillis() > suppressPauseUntil)
+            now > suppressPauseUntil)
             return false
         return synchronized(current) {
             if (current.nativePauseGuardsUsed >= 3) false
@@ -195,6 +199,69 @@ internal object InAppMiniPlayer {
     /** A new official playback owner means this floating surface belongs
      * to an old video. Restore it rather than leave an invisible player
      * decoupled from the notification's active engine. */
+    /**
+     * The detail screen is a different Activity in the official APK.
+     * Mark the transition BEFORE startActivity() pauses its source window.
+     * It is still the SAME TTVideoEngine and SAME media surface.
+     */
+    fun prepareForDetails(owner: Activity): Boolean {
+        val current = session ?: return false
+        if (current.activity !== owner || !enabled) return false
+        val until = android.os.SystemClock.uptimeMillis() + 5000L
+        current.detailTransitionUntil = until
+        suppressPauseUntil = until
+        LogUtil.info("应用内小窗：已准备跨 Activity 剧集详情切换" +
+            " nativeEngine=" + (current.nativeEngine.get() != null))
+        LogUtil.incr("inAppMiniDetailsPrepared")
+        return true
+    }
+
+    private fun isDetailsActivity(activity: Activity): Boolean =
+        activity.javaClass.name in setOf(
+            "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
+            "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity"
+        )
+
+    /** Attach the EXISTING overlay to the detail Activity window.
+     * No player is created, restarted, or seeked. Android may still
+     * recreate a video Surface when the native container moves; the
+     * diagnostic records the transfer independently of playback state.
+     */
+    fun attachToDetails(activity: Activity): Boolean {
+        val current = session ?: return false
+        if (!enabled || !isDetailsActivity(activity) || activity.isFinishing ||
+            android.os.SystemClock.uptimeMillis() > current.detailTransitionUntil ||
+            current.presentedActivity === activity) return false
+        val newParent = activity.findViewById<ViewGroup>(
+            android.R.id.content) as? FrameLayout ?: return false
+        val overlay = current.overlay
+        return try {
+            current.snapAnimation?.cancel()
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+            val oldParams = overlay.layoutParams as? FrameLayout.LayoutParams
+            val params = FrameLayout.LayoutParams(
+                oldParams?.width ?: dp(activity, 124f),
+                oldParams?.height ?: dp(activity, 206f),
+                Gravity.END or Gravity.BOTTOM
+            ).apply {
+                rightMargin = dp(activity, 12f)
+                bottomMargin = dp(activity, 96f)
+            }
+            newParent.addView(overlay, params)
+            current.presentedActivity = activity
+            LogUtil.info("应用内小窗：详情页已接管原有视频窗口" +
+                " engineRetained=" + (current.nativeEngine.get() != null))
+            LogUtil.incr("inAppMiniDetailsAttached")
+            true
+        } catch (e: Throwable) {
+            LogUtil.warn("应用内小窗：详情页视频窗口转移失败 " +
+                e.javaClass.simpleName)
+            // Restore ownership even after a failed cross-window reparent.
+            restore()
+            false
+        }
+    }
+
     fun onPlaybackOwnerChanged(previous: Any, current: Any) {
         val active = session ?: return
         if (previous !== current && active.nativeEngine.get() === previous) {
@@ -552,19 +619,40 @@ internal object InAppMiniPlayer {
     }
 
     fun onActivityClosed(activity: Activity) {
-        if (session?.activity === activity) restore()
+        val active = session ?: return
+        if (active.activity === activity ||
+            active.presentedActivity === activity) {
+            LogUtil.info("应用内小窗：宿主页面关闭，恢复原视频布局")
+            restore()
+        }
+    }
+
+    /** Back from details returns to the SAME native video, not a new one. */
+    fun onSourceActivityResumed(activity: Activity) {
+        val active = session ?: return
+        if (active.activity === activity &&
+            active.presentedActivity !== activity) {
+            restore()
+            LogUtil.incr("inAppMiniDetailsReturned")
+        }
     }
 
     /** Opens Home using the target app's original bottom-tab click handler. */
     var openHomeTab: ((Activity) -> Unit)? = null
 
     fun returnToVideo() {
-        val host = session?.activity ?: return
+        val active = session ?: return
+        val host = active.activity
+        val details = active.presentedActivity
+            .takeIf { it !== host && isDetailsActivity(it) }
         if (returningHome) return
         returningHome = true
         try {
             restore()
-            openHomeTab?.invoke(host)
+            if (details != null) details.finish()
+            else if (host.javaClass.name ==
+                "com.dragon.read.pages.main.MainFragmentActivity")
+                openHomeTab?.invoke(host)
         } catch (e: Throwable) {
             LogUtil.warn("应用内小窗：返回播放页失败 " + e.message)
         } finally { returningHome = false }
