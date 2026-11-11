@@ -23,6 +23,7 @@ import android.os.SystemClock
 import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
 import xyz.kejiyu.hongguo.LogUtil
+import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
  * System media controls for the EXISTING Hongguo video player.
@@ -64,6 +65,7 @@ internal object SystemMediaBridge {
             updateSessionMetadata()
             if (reportedCard) updateMediaNotification(knownPlaying)
         })
+    @Volatile private var mediaFlow = 0L
     private var foregroundActivity = WeakReference<Activity>(null)
     private var lastDiscoveryAt = 0L
     private var lastNativeEngineAt = 0L
@@ -174,7 +176,10 @@ internal object SystemMediaBridge {
     /** Host DTO updates may arrive in bursts or after autoplay. The shared
      * coordinator never drops the last event inside an arbitrary throttle. */
     fun onNativeSeriesMetadataAvailable() {
-        if (enabled) mediaRefresh.onNativeDataChanged()
+        if (!enabled) return
+        FeatureTrace.event("media", "native_dto", "observed",
+            flow = mediaFlow, minIntervalMs = 2500L)
+        mediaRefresh.onNativeDataChanged()
     }
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
@@ -362,10 +367,17 @@ internal object SystemMediaBridge {
         val ownerEngine = videoEngine.get()
         LogUtil.info("系统媒体: 已发现原生系列海报，准备异步读取 reason=$reason")
         LogUtil.incr("systemMediaArtworkRequested")
+        val requestFlow = mediaFlow
+        FeatureTrace.event("artwork", "request", "started",
+            "origin=native,hasUrl=true", flow = requestFlow)
         MediaArtworkLoader.load(ctx, url) { bitmap, source ->
             if (!enabled || generation != artworkGeneration ||
                 ownerEngine !== videoEngine.get() ||
-                artworkRequestUrl != url) return@load
+                artworkRequestUrl != url) {
+                FeatureTrace.event("artwork", "callback", "stale",
+                    flow = requestFlow, minIntervalMs = 1500L)
+                return@load
+            }
             if (bitmap == null) {
                 artworkFailedUrl = url
                 artworkFailedAt = SystemClock.uptimeMillis()
@@ -374,6 +386,8 @@ internal object SystemMediaBridge {
                 artworkRequestUrl = null
                 LogUtil.warn("系统媒体: 封面加载失败 source=$source")
                 LogUtil.incr("systemMediaArtworkUnavailable")
+                FeatureTrace.event("artwork", "decode", "fail",
+                    "source=" + source, flow = requestFlow)
             } else if (!bitmap.isRecycled) {
                 artworkFailedUrl = null
                 artworkFailedAt = 0L
@@ -383,6 +397,9 @@ internal object SystemMediaBridge {
                 LogUtil.info("系统媒体: 媒体封面已写入 MediaSession source=$source" +
                     " size=" + bitmap.width + "x" + bitmap.height)
                 LogUtil.incr("systemMediaArtworkApplied")
+                FeatureTrace.event("artwork", "commit", "ok",
+                    "source=" + source + ",width=" + bitmap.width +
+                        ",height=" + bitmap.height, flow = requestFlow)
             }
         }
     }
@@ -418,6 +435,11 @@ internal object SystemMediaBridge {
             artwork === lastMetadataArt) return
         try {
             media.setMetadata(snapshot.toPlatformMetadata())
+            FeatureTrace.event("media", "session_metadata", "committed",
+                "title=" + (seriesTitle != null) +
+                ",episode=" + (episodeTitle != null) +
+                ",poster=" + (artwork != null) +
+                ",duration=" + (durationMs > 0L), flow = mediaFlow)
             lastMetadataSignature = signature
             lastMetadataArt = artwork
             if (!force && (seriesTitle != null ||
@@ -446,6 +468,9 @@ internal object SystemMediaBridge {
      * to the exact same series ID. A missing/unknown ID is not evidence.
      */
     private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
+        mediaFlow = FeatureTrace.newFlow("media", reason)
+        FeatureTrace.event("playback", "video_transition", "started",
+            "sameSeries=" + sameSeries, flow = mediaFlow)
         mediaPresentation.onVideoTransition(sameSeries)
         episodeTitle = null
         if (!sameSeries) {
@@ -611,6 +636,15 @@ internal object SystemMediaBridge {
                 " officialPoster=" + (coverArt != null) +
                 " nativePosterUrl=" + (artworkUrl != null))
             LogUtil.incr("systemMediaUnifiedSnapshot")
+            FeatureTrace.event("media", "resolution",
+                if (title != null) "ok" else "degraded",
+                "page=" + (currentMetadataPage ?: "unknown") +
+                    ",source=" + source +
+                    ",title=" + (title != null) +
+                    ",episode=" + (episode != null) +
+                    ",series=" + (resolvedSeriesId != null) +
+                    ",posterUrl=" + (artworkUrl != null),
+                flow = mediaFlow)
         }
         mediaPresentation.onResolved(
             verified = !seriesUnverified &&
@@ -805,6 +839,9 @@ internal object SystemMediaBridge {
         LogUtil.info("系统媒体: TTVideoEngine.$action invoked; state=" +
             (playbackState?.toString() ?: "?"))
         LogUtil.incr("systemMediaNativeEngineCommand")
+        FeatureTrace.event("playback", "engine_command", "observed",
+            "action=" + action + ",page=" + (currentMetadataPage ?: "unknown"),
+            flow = mediaFlow, minIntervalMs = 250L)
         // Track the actual active engine's pause on BOTH player pages.
         // Recovery is allowed only after ActivityManager confirms background.
         val playerPage = foregroundActivity.get()?.javaClass?.name
@@ -938,6 +975,9 @@ internal object SystemMediaBridge {
             " engine=true native=$native playing=$wasPlaying" +
             " hint=" + (recent != null || lastUserLeaveWasPlaying))
         LogUtil.incr("systemMediaExitSnapshot")
+        FeatureTrace.event("background", "exit_snapshot", "captured",
+            "wasPlaying=" + wasPlaying + ",nativeKnown=" + (native != null),
+            flow = mediaFlow, minIntervalMs = 1000L)
         return snapshot
     }
 
@@ -1036,6 +1076,8 @@ internal object SystemMediaBridge {
         if (current == null && !lifecyclePaused) {
             LogUtil.warn("系统媒体: 引擎状态未知且无同引擎生命周期暂停证据，取消恢复")
             LogUtil.incr("systemMediaBackgroundStateUnknown")
+            FeatureTrace.event("background", "native_state", "degraded",
+                "lifecyclePause=false", flow = mediaFlow, minIntervalMs = 2000L)
             return
         }
         LogUtil.info("系统媒体: 后台恢复依据" +
@@ -1055,11 +1097,17 @@ internal object SystemMediaBridge {
             playMethod.invoke(engine)
             LogUtil.info("系统媒体: 切换 App 后恢复同一 TTVideoEngine（仅一次）")
             LogUtil.incr("systemMediaAppSwitchRecovery")
+            FeatureTrace.event("background", "resume_command", "sent",
+                "sameEngine=true", flow = mediaFlow)
             handler.postDelayed({
                 if (enabled && requestedBackgroundPlayback &&
                     videoEngine.get() === engine) {
                     val confirmed = nativeIsPlaying(engine)
                     LogUtil.info("系统媒体: 切换 App 恢复校验 playing=$confirmed")
+                    FeatureTrace.event("background", "resume_check",
+                        if (confirmed == true) "ok" else "degraded",
+                        "nativeKnown=" + (confirmed != null),
+                        flow = mediaFlow)
                     if (confirmed != null) onNativePlayback(
                         confirmed, "app-switch-recovery-check", engine)
                 }
@@ -1068,6 +1116,8 @@ internal object SystemMediaBridge {
             LogUtil.warn("系统媒体: 切换 App 恢复原生引擎失败 " +
                 e.javaClass.simpleName)
             LogUtil.incr("systemMediaAppSwitchRecoveryFailed")
+            FeatureTrace.event("background", "resume_command", "fail",
+                "errorType=" + e.javaClass.simpleName, flow = mediaFlow)
         }
     }
 
@@ -1562,11 +1612,15 @@ internal object SystemMediaBridge {
                 reportedCard = true
                 LogUtil.info("系统媒体: MediaStyle 通知已发布 | pkg=" + ctx.packageName)
                 LogUtil.incr("systemMediaNotificationPosted")
+                FeatureTrace.event("media", "notification", "posted",
+                    "playing=" + playing, flow = mediaFlow)
             }
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 通知发布失败（检查红果通知权限）: " +
                 e.javaClass.simpleName + ": " + e.message)
             LogUtil.incr("systemMediaNotificationFailed")
+            FeatureTrace.event("media", "notification", "fail",
+                "errorType=" + e.javaClass.simpleName, flow = mediaFlow)
         }
     }
 
@@ -1591,6 +1645,8 @@ internal object SystemMediaBridge {
         handler.removeCallbacks(delayedMetadataSync)
         mediaRefresh.cancel()
         mediaPresentation.reset()
+        FeatureTrace.event("media", "session", "stopped", flow = mediaFlow)
+        mediaFlow = 0L
         progressPolling = false
         durationMs = -1L
         positionMs = -1L
