@@ -104,11 +104,15 @@ internal object SinglePlaybackOwner {
         // A details screen is a surface-only route, not a new owner.
         if (route == Route.DETAILS && old != null) return
         val nextRoute = if (route == Route.DETAILS) ownerRoute else route
+        val withinSamePage = ownerRoute == nextRoute &&
+            nextRoute != Route.OTHER && nextRoute != Route.DETAILS
         owner = WeakReference(engine)
         ownerRoute = nextRoute
         synchronized(routes) { routes[engine] = nextRoute }
         if (old != null && old !== engine) {
-            InAppMiniPlayer.onPlaybackOwnerChanged(old, engine)
+            // Same-page episode advancement keeps one mini surface; only
+            // a route change must restore the old screen's mini overlay.
+            InAppMiniPlayer.onPlaybackOwnerChanged(old, engine, withinSamePage)
             pauseCurrent(old, "engine-handoff")
             LogUtil.incr("singlePlaybackEngineHandoff")
         }
