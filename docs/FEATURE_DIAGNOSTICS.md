@@ -29,6 +29,7 @@
 | `feature/TRACE_SUMMARY.txt` | 各功能事件数量、异常数量、最新阶段 |
 | `feature/TRACE_EVENTS.log` | 结构化事件时间线（截取最近 1400 条） |
 | `feature/TRACE_ERRORS.log` | 失败、降级事件（最近 200 条） |
+| `feature/RUNTIME_FAULTS.log` | AndroidRuntime、ANR、方法缺失等异常线索 |
 | `feature/FEATURE_MATRIX.txt` | 每项开关配置值、实际受总开关影响的状态、分类证据 |
 | `feature/README.txt` | 字段解释 |
 | `hook/`、`logcat/` | 原有宿主原始诊断来源（经过基本脱敏） |
