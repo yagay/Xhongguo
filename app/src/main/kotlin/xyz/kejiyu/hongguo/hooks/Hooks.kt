@@ -2743,38 +2743,59 @@ object Hooks {
         stopPeriodicScan()
         gScanRunnable = object : Runnable {
             override fun run() {
+                val activity = gCurrentActivity
+                val focused = try {
+                    activity != null && !activity.isFinishing &&
+                        !activity.isDestroyed && activity.hasWindowFocus()
+                } catch (_: Throwable) { false }
+                val restorePaused = gRestoreControlsOnPause && gVideoPaused
+                val controls = gMasterOn && gControlOn && !restorePaused
+                val player = gMasterOn && gPlayerOn && !restorePaused
+                val progress = gMasterOn && gProgressOff && !restorePaused
+                val refresh = gMasterOn && gRefreshOff && !restorePaused
+                val heavy = UiScanPolicy.needsViewTree(
+                    gMasterOn, gControlOn, gPlayerOn, gProgressOff,
+                    gRefreshOff, restorePaused)
                 try {
-                    scanShoppingTabIfNeeded(gCurrentActivity)
-                    MinePageCleaner.scanVisibleMine(gCurrentActivity)
-                    if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
-                        forcePauseRestoreControls()
+                    // A background video must not trigger foreground view-tree
+                    // reflection every 150 ms. Native hooks stay event driven.
+                    if (focused && activity != null && gMasterOn) {
+                        scanShoppingTabIfNeeded(activity)
+                        MinePageCleaner.scanVisibleMine(activity)
+                        if (restorePaused) forcePauseRestoreControls()
+
+                        // Collect WindowManagerGlobal roots ONCE per tick,
+                        // instead of repeating the full reflection 3 times.
+                        val roots = if (controls || progress || refresh)
+                            collectAllWindows() else emptyList<View>()
+                        if (controls) {
+                            for (root in roots) scanTreeQuick(root)
+                            syncShortVideoMasks()
+                            syncCnHomeFragmentMasks()
+                            enforceNativeMainBottomHidden(activity)
+                            enforceKnownFeedViewportBottomMargin()
+                        }
+                        if (player) {
+                            val decor = try { activity.window?.decorView }
+                                catch (_: Throwable) { null }
+                            if (decor != null) scanTreePlayer(decor)
+                        }
+                        if (progress)
+                            for (root in roots) scanTreeProgress(root)
+                        if (refresh)
+                            for (root in roots) scanTreeRefreshAccessory(root)
                     }
-                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val allRoots = collectAllWindows()
-                        for (root in allRoots) scanTreeQuick(root)
-                        syncShortVideoMasks()
-                        syncCnHomeFragmentMasks()
-                        enforceNativeMainBottomHidden(gCurrentActivity)
-                        enforceKnownFeedViewportBottomMargin()
-                    }
-                    if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val decor = try { gCurrentActivity?.window?.decorView } catch (_: Throwable) { null }
-                        if (decor != null) scanTreePlayer(decor)
-                    }
-                    if (gMasterOn && gProgressOff && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val allRoots2 = collectAllWindows()
-                        for (root in allRoots2) scanTreeProgress(root)
-                    }
-                    if (gMasterOn && gRefreshOff) {
-                        val allRoots3 = collectAllWindows()
-                        for (root in allRoots3) scanTreeRefreshAccessory(root)
-                    }
-                } catch (_: Exception) {}
-                mainHandler.postDelayed(this, 150)
+                } catch (e: Exception) {
+                    LogUtil.warn("UI 兼容扫描失败 " + e.javaClass.simpleName)
+                    LogUtil.incr("uiCompatScanFailure")
+                }
+                mainHandler.postDelayed(this,
+                    UiScanPolicy.nextDelayMs(gMasterOn, focused, heavy))
             }
         }
-        mainHandler.postDelayed(gScanRunnable!!, 150)
+        mainHandler.postDelayed(gScanRunnable!!, 350L)
     }
+
     private fun stopPeriodicScan() {
         gScanRunnable?.let { mainHandler.removeCallbacks(it) }
         gScanRunnable = null
