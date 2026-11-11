@@ -131,8 +131,7 @@ internal object FullSeriesMediaInfo {
         val title: String?,
         val poster: String?,
         val observedAt: Long,
-        val nativeConsumedAt: Long,
-        val episode: String?
+        val nativeConsumedAt: Long
     )
     private val observedVideos = LinkedHashMap<String, VideoSnapshot>()
     private const val VIDEO_TTL_MS = 15L * 60L * 1000L
@@ -165,11 +164,7 @@ internal object FullSeriesMediaInfo {
                 id ?: previous?.seriesId,
                 title ?: if (sameSeries) previous?.title else null,
                 poster ?: if (sameSeries) previous?.poster else null,
-                now, if (nativeConsumer) now else previous?.nativeConsumedAt ?: 0L,
-                episodeFromIndex(model,
-                    number(field(model, "episodesCount"))?.takeIf {
-                        it in 1..5000L
-                    }) ?: previous?.episode)
+                now, if (nativeConsumer) now else previous?.nativeConsumedAt ?: 0L)
             observedVideos[videoId] = updated
             newMetadata = previous == null ||
                 previous.seriesId != updated.seriesId ||
