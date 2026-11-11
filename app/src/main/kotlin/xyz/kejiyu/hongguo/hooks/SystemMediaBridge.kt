@@ -1,6 +1,8 @@
 package xyz.kejiyu.hongguo.hooks
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.app.Application
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -48,6 +50,10 @@ internal object SystemMediaBridge {
     private var controller = WeakReference<Any>(null)
     private var layer = WeakReference<Any>(null)
     private var videoContext = WeakReference<Any>(null)
+    private var videoEngine = WeakReference<Any>(null)
+    private var foregroundActivity = WeakReference<Activity>(null)
+    private var lastDiscoveryAt = 0L
+    private var lastNativeEngineAt = 0L
     // The native VideoShop API (confirmed in 7.3.5.32) exposes
     // VideoContext.play/pause/isPlaying and LayerHostMediaLayout.setCanPlayBackground.
     private var lastNativeEventAt = 0L
@@ -75,7 +81,9 @@ internal object SystemMediaBridge {
     fun configure(ctx: Context, requested: Boolean) {
         val validTarget = ctx.packageName == TargetNames.CN_PACKAGE ||
             ctx.packageName == TargetNames.OVERSEA_PACKAGE
-        val next = requested && validTarget
+        val mainProcess = try { Application.getProcessName() == ctx.packageName }
+            catch (_: Throwable) { true }
+        val next = requested && validTarget && mainProcess
         if (!next) {
             enabled = false
             stop()
@@ -83,7 +91,10 @@ internal object SystemMediaBridge {
         }
         enabled = true
         appContext = ctx.applicationContext
-        ensureSession()
+        // Do not advertise an active MediaSession before real playback is observed.
+        // Home/splash startup is not evidence of a playing video.
+        LogUtil.info("系统媒体: 启用原播放器探测; process=" +
+            (try { Application.getProcessName() } catch (_: Throwable) { "unknown" }))
     }
 
     fun rememberController(candidate: Any?) {
@@ -105,6 +116,121 @@ internal object SystemMediaBridge {
             "com.ss.android.videoshop.context.VideoContext") {
             videoContext = WeakReference(candidate)
         }
+    }
+
+    /**
+     * 7.3.5.32 can use TTVideoEngine without triggering VideoContext's
+     * onVideoPlay. Capture the real lower-level play/pause invocation, but
+     * never confuse a hook *installation* with a runtime playback event.
+     */
+    fun onNativeEngineCommand(candidate: Any?, action: String) {
+        if (!enabled || candidate == null) return
+        if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
+        videoEngine = WeakReference(candidate)
+        lastNativeEngineAt = SystemClock.uptimeMillis()
+        val playbackState = try {
+            candidate.javaClass.getMethod("getPlaybackState").invoke(candidate)
+        } catch (_: Throwable) { null }
+        LogUtil.info("系统媒体: TTVideoEngine.$action invoked; state=" +
+            (playbackState?.toString() ?: "?"))
+        LogUtil.incr("systemMediaNativeEngineCommand")
+        if (action == "play") {
+            onNativePlayback(true, "TTVideoEngine#play", candidate)
+        } else if (action == "pause" || action == "stop") {
+            onNativePlayback(false, "TTVideoEngine#$action", candidate)
+        } else if (action.startsWith("release") && videoEngine.get() === candidate) {
+            videoEngine.clear()
+            onNativePlayback(false, "TTVideoEngine#$action", null)
+        }
+    }
+
+    /**
+     * A VideoContext's lifecycle hooks fire in this app but its onVideoPlay
+     * callbacks do not. Query the *existing* context from the active Activity,
+     * without creating an independent decoder or invoking play().
+     */
+    fun discoverPlayingVideo(activity: Activity?, reason: String) {
+        if (!enabled || activity == null) return
+        if (activity.packageName != appContext?.packageName) return
+        val now = SystemClock.uptimeMillis()
+        if (reason == "periodic" && now - lastDiscoveryAt < 900L) return
+        lastDiscoveryAt = now
+        val candidate = try {
+            val c = Class.forName("com.ss.android.videoshop.context.VideoContext",
+                false, activity.classLoader)
+            val resumed = try {
+                c.getMethod("getResumedVideoContext").invoke(null)
+            } catch (_: Throwable) { null }
+            resumed ?: c.getMethod("getVideoContext", Context::class.java)
+                .invoke(null, activity)
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 取得原生 VideoContext 失败: " +
+                e.javaClass.simpleName + ": " + e.message)
+            null
+        }
+        if (candidate != null) {
+            rememberVideoContext(candidate)
+            val playing = nativeIsPlaying(candidate)
+            val boundLayer = try {
+                candidate.javaClass.getMethod("getLayerHostMediaLayout").invoke(candidate)
+            } catch (_: Throwable) { null }
+            if (boundLayer != null) rememberLayer(boundLayer)
+            LogUtil.info("系统媒体: 播放器快照 $reason context=" +
+                candidate.javaClass.simpleName + " isPlaying=" +
+                (playing?.toString() ?: "unknown") + " layer=" +
+                (boundLayer?.javaClass?.simpleName ?: "null") +
+                " nativeEngineRecent=" + (now - lastNativeEngineAt < 30_000L))
+            LogUtil.incr("systemMediaContextProbe")
+            if (playing == true) onNativePlayback(true, "VideoContext#probe:$reason",
+                candidate)
+        } else {
+            LogUtil.info("系统媒体: 播放器快照 $reason VideoContext=null" +
+                " engine=" + (videoEngine.get()?.javaClass?.simpleName ?: "null"))
+            LogUtil.incr("systemMediaContextMissing")
+        }
+    }
+
+    fun onActivityPaused(activity: Activity?) {
+        if (!enabled || activity == null) return
+        if (activity.packageName != appContext?.packageName) return
+        discoverPlayingVideo(activity, "beforeActivityPause")
+        val name = activity.javaClass.simpleName
+        LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying")
+        handler.postDelayed({
+            if (!enabled || foregroundActivity.get() !== activity) return@postDelayed
+            val state = ActivityManager.RunningAppProcessInfo()
+            try { ActivityManager.getMyMemoryState(state) } catch (_: Throwable) {
+                return@postDelayed
+            }
+            val isBackground = state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+            LogUtil.info("系统媒体: Activity 暂停后进程 importance=" +
+                state.importance + " background=$isBackground activity=$name")
+            if (isBackground) onBackgroundTransition(activity, "Activity.onPause")
+        }, 500L)
+    }
+
+    fun onActivityStopped(activity: Activity?) {
+        if (!enabled || activity == null) return
+        if (activity.packageName != appContext?.packageName) return
+        LogUtil.info("系统媒体: Activity.onStop " + activity.javaClass.simpleName)
+        discoverPlayingVideo(activity, "beforeActivityStop")
+    }
+
+    private fun onBackgroundTransition(activity: Activity, reason: String) {
+        if (!enabled) return
+        val native = nativeIsPlaying(activeNativePlayer())
+        if (!knownPlaying && native != true) {
+            LogUtil.info("系统媒体: $reason 未检测到真实视频播放，不发布虚假媒体卡片")
+            return
+        }
+        requestedBackgroundPlayback = true
+        leaveAt = SystemClock.uptimeMillis()
+        resumeAttempts = 0
+        setNativeBackgroundAllowance(true)
+        updateMediaNotification(true)
+        LogUtil.info("系统媒体: $reason 后台媒体已激活，native=" +
+            (native?.toString() ?: "?"))
+        LogUtil.incr("systemMediaEnterBackground")
     }
 
     /** Called by the exact public VideoShop callbacks, not by obfuscated holder IDs. */
@@ -160,7 +286,7 @@ internal object SystemMediaBridge {
         for (c in listOf(videoContext.get(), controller.get(), layer.get())) {
             if (nativeIsPlaying(c) == true) return c
         }
-        return videoContext.get() ?: controller.get() ?: layer.get()
+        return videoContext.get() ?: controller.get() ?: layer.get() ?: videoEngine.get()
     }
 
     private fun setNativeBackgroundAllowance(allow: Boolean) {
@@ -222,25 +348,27 @@ internal object SystemMediaBridge {
     fun onUserLeave(activity: Activity?) {
         if (!enabled || activity == null) return
         if (!activity.javaClass.name.startsWith("com.dragon.read.")) return
+        discoverPlayingVideo(activity, "onUserLeaveHint")
         val nativePlaying = nativeIsPlaying(activeNativePlayer())
         LogUtil.info("系统媒体: onUserLeaveHint activity=" +
             activity.javaClass.simpleName + " knownPlaying=$knownPlaying" +
             " nativePlaying=" + (nativePlaying?.toString() ?: "?"))
         if (!knownPlaying && nativePlaying != true) return
-        knownPlaying = true
-        requestedBackgroundPlayback = true
-        resumeAttempts = 0
-        leaveAt = SystemClock.uptimeMillis()
-        setNativeBackgroundAllowance(true)
-        LogUtil.info("系统媒体: 离开红果，准备保持原视频音频播放 | " +
-            activity.javaClass.simpleName)
-        LogUtil.incr("systemMediaEnterBackground")
-        updateMediaNotification(true)
+        onBackgroundTransition(activity, "onUserLeaveHint")
     }
 
     fun onActivityResumed(activity: Activity?) {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
+        foregroundActivity = WeakReference(activity)
+        // A running TTVideoEngine/VideoContext can start before the Activity
+        // reaches onResume; inspect again after its UI and video surface attach.
+        for (delay in longArrayOf(500L, 1700L, 3800L)) {
+            handler.postDelayed({
+                if (enabled && foregroundActivity.get() === activity &&
+                    !activity.isFinishing) discoverPlayingVideo(activity, "periodic")
+            }, delay)
+        }
         if (requestedBackgroundPlayback) {
             LogUtil.info("系统媒体: 返回红果，结束后台暂停保护")
             requestedBackgroundPlayback = false
@@ -375,7 +503,8 @@ internal object SystemMediaBridge {
 
     private fun requestTransport(play: Boolean, reason: String) {
         if (!enabled) return
-        val targets = listOfNotNull(videoContext.get(), controller.get(), layer.get()).distinct()
+        val targets = listOfNotNull(videoContext.get(), controller.get(),
+            layer.get(), videoEngine.get()).distinct()
         LogUtil.info("系统媒体: 控制请求 reason=$reason play=$play targets=" +
             targets.joinToString { it.javaClass.simpleName })
         val methodNames = if (play) {
@@ -509,6 +638,8 @@ internal object SystemMediaBridge {
         controller.clear()
         layer.clear()
         videoContext.clear()
+        videoEngine.clear()
+        foregroundActivity.clear()
         originalBackgroundFlag = null
         originalBackgroundHost.clear()
     }
