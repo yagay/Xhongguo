@@ -12,6 +12,7 @@ object FeatureTraceCatalog {
     )
 
     fun forSetting(key: String): String = when {
+        key == "diagnostic_verbose" -> "diagnostics"
         key == "master_on" -> "settings"
         key.startsWith("mine_hide_") -> "mine"
         key in setOf("system_media_playback") -> "media"
