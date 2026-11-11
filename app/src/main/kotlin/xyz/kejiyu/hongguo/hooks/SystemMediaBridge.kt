@@ -53,6 +53,16 @@ internal object SystemMediaBridge {
     private var lastNativeEventAt = 0L
     private var backgroundFlagApplied = false
     private var originalBackgroundFlag: Boolean? = null
+    private var originalBackgroundHost = WeakReference<Any>(null)
+    @Volatile private var settingBackgroundInternally = false
+
+    fun rememberOriginalBackgroundSetting(candidate: Any?, value: Boolean?) {
+        if (candidate == null || value == null || settingBackgroundInternally) return
+        if (originalBackgroundHost.get() !== candidate) {
+            originalBackgroundHost = WeakReference(candidate)
+        }
+        originalBackgroundFlag = value
+    }
 
     @Volatile private var knownPlaying = false
     @Volatile private var requestedBackgroundPlayback = false
@@ -161,11 +171,16 @@ internal object SystemMediaBridge {
         try {
             val method = host.javaClass.getMethod("setCanPlayBackground",
                 Boolean::class.javaPrimitiveType)
-            method.invoke(host, allow)
+            settingBackgroundInternally = true
+            try {
+                method.invoke(host, allow)
+            } finally { settingBackgroundInternally = false }
             backgroundFlagApplied = allow
-            LogUtil.info("系统媒体: 原生 setCanPlayBackground($allow) 已调用")
+            LogUtil.info("系统媒体: 原生 setCanPlayBackground($allow) 已调用" +
+                " original=" + (originalBackgroundFlag?.toString() ?: "not observed"))
             LogUtil.incr("systemMediaNativeBackgroundFlag")
         } catch (e: Throwable) {
+            settingBackgroundInternally = false
             LogUtil.warn("系统媒体: 原生后台播放开关不可用: " +
                 e.javaClass.simpleName + ": " + e.message)
         }
@@ -231,8 +246,9 @@ internal object SystemMediaBridge {
             requestedBackgroundPlayback = false
             leaveAt = 0L
             resumeAttempts = 0
-            if (backgroundFlagApplied) setNativeBackgroundAllowance(
-                originalBackgroundFlag ?: false)
+            if (backgroundFlagApplied && originalBackgroundFlag != null)
+                setNativeBackgroundAllowance(originalBackgroundFlag == true)
+            backgroundFlagApplied = false
         }
     }
 
@@ -474,8 +490,8 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
-        if (backgroundFlagApplied) {
-            setNativeBackgroundAllowance(originalBackgroundFlag ?: false)
+        if (backgroundFlagApplied && originalBackgroundFlag != null) {
+            setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }
         backgroundFlagApplied = false
         requestedBackgroundPlayback = false
@@ -493,5 +509,7 @@ internal object SystemMediaBridge {
         controller.clear()
         layer.clear()
         videoContext.clear()
+        originalBackgroundFlag = null
+        originalBackgroundHost.clear()
     }
 }
