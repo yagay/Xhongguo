@@ -805,6 +805,11 @@ internal object SystemMediaBridge {
                 // the SAME drama. Preserve its official poster and title
                 // until a native series ID actually changes.
                 val activity = foregroundActivity.get()
+                // Register the engine handoff BEFORE probing native DTOs.
+                // Later host-consumer callbacks can then be correlated with
+                // this new engine without trusting recycled presenter models.
+                FullSeriesMediaInfo.beginEngineTransition(
+                    activity, candidate, currentSeriesIdentity)
                 val incomingSeries = when (activity?.javaClass?.name) {
                     "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ->
                         FullSeriesMediaInfo.read(activity, candidate).seriesId
