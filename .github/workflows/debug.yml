@@ -34,15 +34,31 @@ jobs:
       - name: Build Debug only
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           bash ./gradlew :app:assembleDebug --stacktrace --console=plain \
             2>&1 | tee debug-build.log
-      - name: Run beta media policy unit tests
+          build_code=${PIPESTATUS[0]}
+          {
+            echo "### Debug APK compile: $([ "$build_code" -eq 0 ] && echo PASS || echo FAIL)"
+            echo '\`\`\`text'
+            grep -E '(^(e:|error:)|^FAILURE:|^Execution failed for task|^> Task.*FAILED|^\* What went wrong:|^> .*not found|^> .*Unresolved reference)' debug-build.log | tail -n 45 || true
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$build_code"
+      - name: Run beta unit tests
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           bash ./gradlew :app:testDebugUnitTest --stacktrace --console=plain \
             2>&1 | tee debug-unit-tests.log
+          test_code=${PIPESTATUS[0]}
+          {
+            echo "### Debug unit tests: $([ "$test_code" -eq 0 ] && echo PASS || echo FAIL)"
+            echo '\`\`\`text'
+            grep -E '(^(e:|error:)|^FAILURE:|^Execution failed for task|^> Task.*FAILED|^There were failing tests)' debug-unit-tests.log | tail -n 25 || true
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$test_code"
       - name: Upload build diagnostic logs even when Gradle fails
         if: always()
         uses: actions/upload-artifact@v4
