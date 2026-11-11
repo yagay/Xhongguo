@@ -20,6 +20,7 @@ object ModuleSettingsStore {
         "default_speed", "double_tap_comment", "oled_protect",
         "notification_menu", "download_limit_unlimit", "video_longpress_settings",
         "disable_shopping_mall", "in_app_mini_player", "system_media_playback",
+        "diagnostic_verbose",
         // All nine My-page entries are hidden by default. Each can be
         // restored independently in either module settings surface.
         "mine_hide_welfare", "mine_hide_orders", "mine_hide_messages",
@@ -47,7 +48,12 @@ object ModuleSettingsStore {
             else -> return false
         }
         val ok = editor.commit()
-        if (ok) notifyChanged(ctx)
+        if (ok) {
+            FeatureTrace.setting(key, value as? Boolean ?: true, "module", true)
+            notifyChanged(ctx)
+        } else {
+            FeatureTrace.event("settings", "save", "fail", "key=" + key)
+        }
         return ok
     }
 
