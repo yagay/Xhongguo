@@ -1,6 +1,7 @@
 package xyz.kejiyu.hongguo
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.os.Build
@@ -9,6 +10,7 @@ import android.view.View
 import android.view.WindowInsetsController
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.TimeUnit
 import xyz.kejiyu.hongguo.hooks.TargetNames
 
 class MainActivity : Activity() {
@@ -17,6 +19,7 @@ class MainActivity : Activity() {
     private lateinit var tvTargetVersions: TextView
     private lateinit var tvStatus: TextView
     private var currentVersion: String = ""
+    private var forceStopRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,14 +38,12 @@ class MainActivity : Activity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         findViewById<View>(R.id.btn_open_target).setOnClickListener {
-            val pkg = when {
-                packageInfo(TargetNames.CN_PACKAGE) != null -> TargetNames.CN_PACKAGE
-                packageInfo(TargetNames.OVERSEA_PACKAGE) != null -> TargetNames.OVERSEA_PACKAGE
-                else -> null
-            }
-            val launch = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
+            val launch = targetPackage()?.let { packageManager.getLaunchIntentForPackage(it) }
             if (launch != null) startActivity(launch)
             else Toast.makeText(this, "未找到已安装的红果 App", Toast.LENGTH_SHORT).show()
+        }
+        findViewById<View>(R.id.btn_force_stop_target).setOnClickListener {
+            confirmForceStop()
         }
 
         findViewById<View>(R.id.btn_export_diagnostics).setOnClickListener {
@@ -84,6 +85,82 @@ class MainActivity : Activity() {
         super.onResume()
         updateTargetVersionText()
         UpdateChecker.showUpdateDialogIfNeeded(this)
+    }
+
+    private fun targetPackage(): String? = when {
+        packageInfo(TargetNames.CN_PACKAGE) != null -> TargetNames.CN_PACKAGE
+        packageInfo(TargetNames.OVERSEA_PACKAGE) != null -> TargetNames.OVERSEA_PACKAGE
+        else -> null
+    }
+
+    /**
+     * Force-stop only the explicitly allowlisted Hongguo package selected by
+     * the adjacent "Launch Hongguo" button. Never kill all user processes.
+     */
+    private fun confirmForceStop() {
+        if (forceStopRunning) return
+        val target = targetPackage()
+        if (target == null) {
+            Toast.makeText(this, "未找到已安装的红果 App", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val label = if (target == TargetNames.CN_PACKAGE) "红果短剧（国版）"
+            else "红果短剧（国际版）"
+        AlertDialog.Builder(this)
+            .setTitle("强制停止红果")
+            .setMessage("将停止 $label 的全部进程和正在播放的视频，以便下次启动加载新模块 Hook。不会清除账号或缓存。\n\n需要先在 KernelSU Next 中授予 Xhongguo Root 权限。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("强制停止") { _, _ -> forceStopWithRoot(target) }
+            .show()
+    }
+
+    private fun forceStopWithRoot(target: String) {
+        if (forceStopRunning) return
+        // Hardcode allowed package identities, regardless of the supplied value.
+        if (target != TargetNames.CN_PACKAGE && target != TargetNames.OVERSEA_PACKAGE) return
+        forceStopRunning = true
+        val button = findViewById<View>(R.id.btn_force_stop_target)
+        val status = findViewById<TextView>(R.id.tv_force_stop_status)
+        button.isEnabled = false
+        status.visibility = View.VISIBLE
+        status.text = "正在请求 Root 并停止红果…"
+        Thread({
+            val result = try {
+                val check = runRootCommand("id -u")
+                if (check.first != 0 || check.second.trim() != "0") {
+                    "强制停止失败：未获得 Root 授权，请在 KernelSU Next 中允许 Xhongguo"
+                } else {
+                    val stop = runRootCommand("am force-stop $target")
+                    if (stop.first == 0) "已强制停止红果。点击「启动红果」即可重新加载模块。"
+                    else "停止失败：Root 执行 am force-stop 未成功（退出码 ${stop.first}）"
+                }
+            } catch (e: Throwable) {
+                "强制停止失败：${e.javaClass.simpleName} ${e.message ?: ""}"
+            }
+            runOnUiThread {
+                forceStopRunning = false
+                button.isEnabled = true
+                status.text = result
+                Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+            }
+        }, "Xhongguo-ForceStop").start()
+    }
+
+    private fun runRootCommand(command: String): Pair<Int, String> {
+        val process = ProcessBuilder("su", "-c", command)
+            .redirectErrorStream(true).start()
+        try {
+            // Launching su for the first time may show a KernelSU permission
+            // prompt. Never block UI or wait indefinitely.
+            if (!process.waitFor(20L, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return -1 to "timeout"
+            }
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            return process.exitValue() to output.take(400)
+        } finally {
+            process.destroy()
+        }
     }
 
     @Suppress("DEPRECATION")
