@@ -93,11 +93,17 @@ internal object NativePlayEntityInfo {
             "getBookName", "getSeriesName", "getShortSeriesName",
             "getDramaName", "getBookTitle", "getSeriesTitle", "getTitle"
         )) ?: firstName(entity, listOf("getTitle"))
-        val episode = episodeText(business)
+        val embeddedEpisode = title?.let {
+            Regex("第\\s*[0-9一二三四五六七八九十百千]+\\s*集").find(it)?.value
+        }
+        val cleanTitle = if (embeddedEpisode != null && title != null) {
+            safeName(title.substringBefore(embeddedEpisode).trim(' ', '·', '-', '|', '：'))
+        } else title
+        val episode = episodeText(business) ?: embeddedEpisode
         val extras = (invoke(entity, "getBundle") as? Bundle)?.let {
             fromBundle(it)
         } ?: Info()
-        return Info(title ?: extras.title, episode ?: extras.episode,
+        return Info(cleanTitle ?: extras.title, episode ?: extras.episode,
             "play-entity")
     }
 
