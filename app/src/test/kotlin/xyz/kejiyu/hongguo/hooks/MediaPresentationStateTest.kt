@@ -22,6 +22,20 @@ class MediaPresentationStateTest {
         assertEquals("第2集 · 全80集", state.subtitle("第2集 · 全80集", true))
     }
 
+    @Test fun unknownSeriesNeverStaysInLoadingStateForever() {
+        var time = 1_000L
+        val state = MediaPresentationState { time }
+        state.onVideoTransition(false)
+        assertEquals("正在识别当前短剧", state.title(null))
+        time += 12_500L
+        assertEquals("红果短剧", state.title(null))
+        assertEquals("正在播放 · 剧集信息暂不可用",
+            state.subtitle(null, true))
+        state.onResolved(true, "恢复成功的剧名")
+        assertEquals("恢复成功的剧名", state.title("恢复成功的剧名"))
+        assertEquals("正在播放的视频", state.subtitle(null, true))
+    }
+
     @Test fun unverifiedTitleDoesNotMarkTheNewSeriesResolved() {
         val state = MediaPresentationState()
         state.onVideoTransition(false)
