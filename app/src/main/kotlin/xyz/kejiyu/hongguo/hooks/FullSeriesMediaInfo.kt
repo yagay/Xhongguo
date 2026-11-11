@@ -19,7 +19,8 @@ internal object FullSeriesMediaInfo {
         val title: String? = null,
         val episode: String? = null,
         val source: String = "none",
-        val artworkUrl: String? = null
+        val artworkUrl: String? = null,
+        val seriesId: String? = null
     )
 
     private const val ACTIVITY =
@@ -57,10 +58,10 @@ internal object FullSeriesMediaInfo {
             it.isNotEmpty() && it != "null" && it != "0" && it.length <= 128
         }
 
-    /** Called when the original app constructs/applies its real detail model. */
-    fun observeDetailRunnable(runnable: Any?) {
-        if (runnable?.javaClass?.name != "uo4.y0.x") return
-        rememberDetail(field(runnable, "b"))
+    /** Version-independent bridge: observe the actual DTO, not an
+     * obfuscated Runnable class which changes with each host APK. */
+    fun observeDetailModel(model: Any?) {
+        rememberDetail(model)
     }
 
     private fun rememberDetail(model: Any?) {
@@ -359,8 +360,11 @@ internal object FullSeriesMediaInfo {
         if (cachedActivity.get() !== activity ||
             seriesKey != null && cachedSeriesKey != null &&
                 cachedSeriesKey != seriesKey ||
-            newTitle != null && cachedSeriesTitle != null &&
-                newTitle != cachedSeriesTitle) {
+            // If IDs are known, they alone identify the series. A
+            // late title correction must never erase its cached poster.
+            (seriesKey == null && newTitle != null &&
+                cachedSeriesTitle != null &&
+                newTitle != cachedSeriesTitle)) {
             cachedActivity = WeakReference(activity)
             cachedSeriesTitle = null
             cachedTotal = null
@@ -479,6 +483,7 @@ internal object FullSeriesMediaInfo {
         // IDs are frequently numeric strings; the title validator deliberately
         // rejects numeric names and must NOT be used to validate series IDs.
         val detailSeriesKey = seriesId(field(detail, "episodesId")) ?:
+            seriesId(field(active, "episodesId")) ?:
             seriesId(field(current.firstOrNull(), "episodesId"))
         val provisionalTotal = listOfNotNull(
             number(field(active, "episodesCount")),
@@ -503,11 +508,23 @@ internal object FullSeriesMediaInfo {
         // Detail metadata belongs to this ShortSeriesActivity rather than an
         // unrelated home recommendation; its title can be shown even if the
         // exact episode is not yet available from the active video model.
+        // A stable series ID validates the DTO snapshot, including its title
+        // and official poster. The currently visible fragment is the second
+        // authoritative source; transient selected-video DTO may be empty.
+        val intentTitle = if (activity.intent != null) {
+            listOf("episodesTitle", "seriesName", "series_name", "bookName",
+                "book_name", "shortSeriesName", "dramaName")
+                .firstNotNullOfOrNull { key ->
+                    try { str(activity.intent?.getStringExtra(key)) }
+                    catch (_: Throwable) { null }
+                }
+        } else null
         val latestTitle =
-            str(field(active, "seriesName")) ?:
             str(field(detail, "episodesTitle")) ?:
             capturedDetail?.title ?:
+            str(field(active, "seriesName")) ?:
             fragment.title ?:
+            intentTitle ?:
             str(field(active, "title")) ?:
             str(field(current.firstOrNull(), "seriesName"))
         // 7.3.5.32's official Saas model has URL strings for both full-sized
@@ -562,6 +579,7 @@ internal object FullSeriesMediaInfo {
                 " fragmentTitle=" + (fragment.title != null) +
                 " seriesIdPresent=" + (seriesKey != null) +
                 " capturedDetail=" + (capturedDetail != null) +
+                " intentTitle=" + (intentTitle != null) +
                 " coverUrl=" + (cachedCoverUrl != null) +
                 " episode=" + (episode != null) +
                 " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
@@ -578,6 +596,6 @@ internal object FullSeriesMediaInfo {
             else if (pager.pageAligned) "saas-fullseries-pager"
             else if (seriesTitle != null || total != null) "saas-series-detail"
             else "none",
-            cachedCoverUrl)
+            cachedCoverUrl, seriesKey)
     }
 }
