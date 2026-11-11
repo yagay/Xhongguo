@@ -2706,6 +2706,7 @@ object Hooks {
         try {
             if (gCurrentActivity == null) return
             scanShoppingTabIfNeeded(gCurrentActivity)
+            MinePageCleaner.scanVisibleMine(gCurrentActivity, force = true)
             val decor = gCurrentActivity!!.window.decorView
             gNames.hideIdNames.forEach { resolveEntryId(it, decor) }
             gNames.progressIdNames.forEach { resolveEntryId(it, decor, gProgressIdSet, "进度条资源") }
@@ -2741,6 +2742,7 @@ object Hooks {
             override fun run() {
                 try {
                     scanShoppingTabIfNeeded(gCurrentActivity)
+                    MinePageCleaner.scanVisibleMine(gCurrentActivity)
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
                     }
@@ -6748,8 +6750,9 @@ object Hooks {
             // Return false (not consumed by the native click handler) for the
             // removed shopping-tab item and any of its icon/text descendants.
             ham(c, "performClick", "shoppingTabPerformClick") { chain ->
-                if (isShoppingMallDisabled() &&
-                    isWithinShoppingTab(chain.thisObject as? View)) {
+                if (MinePageCleaner.blocksNativeClick(chain.thisObject as? View) ||
+                    (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View))) {
                     false
                 } else {
                     try { beforeNativeTabClick(chain.thisObject as? View) } catch (e: Throwable) {
@@ -6759,8 +6762,9 @@ object Hooks {
                 }
             }
             ham(c, "callOnClick", "shoppingTabCallOnClick") { chain ->
-                if (isShoppingMallDisabled() &&
-                    isWithinShoppingTab(chain.thisObject as? View)) {
+                if (MinePageCleaner.blocksNativeClick(chain.thisObject as? View) ||
+                    (isShoppingMallDisabled() &&
+                    isWithinShoppingTab(chain.thisObject as? View))) {
                     false
                 } else {
                     try { beforeNativeTabClick(chain.thisObject as? View) } catch (_: Throwable) {}
