@@ -104,14 +104,17 @@ object FeatureDiagnostics {
             "系统媒体: 全集 Activity 已销毁",
             "系统媒体: 首页原生暂停",
             "系统媒体: 首页后台检测晚于原生 pause",
-            "系统媒体: 当前播放信息采集",
+            "系统媒体: 统一媒体信息采集",
+            "系统媒体: 统一媒体元数据已绑定",
+            "system media stable series DTO hooks",
+            "system media series JSON result observers",
+            "系统媒体: 已捕获官方全集详情",
             "系统媒体: 播放进度采样",
             "系统媒体: 全集原生元数据解析",
             "系统媒体: 全集内层视频索引",
-            "系统媒体: 已发现原生剧集封面",
+            "系统媒体: 已发现原生系列海报",
             "系统媒体: 媒体封面已写入 MediaSession",
-            "系统媒体: 封面加载失败",
-            "系统媒体: 原生播放器媒体信息已绑定"
+            "系统媒体: 封面加载失败"
         )) {
             appendLine((if (evidence.contains(signal)) "找到" else "未找到") + " - " + signal)
         }
