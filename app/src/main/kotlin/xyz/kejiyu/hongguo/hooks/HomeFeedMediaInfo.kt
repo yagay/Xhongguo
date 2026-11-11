@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
 
 /**
@@ -37,6 +38,10 @@ internal object HomeFeedMediaInfo {
     )
     private var lastProbeAt = 0L
     private var lastSuccessSignature = ""
+    // Scanning the whole View tree every metadata tick causes UI jank.
+    // A weak pager reference is valid only while that Activity still shows it.
+    private var cachedActivity = WeakReference<Activity>(null)
+    private var cachedPager = WeakReference<View>(null)
 
     private fun call(target: Any?, name: String, vararg args: Any?): Any? =
         try {
@@ -120,20 +125,32 @@ internal object HomeFeedMediaInfo {
         val root = try { activity.window?.decorView }
             catch (_: Throwable) { null } ?: return FullSeriesMediaInfo.Info()
         val screen = activity.resources.displayMetrics
-        val pending = ArrayDeque<View>()
-        pending.add(root)
-        var scanned = 0
         val candidates = ArrayList<Candidate>(3)
-        while (pending.isNotEmpty() && scanned++ < 4000) {
-            val v = pending.removeFirst()
-            if (!v.isShown) continue
-            if (v.javaClass.name == PAGER) {
-                inspectPager(v, screen.widthPixels, screen.heightPixels)
-                    ?.let(candidates::add)
-            }
-            if (v is ViewGroup) {
-                for (i in 0 until v.childCount) {
-                    pending.addLast(v.getChildAt(i))
+        val cached = if (cachedActivity.get() === activity)
+            cachedPager.get() else null
+        val reused = cached?.let {
+            inspectPager(it, screen.widthPixels, screen.heightPixels)
+        }
+        if (reused != null) candidates.add(reused)
+        else {
+            val pending = ArrayDeque<View>()
+            pending.add(root)
+            var scanned = 0
+            while (pending.isNotEmpty() && scanned++ < 4000) {
+                val v = pending.removeFirst()
+                if (!v.isShown) continue
+                if (v.javaClass.name == PAGER) {
+                    inspectPager(v, screen.widthPixels, screen.heightPixels)
+                        ?.let {
+                            candidates.add(it)
+                            cachedActivity = WeakReference(activity)
+                            cachedPager = WeakReference(v)
+                        }
+                }
+                if (v is ViewGroup) {
+                    for (i in 0 until v.childCount) {
+                        pending.addLast(v.getChildAt(i))
+                    }
                 }
             }
         }
