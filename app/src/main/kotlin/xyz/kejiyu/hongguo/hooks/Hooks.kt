@@ -5793,12 +5793,23 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             if (method.name == "pause" &&
-                                method.returnType == Void.TYPE &&
-                                SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
-                                return@Hooker null
+                                method.returnType == Void.TYPE) {
+                                // Mini is still inside MainFragmentActivity. Its
+                                // bottom-tab navigation calls low-level engine
+                                // pause directly, bypassing VideoController.
+                                if (!SystemMediaBridge.isExplicitMediaCommandInProgress() &&
+                                    InAppMiniPlayer.shouldKeepNativeEnginePlaying(chain.thisObject)) {
+                                    return@Hooker null
+                                }
+                                if (SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
+                                    return@Hooker null
+                                }
                             }
                             val result = chain.proceed()
                             try {
+                                if (method.name == "play") {
+                                    InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
+                                }
                                 SystemMediaBridge.onNativeEngineCommand(
                                     chain.thisObject, method.name)
                             } catch (e: Throwable) {
