@@ -7,6 +7,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.graphics.Bitmap
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -19,6 +20,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import java.lang.ref.WeakReference
+import java.lang.reflect.Proxy
 import xyz.kejiyu.hongguo.LogUtil
 
 /**
@@ -77,6 +79,192 @@ internal object SystemMediaBridge {
     private var resumeAttempts = 0
     private var reportedCard = false
     private var lastPauseAt = 0L
+
+    // Native TTVideoEngine values are milliseconds. Unknown duration must NOT
+    // be invented: the Android system only shows a usable seek bar when
+    // MediaMetadata.DURATION + PlaybackState position are actually supplied.
+    private var durationMs = -1L
+    private var positionMs = -1L
+    private var bufferedMs = -1L
+    private var actualPlaybackSpeed = 1f
+    private var seriesTitle: String? = null
+    private var episodeTitle: String? = null
+    private var coverArt: Bitmap? = null
+    private var lastMetadataSignature: String? = null
+    private var lastMetadataArt: Bitmap? = null
+    private var progressPolling = false
+    private var lastProgressDiagnosticAt = 0L
+
+    private val timelineTicker = object : Runnable {
+        override fun run() {
+            progressPolling = false
+            if (!enabled || session == null) return
+            readCurrentTimeline()
+            updateSessionMetadata()
+            updateSessionState(knownPlaying)
+            if (knownPlaying) scheduleTimelinePoll(1400L)
+        }
+    }
+
+    private fun scheduleTimelinePoll(delay: Long) {
+        if (progressPolling || !enabled) return
+        progressPolling = true
+        handler.postDelayed(timelineTicker, delay)
+    }
+
+    private fun reflectNumber(target: Any, name: String): Number? = try {
+        (target.javaClass.methods.firstOrNull {
+            it.name == name && it.parameterCount == 0
+        }?.invoke(target)) as? Number
+    } catch (_: Throwable) { null }
+
+    /** Always use the most recently *playing* engine, not preloaded decoders. */
+    private fun readCurrentTimeline() {
+        val engine = videoEngine.get() ?: return
+        if (engine.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
+        try {
+            val released = engine.javaClass.methods.firstOrNull {
+                it.name == "isReleased" && it.parameterCount == 0
+            }?.invoke(engine) as? Boolean
+            if (released == true) return
+
+            val nativeDuration = reflectNumber(engine, "getDuration")?.toLong()
+            val nativePosition = (
+                reflectNumber(engine, "getCurrentPlaybackTimeAsync")
+                    ?: reflectNumber(engine, "getCurrentPlaybackTime")
+                )?.toLong()
+            val loaded = reflectNumber(engine, "getLoadedProgress")?.toInt()
+            val speed = reflectNumber(engine, "getPlaybackSpeed")?.toFloat()
+
+            if (nativeDuration != null && nativeDuration in 1000L..86_400_000L)
+                durationMs = nativeDuration
+            if (nativePosition != null && nativePosition >= 0 &&
+                nativePosition <= 86_405_000L &&
+                (durationMs <= 0 || nativePosition <= durationMs + 5000L)) {
+                positionMs = if (durationMs > 0)
+                    nativePosition.coerceAtMost(durationMs) else nativePosition
+            }
+            if (durationMs > 0 && loaded != null && loaded in 0..100)
+                bufferedMs = durationMs * loaded / 100L
+            if (speed != null && speed.isFinite() && speed in 0.25f..4f)
+                actualPlaybackSpeed = speed
+
+            val now = SystemClock.uptimeMillis()
+            if (now - lastProgressDiagnosticAt > 15000L) {
+                LogUtil.info("系统媒体: 播放进度采样 durationMs=$durationMs" +
+                    " positionMs=$positionMs bufferedMs=$bufferedMs")
+                LogUtil.incr("systemMediaTimelineSample")
+                lastProgressDiagnosticAt = now
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 读取 TTVideoEngine 进度失败: " +
+                e.javaClass.simpleName + ": " + e.message)
+            LogUtil.incr("systemMediaTimelineReadFailed")
+        }
+    }
+
+    private fun updateSessionMetadata() {
+        val media = session ?: return
+        val artwork = coverArt
+        val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
+            "|" + durationMs
+        if (signature == lastMetadataSignature && artwork === lastMetadataArt) return
+        try {
+            val title = seriesTitle ?: "红果短剧"
+            val subtitle = episodeTitle ?: "正在播放的视频"
+            val builder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, "红果短剧")
+            if (durationMs > 0) builder.putLong(
+                MediaMetadata.METADATA_KEY_DURATION, durationMs)
+            if (artwork != null && !artwork.isRecycled) {
+                builder.putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
+                builder.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
+            }
+            media.setMetadata(builder.build())
+            lastMetadataSignature = signature
+            lastMetadataArt = artwork
+            LogUtil.info("系统媒体: 媒体信息已更新 title=" +
+                (seriesTitle != null) + " episode=" + (episodeTitle != null) +
+                " cover=" + (artwork != null) + " durationMs=$durationMs")
+            LogUtil.incr("systemMediaMetadataUpdate")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 更新媒体信息失败: " + e.message)
+        }
+    }
+
+    private fun captureVisibleMediaInfo(activity: Activity?) {
+        if (!enabled || activity == null) return
+        val info = NativeMediaInfo.read(activity)
+        var changed = false
+        if (info.title != null && info.title != seriesTitle) {
+            seriesTitle = info.title
+            changed = true
+        }
+        if (info.episode != null && info.episode != episodeTitle) {
+            episodeTitle = info.episode
+            changed = true
+        }
+        if (info.artwork != null && info.artwork !== coverArt) {
+            coverArt = info.artwork
+            changed = true
+        }
+        if (changed) {
+            updateSessionMetadata()
+            if (reportedCard) updateMediaNotification(knownPlaying)
+        }
+    }
+
+    private fun requestSeek(position: Long, reason: String) {
+        if (!enabled || durationMs <= 0L) {
+            LogUtil.warn("系统媒体: 进度跳转未启用（总时长未知）")
+            return
+        }
+        val engine = videoEngine.get() ?: return
+        val target = position.coerceIn(0L, durationMs).toInt()
+        try {
+            val method = engine.javaClass.methods.firstOrNull {
+                it.name == "seekTo" && it.parameterCount == 2 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                    it.parameterTypes[1].isInterface
+            } ?: engine.javaClass.methods.firstOrNull {
+                it.name == "seekTo" && it.parameterCount == 1 &&
+                    it.parameterTypes[0] == Int::class.javaPrimitiveType
+            } ?: run {
+                LogUtil.warn("系统媒体: TTVideoEngine 未找到可用的 seekTo")
+                return
+            }
+            val arguments: Array<Any?> = if (method.parameterCount == 2) {
+                val listenerType = method.parameterTypes[1]
+                val listener = Proxy.newProxyInstance(
+                    listenerType.classLoader, arrayOf(listenerType)
+                ) { _, callback, args ->
+                    if (callback.name == "onCompletion") {
+                        LogUtil.info("系统媒体: 跳转完成 success=" +
+                            args?.firstOrNull()?.toString())
+                    }
+                    null
+                }
+                arrayOf(target, listener)
+            } else arrayOf(target)
+            method.invoke(engine, *arguments)
+            positionMs = target.toLong()
+            updateSessionState(knownPlaying)
+            handler.postDelayed({
+                readCurrentTimeline()
+                updateSessionState(knownPlaying)
+            }, 350L)
+            LogUtil.info("系统媒体: 系统进度跳转 reason=$reason posMs=$target")
+            LogUtil.incr("systemMediaSeek")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 原生 seekTo 调用失败: " +
+                e.javaClass.simpleName + ": " + e.message)
+            LogUtil.incr("systemMediaSeekFailed")
+        }
+    }
 
     fun configure(ctx: Context, requested: Boolean) {
         val validTarget = ctx.packageName == TargetNames.CN_PACKAGE ||
