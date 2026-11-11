@@ -92,6 +92,161 @@ internal object FullSeriesMediaInfo {
             (if (total != null) " · 全" + total + "集" else "")
     }
 
+    // The outer uo4.y0.h pager has only two navigation containers (count=2).
+    // The real currently-playing episode is selected in the INNER
+    // ShortSeriesSingleFragment's list. The original 7.3.5.32 APK exposes
+    // getCurrentPosition() (backed by field U), getDataList() and
+    // VideoData.getVideoData() -> SaasVideoData on that fragment.
+    private const val EPISODE_FRAGMENT =
+        "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment"
+
+    private data class ActiveFragmentEntry(
+        val fragment: Any,
+        val score: Int,
+        val itemPosition: Int,
+        val listCount: Int,
+        val video: Any,
+        val modelVidIndex: Long?,
+        val modelListIndex: Long?,
+        val seriesVerified: Boolean
+    )
+
+    private var lastFragmentDiagnosticAt = 0L
+
+    private fun currentFragmentEntries(
+        activity: Activity,
+        seriesKey: String?,
+        total: Long?
+    ): List<ActiveFragmentEntry> {
+        val manager = call(activity, "getSupportFragmentManager") ?: return emptyList()
+        val entries = ArrayList<ActiveFragmentEntry>()
+        val seen = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<Any, Boolean>())
+        val tasks = java.util.ArrayDeque<Pair<Any, Int>>()
+        tasks.addLast(manager to 0)
+        var visitedManagers = 0
+        while (tasks.isNotEmpty() && visitedManagers++ < 20) {
+            val (fm, depth) = tasks.removeFirst()
+            val fragments = call(fm, "getFragments") as? List<*> ?: continue
+            for (fragment in fragments) {
+                if (fragment == null || !seen.add(fragment)) continue
+                if (fragment.javaClass.name == EPISODE_FRAGMENT) {
+                    val visible = call(fragment, "isVisible") as? Boolean ?: false
+                    val resumed = call(fragment, "isResumed") as? Boolean ?: false
+                    val hidden = call(fragment, "isHidden") as? Boolean ?: false
+                    val view = call(fragment, "getView") as? android.view.View
+                    val shown = view?.isShown == true
+                    if (!hidden && (resumed || visible || shown)) {
+                        val position = number(call(fragment,
+                            "getCurrentPosition"))?.toInt()
+                        val list = call(fragment, "getDataList") as? List<*>
+                        if (position != null && list != null &&
+                            position >= 0 && position < list.size &&
+                            list.size in 1..5000) {
+                            val wrapper = list[position]
+                            val model = call(wrapper, "getVideoData")
+                            if (model?.javaClass?.name == DATA) {
+                                val modelId = str(field(model, "episodesId"))
+                                val modelTotal = number(field(model,
+                                    "episodesCount"))
+                                val sameSeries = seriesKey == null ||
+                                    modelId == null || seriesKey == modelId
+                                val sameTotal = total == null ||
+                                    modelTotal == null || modelTotal <= 0L ||
+                                    modelTotal == total
+                                if (sameSeries && sameTotal) {
+                                    val bounds = android.graphics.Rect()
+                                    val area = if (shown &&
+                                        view?.getGlobalVisibleRect(bounds) == true)
+                                        bounds.width().toLong() *
+                                            bounds.height() else 0L
+                                    val score = (if (resumed) 8 else 0) +
+                                        (if (visible) 4 else 0) +
+                                        (if (shown) 2 else 0) +
+                                        (if (area > 50000) 1 else 0)
+                                    entries.add(ActiveFragmentEntry(fragment,
+                                        score, position, list.size, model,
+                                        number(field(model, "vidIndex")),
+                                        number(field(model, "indexInList")),
+                                        (seriesKey != null && modelId == seriesKey) ||
+                                            (total != null && modelTotal == total)))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (depth < 3 && call(fragment, "isAdded") == true) {
+                    val child = call(fragment, "getChildFragmentManager")
+                    if (child != null) tasks.addLast(child to (depth + 1))
+                }
+            }
+        }
+        return entries
+    }
+
+    private fun episodeFromActiveFragment(
+        activity: Activity,
+        seriesKey: String?,
+        total: Long?
+    ): String? {
+        val entries = currentFragmentEntries(activity, seriesKey, total)
+        val sorted = entries.sortedWith(compareByDescending<ActiveFragmentEntry> {
+            it.score
+        }.thenByDescending { it.seriesVerified })
+        val best = sorted.firstOrNull()
+        val next = sorted.getOrNull(1)
+        // Multiple equally visible active players can be cached by the app.
+        // Refuse to pick a preloaded neighbour without extra evidence.
+        val ambiguous = best != null && next != null &&
+            best.score == next.score &&
+            best.seriesVerified == next.seriesVerified &&
+            (best.video !== next.video)
+
+        val listIndex = best?.modelListIndex
+        val vidIndex = best?.modelVidIndex
+        val indexFromList = listIndex?.takeIf {
+            it >= 0L && it < (total ?: 5000L)
+        }?.plus(1)
+        val indexFromVid = vidIndex?.takeIf {
+            it in 1..(total ?: 5000L)
+        }
+        // vidIndex is an episode-facing numeric ID in this SaaS model;
+        // indexInList is the local list offset. Prefer agreement, and do not
+        // invent "first episode" when a local recycled list starts at zero.
+        val current = when {
+            ambiguous || best == null || best.score < 4 -> null
+            indexFromVid != null && indexFromList != null &&
+                indexFromVid == indexFromList -> indexFromVid
+            indexFromVid != null && listIndex == vidIndex ->
+                indexFromList
+            indexFromVid != null && listIndex == 0L &&
+                indexFromVid > 1L -> indexFromVid
+            indexFromVid != null && indexFromList == null -> indexFromVid
+            indexFromList != null && vidIndex == null -> indexFromList
+            indexFromList != null && vidIndex == 0L -> indexFromList
+            else -> null
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastFragmentDiagnosticAt > 12000L) {
+            lastFragmentDiagnosticAt = now
+            LogUtil.info("系统媒体: 全集内层视频索引 fragmentCandidates=" +
+                entries.size + " visibleScore=" +
+                (best?.score?.toString() ?: "?") +
+                " localPosition=" + (best?.itemPosition?.toString() ?: "?") +
+                " innerListCount=" + (best?.listCount?.toString() ?: "?") +
+                " vidIndex=" + (vidIndex?.toString() ?: "?") +
+                " indexInList=" + (listIndex?.toString() ?: "?") +
+                " verifiedSeries=" + (best?.seriesVerified == true) +
+                " ambiguous=$ambiguous" +
+                " resolvedEpisode=" + (current?.toString() ?: "?"))
+            LogUtil.incr("systemMediaInnerEpisodeProbe")
+        }
+        if (current == null || current < 1 ||
+            total != null && current > total) return null
+        return "第" + current + "集" +
+            (if (total != null) " · 全" + total + "集" else "")
+    }
+
     private fun preserveCurrentSeries(
         activity: Activity, seriesKey: String?, newTitle: String?,
         newTotal: Long?
@@ -240,6 +395,7 @@ internal object FullSeriesMediaInfo {
                     (if (total != null && total >= episodeNumber)
                         " · 全" + total + "集" else "")
             }
+            ?: episodeFromActiveFragment(activity, cachedSeriesKey, total)
             ?: episodeFromPager(pager, total)
             // The total episode count is independently verified by the
             // series data model. Show it even if the active index is unknown.
@@ -260,7 +416,8 @@ internal object FullSeriesMediaInfo {
                 " pagerIndex=" + (pager.currentItem?.toString() ?: "?") +
                 " pagerCount=" + (pager.adapterCount?.toString() ?: "?") +
                 " detailListCount=" + (pager.listCount?.toString() ?: "?") +
-                " pagerAligned=" + pager.pageAligned)
+                " pagerAligned=" + pager.pageAligned +
+                " innerEpisodeProbe=" + (episode?.startsWith("第") == true))
             LogUtil.incr("systemMediaFullSeriesNativeProbe")
         }
         return Info(seriesTitle, episode,
