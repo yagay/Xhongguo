@@ -149,6 +149,8 @@ internal object SinglePlaybackOwner {
      * playback engine here: this module no longer owns it.
      */
     @Synchronized fun reset() {
+        if (owner.get() == null && route == Route.OTHER &&
+            ownerRoute == Route.OTHER) return
         owner.clear()
         route = Route.OTHER
         ownerRoute = Route.OTHER
