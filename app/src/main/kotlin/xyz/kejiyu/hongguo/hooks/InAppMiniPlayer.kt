@@ -192,6 +192,18 @@ internal object InAppMiniPlayer {
         }
     }
 
+    /** A new official playback owner means this floating surface belongs
+     * to an old video. Restore it rather than leave an invisible player
+     * decoupled from the notification's active engine. */
+    fun onPlaybackOwnerChanged(previous: Any, current: Any) {
+        val active = session ?: return
+        if (previous !== current && active.nativeEngine.get() === previous) {
+            LogUtil.info("应用内小窗：播放权切换，归位旧视频渲染层")
+            LogUtil.incr("inAppMiniOwnerTransferRestore")
+            restore()
+        }
+    }
+
     fun hasWindow(): Boolean = session != null
 
     fun activeFor(activity: Activity): Boolean = session?.activity === activity
