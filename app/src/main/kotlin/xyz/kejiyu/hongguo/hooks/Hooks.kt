@@ -271,6 +271,7 @@ object Hooks {
         }
 
         gMasterOn = prefs.getBoolean("master_on", false)
+        MinePageCleaner.configure(prefs, gMasterOn)
         gStatusOn = prefs.getBoolean("status_bar", false)
         gControlOn = prefs.getBoolean("control_hide", false)
         gVideoLongPressSettingsOn = prefs.getBoolean("video_longpress_settings", true)
@@ -316,6 +317,7 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
+                        MinePageCleaner.refresh(gCurrentActivity)
                         if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
                         if (isShoppingMallDisabled()) {
                             gNextShoppingTabScanAt = 0L
@@ -3860,6 +3862,10 @@ object Hooks {
                 sw.setOnCheckedChangeListener { _, v ->
                     setter(v)
                     savePref(saveKey, v)
+                    if (saveKey.startsWith("mine_hide_") || saveKey == "master_on") {
+                        gPrefs?.let { MinePageCleaner.configure(it, gMasterOn) }
+                        mainHandler.post { MinePageCleaner.refresh(gCurrentActivity) }
+                    }
                     if (saveKey != "ad_block") applyToCurrent()
                 }
                 row.setOnClickListener {
@@ -3971,6 +3977,37 @@ object Hooks {
             addSwitch("拦截广告 / 挂件", "拦截已适配的广告层、金宝箱和悬浮挂件", { gAdOn }, { gAdOn = it }, "ad_block")
             addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
             addSwitch("显示 VIP 图标", "控制 VIP 图标相关显示逻辑", { gVipIconOn }, { gVipIconOn = it }, "vip_icon")
+
+            content.addView(sectionTitle(act, "我的页面 · 快捷入口", p))
+            addSwitch("隐藏福利", "隐藏「我的」页福利入口及其点击", 
+                { gPrefs?.getBoolean("mine_hide_welfare", true) ?: true },
+                { }, "mine_hide_welfare")
+            addSwitch("隐藏订单", "隐藏「我的」页订单入口及其点击",
+                { gPrefs?.getBoolean("mine_hide_orders", true) ?: true },
+                { }, "mine_hide_orders")
+            addSwitch("隐藏消息", "隐藏「我的」页消息入口及其点击",
+                { gPrefs?.getBoolean("mine_hide_messages", true) ?: true },
+                { }, "mine_hide_messages")
+            addSwitch("隐藏游戏", "隐藏「我的」页游戏入口及其点击",
+                { gPrefs?.getBoolean("mine_hide_games", true) ?: true },
+                { }, "mine_hide_games")
+            addSwitch("隐藏追更", "隐藏「我的」页追更入口及其点击",
+                { gPrefs?.getBoolean("mine_hide_following", true) ?: true },
+                { }, "mine_hide_following")
+
+            content.addView(sectionTitle(act, "我的页面 · 右侧菜单", p))
+            addSwitch("隐藏我的钱包", "隐藏三横线右侧菜单中的我的钱包",
+                { gPrefs?.getBoolean("mine_hide_wallet", true) ?: true },
+                { }, "mine_hide_wallet")
+            addSwitch("隐藏会员中心", "隐藏三横线右侧菜单中的会员中心",
+                { gPrefs?.getBoolean("mine_hide_membership", true) ?: true },
+                { }, "mine_hide_membership")
+            addSwitch("隐藏游戏中心", "隐藏三横线右侧菜单中的游戏中心",
+                { gPrefs?.getBoolean("mine_hide_game_center", true) ?: true },
+                { }, "mine_hide_game_center")
+            addSwitch("隐藏创作中心", "隐藏三横线右侧菜单中的创作中心",
+                { gPrefs?.getBoolean("mine_hide_creator_center", true) ?: true },
+                { }, "mine_hide_creator_center")
 
             content.addView(sectionTitle(act, "实验性功能", p))
             addSwitch("OLED 亮度拦截", "实验功能：仅在需要时手动开启", { gOledProtectOn }, { gOledProtectOn = it }, "oled_protect")
