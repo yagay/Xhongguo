@@ -115,6 +115,14 @@ internal object FullSeriesMediaInfo {
 
     private var lastFragmentDiagnosticAt = 0L
 
+    private data class FragmentMedia(
+        val title: String? = null,
+        val episode: String? = null,
+        val artworkUrl: String? = null,
+        val total: Long? = null,
+        val seriesId: String? = null
+    )
+
     private fun currentFragmentEntries(
         activity: Activity,
         seriesKey: String?,
@@ -186,11 +194,11 @@ internal object FullSeriesMediaInfo {
         return entries
     }
 
-    private fun episodeFromActiveFragment(
+    private fun mediaFromActiveFragment(
         activity: Activity,
         seriesKey: String?,
         total: Long?
-    ): String? {
+    ): FragmentMedia {
         val entries = currentFragmentEntries(activity, seriesKey, total)
         val sorted = entries.sortedWith(compareByDescending<ActiveFragmentEntry> {
             it.score
@@ -243,10 +251,26 @@ internal object FullSeriesMediaInfo {
                 " resolvedEpisode=" + (current?.toString() ?: "?"))
             LogUtil.incr("systemMediaInnerEpisodeProbe")
         }
-        if (current == null || current < 1 ||
-            total != null && current > total) return null
-        return "第" + current + "集" +
-            (if (total != null) " · 全" + total + "集" else "")
+        if (best == null || ambiguous || best.score < 4) return FragmentMedia()
+        val model = best.video
+        val fragmentTotal = number(field(model, "episodesCount"))
+            ?.takeIf { it in 1..5000L }
+        val modelTitle = str(field(model, "seriesName"))
+        val fragmentCover = listOf("cover", "episodeCover")
+            .mapNotNull { field(model, it) as? String }
+            .firstOrNull { it.isNotBlank() }
+        val matchedEpisode = if (current != null && current >= 1 &&
+            (total == null || current <= total)) {
+            "第" + current + "集" +
+                (if (total != null) " · 全" + total + "集" else "")
+        } else null
+        return FragmentMedia(
+            title = modelTitle,
+            episode = matchedEpisode,
+            artworkUrl = fragmentCover,
+            total = fragmentTotal,
+            seriesId = str(field(model, "episodesId"))
+        )
     }
 
     private fun preserveCurrentSeries(
@@ -364,15 +388,21 @@ internal object FullSeriesMediaInfo {
             vid(it) == videoId
         } else null
 
-        val freshTotal = listOfNotNull(
+        val detailSeriesKey = str(field(detail, "episodesId")) ?:
+            str(field(current.firstOrNull(), "episodesId"))
+        val provisionalTotal = listOfNotNull(
             number(field(active, "episodesCount")),
             number(field(detail, "episodeTotalCnt")),
             number(field(detail, "episodeCnt")),
-            // When the engine's videoID is an internal player identifier,
-            // data.vid won't match; series-level episodesCount is still
-            // reliable if it belongs to this ShortSeriesActivity.
             number(field(current.firstOrNull(), "episodesCount"))
         ).firstOrNull { it in 1..5000L }
+        // The active fragment supplied the *correct current episode* in the
+        // 16:41 diagnostics. Read its series name and art at the same time.
+        // Unlike the transient detail Runnable, this model stays attached to
+        // the current playing video's internal list.
+        val fragment = mediaFromActiveFragment(activity,
+            detailSeriesKey ?: cachedSeriesKey, provisionalTotal ?: cachedTotal)
+        val freshTotal = provisionalTotal ?: fragment.total
 
         // Detail metadata belongs to this ShortSeriesActivity rather than an
         // unrelated home recommendation; its title can be shown even if the
@@ -380,10 +410,10 @@ internal object FullSeriesMediaInfo {
         val latestTitle =
             str(field(active, "seriesName")) ?:
             str(field(detail, "episodesTitle")) ?:
+            fragment.title ?:
             str(field(active, "title")) ?:
             str(field(current.firstOrNull(), "seriesName"))
-        val seriesKey = str(field(detail, "episodesId")) ?:
-            str(field(current.firstOrNull(), "episodesId"))
+        val seriesKey = detailSeriesKey ?: fragment.seriesId
         // 7.3.5.32's official Saas model has URL strings for both full-sized
         // and compact series posters. The detail is a transient Runnable
         // payload, so preserve its URL for the currently displayed series.
@@ -393,7 +423,8 @@ internal object FullSeriesMediaInfo {
             field(active, "cover") as? String,
             field(active, "episodeCover") as? String,
             field(current.firstOrNull(), "cover") as? String,
-            field(current.firstOrNull(), "episodeCover") as? String
+            field(current.firstOrNull(), "episodeCover") as? String,
+            fragment.artworkUrl
         ).firstOrNull { it.isNotBlank() }
         val retained = preserveCurrentSeries(activity, seriesKey,
             latestTitle, freshTotal, freshCoverUrl)
@@ -410,7 +441,7 @@ internal object FullSeriesMediaInfo {
                     (if (total != null && total >= episodeNumber)
                         " · 全" + total + "集" else "")
             }
-            ?: episodeFromActiveFragment(activity, cachedSeriesKey, total)
+            ?: fragment.episode
             ?: episodeFromPager(pager, total)
             // The total episode count is independently verified by the
             // series data model. Show it even if the active index is unknown.
@@ -425,6 +456,7 @@ internal object FullSeriesMediaInfo {
                 " candidateCount=" + current.size +
                 " videoMatched=" + (active != null) +
                 " title=" + (seriesTitle != null) +
+                " fragmentTitle=" + (fragment.title != null) +
                 " coverUrl=" + (cachedCoverUrl != null) +
                 " episode=" + (episode != null) +
                 " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
