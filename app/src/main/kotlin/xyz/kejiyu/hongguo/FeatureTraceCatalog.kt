@@ -69,6 +69,22 @@ object FeatureTraceCatalog {
         else -> null
     }
 
+    /** Optional native hook identifiers whose execution is diagnostically useful.
+     * Do not trace framework inflate/setVisibility hot paths per call. */
+    fun forHookId(id: String): String? = when {
+        id.startsWith("vip") || id.startsWith("nsVip") ||
+            id.startsWith("nvVip") || id.startsWith("nvSpec") ||
+            id.startsWith("nvCenter") || id.startsWith("comicVip") -> "ads"
+        id.startsWith("sp") && id.length > 2 ||
+            id.startsWith("veAd") || id.startsWith("aiAd") -> "ads"
+        id.startsWith("downloadLimit") -> "downloads"
+        id.startsWith("maxQuality") -> "quality"
+        id.startsWith("shopping") -> "navigation"
+        id.startsWith("videoCmd") || id.startsWith("videoPause") ||
+            id.startsWith("videoPlay") -> "playback"
+        else -> null
+    }
+
     fun outcomeForCounter(name: String): String = when {
         name.contains("Failed", true) ||
             name.contains("Failure", true) ||
