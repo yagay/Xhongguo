@@ -4681,23 +4681,64 @@ object Hooks {
     }
 
     private fun detectTargetPackageVersion(pkg: String): Pair<String?, Long> {
-        try {
-            val app = try {
-                Class.forName("android.app.ActivityThread").getDeclaredMethod("currentApplication").invoke(null) as? Context
-            } catch (_: Throwable) {
-                try { Class.forName("android.app.AppGlobals").getDeclaredMethod("getInitialApplication").invoke(null) as? Context } catch (_: Throwable) { null }
+        // onPackageReady may run BEFORE ActivityThread.currentApplication()
+        // becomes non-null. Read using the system context if possible; otherwise
+        // refresh the verified PackageInfo from Activity.onCreate.
+        var ctx = appCtx
+        if (ctx == null) {
+            try {
+                ctx = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentApplication").invoke(null) as? Context
+            } catch (_: Throwable) {}
+        }
+        if (ctx == null) {
+            try {
+                val at = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentActivityThread").invoke(null)
+                ctx = at?.javaClass?.getDeclaredMethod("getSystemContext")
+                    ?.invoke(at) as? Context
+            } catch (e: Throwable) {
+                LogUtil.warn("目标版本早期获取系统 Context 失败: " +
+                    e.javaClass.simpleName + ": " + e.message)
             }
-            if (app != null) {
+        }
+        if (ctx != null) {
+            try {
                 @Suppress("DEPRECATION")
-                val pi = app.packageManager.getPackageInfo(pkg, 0)
-                @Suppress("DEPRECATION")
-            val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
+                val pi = ctx.packageManager.getPackageInfo(pkg, 0)
+                val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                    else @Suppress("DEPRECATION") pi.versionCode.toLong()
+                LogUtil.info("目标版本通过 Context 识别: " + pi.versionName +
+                    " versionCode=" + code)
                 return pi.versionName to code
+            } catch (e: Throwable) {
+                LogUtil.warn("读取目标版本失败，稍后在 Activity 确认: " + e)
             }
-        } catch (e: Throwable) {
-            LogUtil.warn("读取目标版本失败，改用类指纹: $e")
+        } else {
+            LogUtil.warn("onPackageReady 时目标 Context 尚不可用，将在 Activity 启动后确认版本")
         }
         return null to -1L
+    }
+
+    private fun refreshTargetVersionFromActivity(activity: Activity) {
+        if (gTargetVersionName != "未知" || activity.packageName != gPkg) return
+        try {
+            @Suppress("DEPRECATION")
+            val pi = activity.packageManager.getPackageInfo(gPkg, 0)
+            gTargetVersionName = pi.versionName ?: "未知"
+            gTargetVersionCode = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                else @Suppress("DEPRECATION") pi.versionCode.toLong()
+            LogUtil.info("Activity 验证目标版本=" + gTargetVersionName +
+                " versionCode=" + gTargetVersionCode + " installedProfile=" +
+                gNames.profileId)
+            if (!TargetNames.isSupported(gPkg, gTargetVersionName)) {
+                LogUtil.warn("当前版本 " + gTargetVersionName +
+                    " 尚无完整混淆方法映射，旧版 profile 的部分类 Hook 将缺失。" +
+                    "稳定 VideoContext 媒体接口单独 Hook，不冒充完整兼容。")
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("Activity 验证目标版本失败: " + e.message)
+        }
     }
 
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
@@ -6113,8 +6154,9 @@ object Hooks {
                     if (a != null) {
 
                         gCurrentActivity = a
-                        initPrefs(a.applicationContext)
                         appCtx = a.applicationContext
+                        refreshTargetVersionFromActivity(a)
+                        initPrefs(a.applicationContext)
                         ensureReceiver(a.applicationContext)
                     }
                 } catch (_: Exception) {}
