@@ -18,6 +18,7 @@ import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Bundle
 import android.os.SystemClock
 import java.lang.ref.WeakReference
 import java.lang.reflect.Proxy
@@ -80,6 +81,48 @@ internal object SystemMediaBridge {
     )
     @Volatile private var pendingExit: ExitSnapshot? = null
     private const val EXIT_SNAPSHOT_WINDOW_MS = 4800L
+    private var prePauseApp: Application? = null
+    private var prePauseListener: Application.ActivityLifecycleCallbacks? = null
+
+    /**
+     * Framework Activity.onPause hooks can execute AFTER a host subclass has
+     * already paused TTVideoEngine (because it calls super.onPause last).
+     * Application.onActivityPrePaused fires BEFORE the subclass onPause and
+     * is the reliable counterpart to Home-only onUserLeaveHint.
+     */
+    private fun ensurePrePauseObserver(ctx: Context) {
+        val application = ctx.applicationContext as? Application ?: return
+        if (prePauseApp === application) return
+        val listener = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+
+            override fun onActivityPrePaused(activity: Activity) {
+                if (!enabled || !isVideoActivity(activity)) return
+                try {
+                    rememberExitSnapshot(activity, "Application.prePause")
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: PrePause 快照失败 " +
+                        e.javaClass.simpleName)
+                }
+            }
+        }
+        try {
+            application.registerActivityLifecycleCallbacks(listener)
+            prePauseApp = application
+            prePauseListener = listener
+            LogUtil.info("系统媒体: 已监听 ActivityPrePaused，支持最近任务切换")
+            LogUtil.incr("systemMediaPrePauseObserverInstalled")
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: ActivityPrePaused 监听失败 " +
+                e.javaClass.simpleName)
+        }
+    }
     // Prevent the 2026-11-11 07:32:50 home playback feedback loop:
     // every automatic play used to reset resumeAttempts to zero.
     private var backgroundResumeBudget = 0
@@ -627,6 +670,7 @@ internal object SystemMediaBridge {
         }
         enabled = true
         appContext = ctx.applicationContext
+        ensurePrePauseObserver(ctx)
         // Do not advertise an active MediaSession before real playback is observed.
         // Home/splash startup is not evidence of a playing video.
         LogUtil.info("系统媒体: 启用原播放器探测; process=" +
