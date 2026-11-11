@@ -530,6 +530,8 @@ internal object SystemMediaBridge {
         // In that state NONE of those unrelated old UI fallbacks are trusted.
         val seriesUnverified = isFullSeries &&
             full.source == "series-video-unverified"
+        val videoIdOnly = isFullSeries &&
+            full.source == "series-video-id-only"
         val observedSameSeries = !isFullSeries ||
             full.seriesId == null || observed.seriesId == full.seriesId
         // In full-series playback, the old Activity's on-screen text can
@@ -544,19 +546,26 @@ internal object SystemMediaBridge {
         val uiAllowed = !isFullSeries || full.seriesId == null
         val title = when {
             seriesUnverified -> null
+            videoIdOnly -> full.title
             isFullSeries -> full.title ?: trustedObservedTitle ?:
                 play.title ?: if (uiAllowed) ui.title else null
             else -> home.title ?: observed.title ?: play.title ?: ui.title
         }
-        val episode = if (seriesUnverified) null
-            else selectEpisodeLabel(full.episode, play.episode ?:
+        val episode = when {
+            seriesUnverified -> null
+            videoIdOnly -> full.episode
+            else -> selectEpisodeLabel(full.episode, play.episode ?:
                 if (uiAllowed) ui.episode else null)
+        }
         // Only true native series posters: never use a playing frame still or
         // the video Surface as Android MediaMetadata art.
-        val artworkUrl = if (seriesUnverified) null
-            else full.artworkUrl ?: home.artworkUrl ?:
+        val artworkUrl = when {
+            seriesUnverified -> null
+            videoIdOnly -> full.artworkUrl
+            else -> full.artworkUrl ?: home.artworkUrl ?:
                 trustedObservedPoster ?: play.artworkUrl
-        val resolvedSeriesId = if (seriesUnverified) null
+        }
+        val resolvedSeriesId = if (seriesUnverified || videoIdOnly) null
             else full.seriesId ?: home.seriesId ?: observed.seriesId
         if (resolvedSeriesId != null && currentSeriesIdentity != null &&
             resolvedSeriesId != currentSeriesIdentity) {
@@ -577,6 +586,7 @@ internal object SystemMediaBridge {
             changed = true
         }
         val source = when {
+            seriesUnverified || videoIdOnly -> full.source
             full.title != null || full.episode != null ||
                 full.artworkUrl != null -> full.source
             home.title != null || home.artworkUrl != null -> home.source
