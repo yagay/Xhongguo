@@ -5165,6 +5165,40 @@ object Hooks {
             }
         }
 
+        // Universal: bind at the SDK model boundary confirmed in 7.3.5.32.
+        // This is shared by home feed, series and their preloaded engines.
+        if (TargetNames.isUniversal(gNames)) {
+            try {
+                val engine = Class.forName(
+                    "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
+                var modelHooks = 0
+                for ((index, method) in engine.declaredMethods.filter {
+                    it.name == "setVideoModel" && it.parameterCount == 1 &&
+                        it.parameterTypes[0].name.contains("VideoModel")
+                }.withIndex()) {
+                    module.hook(method)
+                        .setId("universalMaxQualityVideoModel_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            if (gMasterOn && gMaxQualityOn) {
+                                try {
+                                    rememberAndApplyHighestResolution(
+                                        chain.thisObject, chain.getArg(0))
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("通用最高画质失败: " +
+                                        e.javaClass.simpleName)
+                                }
+                            }
+                            result
+                        })
+                    modelHooks++
+                }
+                LogUtil.info("  ✓ 通用最高画质 SDK setVideoModel Hooks=$modelHooks")
+            } catch (e: Throwable) {
+                LogUtil.warn("  通用最高画质缺失: " + e.javaClass.simpleName)
+            }
+        }
         if (gNames.resolutionController.isNotBlank()) {
             try {
                 val controllerClass = Class.forName(gNames.resolutionController, false, classLoader)
