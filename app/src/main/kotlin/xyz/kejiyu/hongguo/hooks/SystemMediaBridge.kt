@@ -57,6 +57,7 @@ internal object SystemMediaBridge {
     private var lastDiscoveryAt = 0L
     private var lastNativeEngineAt = 0L
     private var lastLifecyclePauseAt = 0L
+    private var lastPlayerActivityPauseAt = 0L
     private var lastLifecyclePauseEngine = WeakReference<Any>(null)
     private var lastLifecyclePauseWasPlaying = false
     private var lastUserLeaveAt = 0L
@@ -750,6 +751,9 @@ internal object SystemMediaBridge {
     fun onActivityPaused(activity: Activity?) {
         if (!enabled || activity == null) return
         if (activity.packageName != appContext?.packageName) return
+        val isPlayerActivity = activity.javaClass.name.contains("MainFragmentActivity") ||
+            activity.javaClass.name.contains("ShortSeriesActivity")
+        if (isPlayerActivity) lastPlayerActivityPauseAt = SystemClock.uptimeMillis()
         discoverPlayingVideo(activity, "beforeActivityPause")
         captureVisibleMediaInfo(activity)
         val name = activity.javaClass.simpleName
@@ -921,6 +925,19 @@ internal object SystemMediaBridge {
             rememberController(candidate)
             rememberLayer(candidate)
         }
+        // Full-series versions sometimes signal pause through VideoShop
+        // instead of TTVideoEngine.pause. Record the same verified candidate
+        // only around a real Activity leave/pause, never for user media actions.
+        if (!playing && knownPlaying && !userCommandInProgress &&
+            videoEngine.get() != null &&
+            (SystemClock.uptimeMillis() - lastPlayerActivityPauseAt in 0L..1500L ||
+             SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..1500L)) {
+            lastLifecyclePauseAt = SystemClock.uptimeMillis()
+            lastLifecyclePauseEngine = WeakReference(videoEngine.get())
+            lastLifecyclePauseWasPlaying = true
+            LogUtil.info("系统媒体: 已记录原生播放器暂停事件 source=$source" +
+                " page=" + (currentMetadataPage ?: "?"))
+        }
         val stateChanged = knownPlaying != playing
         knownPlaying = playing
         if (playing) {
@@ -980,6 +997,7 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        lastPlayerActivityPauseAt = 0L
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
@@ -1314,6 +1332,7 @@ internal object SystemMediaBridge {
         lastMetadataSignature = null
         lastMetadataArt = null
         lastLifecyclePauseAt = 0L
+        lastPlayerActivityPauseAt = 0L
         lastLifecyclePauseWasPlaying = false
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
