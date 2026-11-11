@@ -5810,6 +5810,8 @@ object Hooks {
                                 if (method.name == "play") {
                                     InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
                                 }
+                                InAppMiniPlayer.onNativeEngineAction(
+                                    chain.thisObject, method.name)
                                 SystemMediaBridge.onNativeEngineCommand(
                                     chain.thisObject, method.name)
                             } catch (e: Throwable) {
