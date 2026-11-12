@@ -40,6 +40,7 @@ object FeatureTraceCatalog {
             name.startsWith("systemMediaPreparedControllers") ||
             name.startsWith("systemMediaSeriesBusinessPause") ||
             name.startsWith("systemMediaSeriesListener") ||
+            name.startsWith("systemMediaSeriesPagerRecovery") ||
             name.startsWith("systemMediaBackgroundNoHostPlay") ||
             name.startsWith("systemMediaEpisodeEndStall") ||
             name.startsWith("systemMediaNativeCompletionHook") ||
