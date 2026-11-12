@@ -11,6 +11,12 @@ internal class BackgroundEpisodeMonitor {
 
     fun onNativeCompletion() { sawCompletion = true }
 
+    /** A completed episode must be free to pause/release its previous native
+     * engine while advancing to the next one. Never treat this as a
+     * background-lifecycle pause.
+     */
+    fun hasNativeCompletion(): Boolean = sawCompletion
+
     fun reset() {
         endSinceMs = 0L
         stalledReported = false
