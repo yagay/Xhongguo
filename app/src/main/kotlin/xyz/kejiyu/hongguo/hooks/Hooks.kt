@@ -7105,6 +7105,15 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onCreate", android.os.Bundle::class.java)).setId("oc").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 LogUtil.incr("onCreate")
                 val a = chain.thisObject as? Activity
+                // A real new host Activity must cancel a provisional
+                // pre-pause background hold (normal in-app navigation).
+                if (a != null) {
+                    try { SystemMediaBridge.onActivityStarting(a) }
+                    catch (e: Throwable) {
+                        LogUtil.warn("系统媒体: 内部页面切换保护取消失败 " +
+                            e.javaClass.simpleName)
+                    }
+                }
 
                 try {
                     if (a != null) {
