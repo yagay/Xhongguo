@@ -133,6 +133,12 @@ internal object SystemMediaBridge {
                         // on Android's optional onUserLeaveHint callback.
                         backgroundTransition.begin(activity, engine, true,
                             explicitPauseEpoch, SystemClock.uptimeMillis())
+                        // The APK's VideoPatchLayout.playInternal reads its
+                        // own canPlayBackground field. Setting it only after
+                        // Activity.onStop is too late for native lifecycle
+                        // and the next episode. Preserve the original value
+                        // and restore it if this is only in-app navigation.
+                        setNativeBackgroundAllowance(true)
                         FeatureTrace.event("background", "pre_pause_candidate",
                             "captured", "hint=" + lastUserLeaveWasPlaying +
                                 ",nativeKnown=" +
@@ -1471,12 +1477,40 @@ internal object SystemMediaBridge {
         return videoContext.get() ?: controller.get() ?: layer.get() ?: videoEngine.get()
     }
 
+    private fun readNativeBackgroundAllowance(host: Any): Boolean? {
+        var type: Class<*>? = host.javaClass
+        while (type != null && type != Any::class.java) {
+            try {
+                val flag = type.getDeclaredField("canPlayBackground")
+                flag.isAccessible = true
+                return flag.get(host) as? Boolean
+            } catch (_: NoSuchFieldException) {
+                type = type.superclass
+            } catch (_: Throwable) { return null }
+        }
+        return null
+    }
+
     private fun setNativeBackgroundAllowance(allow: Boolean) {
         val host = layer.get() ?: try {
             videoContext.get()?.javaClass?.getMethod("getLayerHostMediaLayout")
                 ?.invoke(videoContext.get())
-        } catch (_: Throwable) { null } ?: return
+        } catch (_: Throwable) { null } ?: run {
+            FeatureTrace.event("background", "native_allowance", "degraded",
+                "hasLayer=false", flow = mediaFlow, minIntervalMs = 4000L)
+            return
+        }
         try {
+            if (!backgroundFlagApplied ||
+                originalBackgroundHost.get() !== host) {
+                // APK verified VideoPatchLayout.canPlayBackground, including
+                // the inherited field exposed by LayerHostMediaLayout.
+                val original = readNativeBackgroundAllowance(host)
+                if (original != null) {
+                    originalBackgroundFlag = original
+                    originalBackgroundHost = WeakReference(host)
+                }
+            }
             val method = host.javaClass.getMethod("setCanPlayBackground",
                 Boolean::class.javaPrimitiveType)
             settingBackgroundInternally = true
@@ -1583,6 +1617,11 @@ internal object SystemMediaBridge {
         backgroundTransition.cancel()
         if (pendingExit?.activity?.get() === previous &&
             !requestedBackgroundPlayback) pendingExit = null
+        if (!requestedBackgroundPlayback && backgroundFlagApplied) {
+            if (originalBackgroundFlag != null)
+                setNativeBackgroundAllowance(originalBackgroundFlag == true)
+            backgroundFlagApplied = false
+        }
         FeatureTrace.event("background", "transition", "cancelled",
             "reason=in_app_activity", flow = mediaFlow,
             minIntervalMs = 1200L)
@@ -1599,6 +1638,11 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         backgroundTransition.cancel()
         episodeMonitor.reset()
+        if (backgroundFlagApplied && !requestedBackgroundPlayback) {
+            if (originalBackgroundFlag != null)
+                setNativeBackgroundAllowance(originalBackgroundFlag == true)
+            backgroundFlagApplied = false
+        }
         if (backgroundPauseGuardEngine.get() != null) {
             backgroundPauseGuardEngine.clear()
             backgroundPauseGuardUntil = 0L
