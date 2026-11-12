@@ -71,6 +71,7 @@ internal class BackgroundTransitionState {
         phase == Phase.BACKGROUND && ownerEngine != null &&
             engine.get() === ownerEngine && heldCallbacks > 0
 
+    @Synchronized fun isProvisional(): Boolean = phase == Phase.PRE_PAUSE
     @Synchronized fun heldCount(): Int = heldCallbacks
     @Synchronized fun currentId(): Long = transitionId
 
