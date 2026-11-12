@@ -6467,7 +6467,13 @@ object Hooks {
                     if (gMasterOn && gSystemMediaOn &&
                         SystemMediaBridge.shouldHoldSeriesBusinessPause(
                             chain.thisObject)) return@Hooker null
-                    chain.proceed()
+                    val result = chain.proceed()
+                    try {
+                        if (gMasterOn && gSystemMediaOn)
+                            SystemMediaBridge.onSeriesNativeCallback(
+                                "business_pause_executed", chain.thisObject)
+                    } catch (_: Throwable) { }
+                    result
                 })
             installedSeriesHooks++
 
