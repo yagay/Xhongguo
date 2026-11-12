@@ -53,7 +53,30 @@ internal class BackgroundTransitionState {
         }
     }
 
-    @Synchronized fun recordHeld() { if (phase == Phase.PRE_PAUSE) heldCallbacks++ }
+    /** The native VideoContext release may happen inside Activity.onStop
+     * AFTER process-state confirmation, depending on Android dispatch order.
+     * Allow this one narrow cleanup guard in either transition phase.
+     */
+    @Synchronized fun canKeepPreparedOnStop(
+        ownerActivity: Any?, ownerEngine: Any?,
+        explicitPauseEpoch: Long, explicitCommand: Boolean,
+        ownershipSwitch: Boolean, nowMs: Long
+    ): Boolean {
+        if (explicitCommand || ownershipSwitch ||
+            explicitPauseEpoch != pauseEpoch ||
+            ownerActivity == null || ownerActivity !== activity.get() ||
+            ownerEngine == null || ownerEngine !== engine.get()) return false
+        return when (phase) {
+            Phase.PRE_PAUSE -> nowMs - since in 0L..3500L
+            Phase.BACKGROUND -> nowMs - since in 0L..6000L
+            Phase.IDLE -> false
+        }
+    }
+
+    @Synchronized fun recordHeld() {
+        if (phase == Phase.PRE_PAUSE || phase == Phase.BACKGROUND)
+            heldCallbacks++
+    }
 
     @Synchronized fun confirm(
         ownerActivity: Any?, ownerEngine: Any?,
