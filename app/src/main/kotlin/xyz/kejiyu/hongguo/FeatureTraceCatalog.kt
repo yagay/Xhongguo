@@ -38,6 +38,8 @@ object FeatureTraceCatalog {
             name.startsWith("systemMediaHostLifecycle") ||
             name.startsWith("systemMediaEarly") ||
             name.startsWith("systemMediaPreparedControllers") ||
+            name.startsWith("systemMediaSeriesBusinessPause") ||
+            name.startsWith("systemMediaSeriesListener") ||
             name.startsWith("systemMediaBackgroundNoHostPlay") ||
             name.startsWith("systemMediaEpisodeEndStall") ||
             name.startsWith("systemMediaNativeCompletionHook") ||
