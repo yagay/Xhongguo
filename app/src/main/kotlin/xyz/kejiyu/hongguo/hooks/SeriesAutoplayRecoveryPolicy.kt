@@ -25,15 +25,43 @@ internal object SeriesAutoplayRecoveryPolicy {
         val alreadyAttempted: Boolean
     )
 
-    fun nextIndex(e: Evidence): Int? {
+    enum class Action { ADVANCE_PAGER, RECONCILE_SELECTION }
+
+    data class Decision(val action: Action, val targetIndex: Int)
+
+    /**
+     * The APK has two independent indexes:
+     * adapter.a.D = business selection; ViewPager2.currentItem = UI page.
+     *
+     * When pager == D + 1, Android already selected the NEXT page, but
+     * adapter.r4(position) did not run (often due to a stopped Fragment).
+     * Moving ViewPager2 another step would skip a real episode. Instead
+     * reconcile the existing page through the host's r4(position).
+     *
+     * For pager == D, only request one normal next-page selection.
+     * Unknown differences are not recoverable without guessing.
+     */
+    fun decision(e: Evidence): Decision? {
         if (!e.background || !e.eofObserved || !e.sameNativeEngine ||
             !e.sameSeriesActivity || !e.explicitPauseUnchanged ||
             !e.noNewVideoStarted || !e.nearRealNativeEnd ||
             e.alreadyAttempted || e.completionAgeMs !in 5000L..18000L ||
-            e.currentIndex < 0 || e.pagerIndex != e.currentIndex ||
-            e.itemCount <= 1 || e.currentIndex >= e.itemCount - 1) {
-            return null
+            e.currentIndex < 0 || e.pagerIndex < 0 ||
+            e.itemCount <= 1 || e.currentIndex >= e.itemCount - 1 ||
+            e.pagerIndex >= e.itemCount) return null
+
+        return when {
+            e.pagerIndex == e.currentIndex ->
+                Decision(Action.ADVANCE_PAGER, e.currentIndex + 1)
+            e.pagerIndex == e.currentIndex + 1 ->
+                Decision(Action.RECONCILE_SELECTION, e.pagerIndex)
+            else -> null
         }
-        return e.currentIndex + 1
     }
+
+    /** Backwards-compatible helper: only returns a physical pager movement.
+     * Never reports an already-selected page as "next".
+     */
+    fun nextIndex(e: Evidence): Int? =
+        decision(e)?.takeIf { it.action == Action.ADVANCE_PAGER }?.targetIndex
 }
