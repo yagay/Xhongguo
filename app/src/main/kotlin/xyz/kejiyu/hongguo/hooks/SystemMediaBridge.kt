@@ -325,6 +325,23 @@ internal object SystemMediaBridge {
             flow = mediaFlow, minIntervalMs = 100L)
     }
 
+    /** The actual series next-episode handler is the native adapter's
+     * U1(String) -> G4(), not VideoContext.onVideoCompleted().
+     * Record both entry and return to identify a missing listener vs
+     * an adapter which receives EOF but declines to move the episode list.
+     */
+    fun onSeriesAdapterCallback(method: String, phase: String) {
+        if (!enabled) return
+        val currentPage = foregroundActivity.get()?.javaClass?.simpleName
+        LogUtil.info("系统媒体: 官方全集适配器事件 method=$method" +
+            " phase=$phase background=$requestedBackgroundPlayback" +
+            " page=" + (currentPage ?: "none"))
+        FeatureTrace.event("background", "series_adapter", "observed",
+            "method=" + method + ",phase=" + phase +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow, minIntervalMs = 100L)
+    }
+
     /** Explicit notification/media-control pause must never be swallowed by
      * the in-app mini player's short navigation guard. */
     fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
