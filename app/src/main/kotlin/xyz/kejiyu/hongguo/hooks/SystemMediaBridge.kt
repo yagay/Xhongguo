@@ -403,6 +403,27 @@ internal object SystemMediaBridge {
             flow = mediaFlow, minIntervalMs = 100L)
     }
 
+    /** x05.w.onCompletion first calls its x05.e owner. For m15.a,
+     * h2(x05.f) forwards to a separate fm4.a/onCompletion callback.
+     * This is an independent route from adapter.U1, so trace it without
+     * overriding or duplicating the host's completion dispatch.
+     */
+    fun onSeriesHolderCompletion(holder: Any?, phase: String) {
+        if (!enabled || holder == null) return
+        val callback = try {
+            holder.javaClass.getDeclaredField("i").apply {
+                isAccessible = true
+            }.get(holder)
+        } catch (_: Throwable) { null }
+        LogUtil.info("系统媒体: 官方全集 holder 完成回调" +
+            " phase=$phase hasDownstream=" + (callback != null) +
+            " background=$requestedBackgroundPlayback")
+        FeatureTrace.event("background", "series_holder_completion", "observed",
+            "phase=" + phase + ",downstream=" + (callback != null) +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow, minIntervalMs = 100L)
+    }
+
     /** The actual series next-episode handler is the native adapter's
      * U1(String) -> G4(), not VideoContext.onVideoCompleted().
      * Record both entry and return to identify a missing listener vs
