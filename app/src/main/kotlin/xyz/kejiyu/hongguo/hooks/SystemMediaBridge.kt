@@ -199,7 +199,15 @@ internal object SystemMediaBridge {
     fun shouldHoldPreparedControllerRelease(candidate: Any?): Boolean {
         if (!enabled || candidate == null || candidate !== videoContext.get())
             return false
-        if (!shouldHoldOriginalOnLeave(videoEngine.get())) return false
+        val hold = backgroundTransition.canKeepPreparedOnStop(
+            ownerActivity = foregroundActivity.get(),
+            ownerEngine = videoEngine.get(),
+            explicitPauseEpoch = explicitPauseEpoch,
+            explicitCommand = userCommandInProgress,
+            ownershipSwitch = SinglePlaybackOwner.isOwnershipTransition(),
+            nowMs = SystemClock.uptimeMillis())
+        if (!hold) return false
+        backgroundTransition.recordHeld()
         LogUtil.info("系统媒体: 保护原生下一集预备播放器（仅当前后台过渡）")
         LogUtil.incr("systemMediaPreparedControllersHeld")
         FeatureTrace.event("background", "prepared_controller_release",
