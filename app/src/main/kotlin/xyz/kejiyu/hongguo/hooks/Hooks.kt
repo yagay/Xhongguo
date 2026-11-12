@@ -6572,6 +6572,65 @@ object Hooks {
                         name + ":" + e.javaClass.simpleName)
                 }
             }
+            // The real Series adapter is adapter.f, which OVERRIDES
+            // U1(String) and r4(int); base adapter.a.U1 logs alone miss
+            // the outer native autoplay policy. The base s4(int) is the
+            // original selection updater that writes adapter.a.D.
+            try {
+                val fullSeriesAdapter = Class.forName(
+                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
+                    false, classLoader)
+                val baseSeriesAdapter = Class.forName(
+                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
+                    false, classLoader)
+                val boundaries = listOf(
+                    Triple(fullSeriesAdapter, "U1",
+                        arrayOf<Class<*>>(String::class.java)),
+                    Triple(fullSeriesAdapter, "r4",
+                        arrayOf<Class<*>>(Int::class.javaPrimitiveType!!)),
+                    Triple(fullSeriesAdapter, "g", emptyArray<Class<*>>()),
+                    Triple(baseSeriesAdapter, "s4",
+                        arrayOf<Class<*>>(Int::class.javaPrimitiveType!!))
+                )
+                for ((idx, info) in boundaries.withIndex()) {
+                    try {
+                        val (clazz, methodName, args) = info
+                        val method = clazz.getDeclaredMethod(methodName, *args)
+                        module.hook(method)
+                            .setId("xhSeriesBusinessPage_" + idx)
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val targetPosition = if (methodName == "r4" ||
+                                    methodName == "s4")
+                                    (chain.getArg(0) as? Number)?.toInt()
+                                else null
+                                val stage = clazz.simpleName + "." + methodName
+                                try {
+                                    if (gMasterOn && gSystemMediaOn)
+                                        SystemMediaBridge.onSeriesPageSelection(
+                                            chain.thisObject, stage, "before",
+                                            targetPosition)
+                                } catch (_: Throwable) { }
+                                val original = chain.proceed()
+                                try {
+                                    if (gMasterOn && gSystemMediaOn)
+                                        SystemMediaBridge.onSeriesPageSelection(
+                                            chain.thisObject, stage, "after",
+                                            targetPosition, original)
+                                } catch (_: Throwable) { }
+                                original
+                            })
+                        installedSeriesHooks++
+                    } catch (e: Throwable) {
+                        LogUtil.warn("系统媒体: 原生选集阶段 Hook 失败 " +
+                            info.second + ":" + e.javaClass.simpleName)
+                    }
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("系统媒体: 全集原生选集观察不可用 " +
+                    e.javaClass.simpleName)
+            }
+
             // In APK dex, x05.w.onCompletion() first notifies x05.e.h2.
             // m15.a.h2 forwards to fm4.a.onCompletion() if a live
             // downstream callback exists. This is separate from U1/G4.
