@@ -6554,14 +6554,14 @@ object Hooks {
                             try {
                                 if (gMasterOn && gSystemMediaOn) {
                                     SystemMediaBridge.onSeriesAdapterCallback(
-                                        name, "before")
+                                        name, "before", chain.thisObject)
                                 }
                             } catch (_: Throwable) { }
                             val result = chain.proceed()
                             try {
                                 if (gMasterOn && gSystemMediaOn) {
                                     SystemMediaBridge.onSeriesAdapterCallback(
-                                        name, "after")
+                                        name, "after", chain.thisObject)
                                 }
                             } catch (_: Throwable) { }
                             result
