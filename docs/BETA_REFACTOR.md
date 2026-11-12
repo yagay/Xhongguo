@@ -135,6 +135,53 @@ event arrives even with preserved VideoShop lifecycle, the next step is to
 inspect the host's exact registered completion controller rather than
 guess an obfuscated next-episode method.
 
+## 2026-11-12 native APK hook-point review: Home vs direct app switch
+
+APK inspected: the previously uploaded official `红果免费短剧(1).apk`
+(~132 MB, 21 dex files). Verified native VideoShop and full-series symbols:
+
+- `VideoController.onCompletion(TTVideoEngine)`, followed by
+  `LayerHostMediaLayout.onVideoCompleted(...)` and
+  `VideoContext.onVideoCompleted(...)`, then registered app listeners.
+  Each stage is now observed **after** the original handler, so it cannot
+  substitute an artificial next-episode command.
+- `VideoContext.registerVideoPlayListener` and
+  `unregisterVideoPlayListener` (if present on target build): observer
+  hooks track listener registration/removal around the background handoff.
+- `VideoContext.onLifeCycleOnStop()` invokes
+  `releaseAllPreparedVideoControllers()`. The beta now lets the host's
+  entire `onLifeCycleOnPause` and `onLifeCycleOnStop` run, but narrowly
+  suppresses this prepared-controller cleanup only for the exact pinned
+  native owner during a short confirmed/provisional external-app handoff.
+  This avoids bypassing all host lifecycle bookkeeping.
+- `LayerHostMediaLayout.setCanPlayBackground(boolean)` writes
+  `VideoPatchLayout.canPlayBackground`, used by native `playInternal()`.
+  The beta now sets this permission during `Application.onActivityPrePaused`,
+  **before** the host's lifecycle pause; it restores the observed original
+  value on foreground return or in-app navigation.
+- The new `BackgroundTransitionState` treats Home, recents and direct
+  app switching as the same pending `ActivityPrePaused` transaction,
+  independent of optional `onUserLeaveHint`. Actual background is
+  confirmed separately with `ActivityManager.getMyMemoryState` and
+  `Activity.onStop` evidence. The host `onStop` hook proceeds before
+  module notification to preserve natural dispatch order.
+- After a verified native lifecycle pause, fall back only to the matching
+  original `VideoContext.play()`; never call bare `TTVideoEngine.play()`
+  as a normal app-switch recovery, because that can resume audio without
+  advancing the full-series business controller.
+
+This is **not** a synthetic Android HOME key event. Sending HOME would
+navigate to the launcher instead of keeping the destination app in
+foreground; calling `onUserLeaveHint` directly would not recreate real
+system lifecycle/importance transitions.
+
+Required device regression: Home / recent-app switch / direct launch of
+another app / internal feed-to-series navigation / user pause / reaching
+episode EOF. Examine `completion_stage`, `host_listener`,
+`prepared_controller_release`, `pre_pause_candidate` and
+`episode_end_stall` events. Native hook presence and Android Debug build
+must still be confirmed by CI and a real device.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
