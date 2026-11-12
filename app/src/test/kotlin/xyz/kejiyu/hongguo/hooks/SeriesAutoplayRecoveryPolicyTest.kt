@@ -33,6 +33,32 @@ class SeriesAutoplayRecoveryPolicyTest {
             eligible().copy(itemCount = 1)))
     }
 
+    @Test fun reconcilesBusinessSelectionInsteadOfSkippingAlreadyAdvancedPager() {
+        val evidence = eligible().copy(
+            currentIndex = 1, pagerIndex = 2, itemCount = 11)
+        val decision = SeriesAutoplayRecoveryPolicy.decision(evidence)
+        assertEquals(
+            SeriesAutoplayRecoveryPolicy.Action.RECONCILE_SELECTION,
+            decision?.action)
+        assertEquals(2, decision?.targetIndex)
+        // The old nextIndex() must NEVER advise moving pager to item 3.
+        assertNull(SeriesAutoplayRecoveryPolicy.nextIndex(evidence))
+    }
+
+    @Test fun neverReconcilesUnrelatedOrOutOfRangePagerDifferences() {
+        assertNull(SeriesAutoplayRecoveryPolicy.decision(
+            eligible().copy(currentIndex = 1, pagerIndex = 3)))
+        assertNull(SeriesAutoplayRecoveryPolicy.decision(
+            eligible().copy(currentIndex = 1, pagerIndex = 11,
+                itemCount = 11)))
+        assertNull(SeriesAutoplayRecoveryPolicy.decision(
+            eligible().copy(currentIndex = 1, pagerIndex = 2,
+                noNewVideoStarted = false)))
+        assertNull(SeriesAutoplayRecoveryPolicy.decision(
+            eligible().copy(currentIndex = 1, pagerIndex = 2,
+                alreadyAttempted = true)))
+    }
+
     @Test fun neverMovesAPagerWhenIndexHasAlreadyAdvanced() {
         assertNull(SeriesAutoplayRecoveryPolicy.nextIndex(
             eligible().copy(pagerIndex = 3)))
