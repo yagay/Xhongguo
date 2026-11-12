@@ -1161,6 +1161,7 @@ internal object SystemMediaBridge {
         }
         if (foregroundActivity.get() !== activity) {
             pendingExit = null
+            backgroundTransition.cancel()
             LogUtil.info("系统媒体: 已进入其他红果页面，不启动后台恢复")
             return
         }
@@ -1199,6 +1200,7 @@ internal object SystemMediaBridge {
             return
         }
         if (SinglePlaybackOwner.isOwnershipTransition()) {
+            backgroundTransition.cancel()
             LogUtil.info("系统媒体: 播放所有权正在切换，取消后台恢复")
             return
         }
@@ -1568,6 +1570,24 @@ internal object SystemMediaBridge {
             " page=" + activity.javaClass.simpleName)
     }
 
+    /** A newly constructed Hongguo Activity signals IN-APP navigation,
+     * never a task background exit. Cancel the provisional pre-pause hold
+     * before its onResume, so navigating feed/series/details is not affected.
+     */
+    fun onActivityStarting(activity: Activity?) {
+        if (!enabled || activity == null || !isVideoActivity(foregroundActivity.get()))
+            return
+        val previous = foregroundActivity.get() ?: return
+        if (activity === previous || activity.packageName != previous.packageName)
+            return
+        backgroundTransition.cancel()
+        if (pendingExit?.activity?.get() === previous &&
+            !requestedBackgroundPlayback) pendingExit = null
+        FeatureTrace.event("background", "transition", "cancelled",
+            "reason=in_app_activity", flow = mediaFlow,
+            minIntervalMs = 1200L)
+    }
+
     fun onActivityResumed(activity: Activity?) {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
@@ -1758,6 +1778,7 @@ internal object SystemMediaBridge {
             !play && reason == "notification-action") {
             explicitPauseEpoch++
             pendingExit = null
+            backgroundTransition.cancel()
             backgroundPauseGuardEngine.clear()
             backgroundPauseGuardUntil = 0L
             backgroundResumeBudget = 0
