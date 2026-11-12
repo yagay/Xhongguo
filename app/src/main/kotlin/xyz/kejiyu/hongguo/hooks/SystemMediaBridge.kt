@@ -354,9 +354,44 @@ internal object SystemMediaBridge {
         if (!relevant) return
         if (sameEngine && player != null)
             nativeSeriesPlayer = WeakReference(player)
+        val listeners = try {
+            val list = player?.javaClass?.getDeclaredField("v")?.apply {
+                isAccessible = true
+            }?.get(player) as? List<*>
+            list?.mapNotNull { (it as? WeakReference<*>)?.get() }
+        } catch (_: Throwable) { null }
+        // The player's 3 vs 2 listener totals may represent DIFFERENT
+        // engines rather than a lost observer. Log live class types only.
+        val listenerTypes = listeners?.map {
+            it.javaClass.simpleName.take(32)
+        }?.distinct()?.joinToString(",")?.take(130) ?: "unknown"
+        val callbackOwner = try {
+            player?.javaClass?.getDeclaredField("o")?.apply {
+                isAccessible = true
+            }?.get(player)
+        } catch (_: Throwable) { null }
+        val downstream = try {
+            var type = callbackOwner?.javaClass
+            var callback: Any? = null
+            while (type != null && type != Any::class.java) {
+                try {
+                    callback = type.getDeclaredField("i").apply {
+                        isAccessible = true
+                    }.get(callbackOwner)
+                    break
+                } catch (_: NoSuchFieldException) {
+                    type = type.superclass
+                }
+            }
+            callback != null
+        } catch (_: Throwable) { false }
         LogUtil.info("系统媒体: 官方全集业务回调 stage=$stage" +
             " nativeOwner=$sameEngine listeners=" + (count ?: -1) +
+            " live=" + (listeners?.size ?: -1) +
             " seriesAdapters=" + (adapters ?: -1) +
+            " listenerTypes=$listenerTypes" +
+            " holderCallback=" + (callbackOwner?.javaClass?.simpleName ?: "null") +
+            " downstreamReady=$downstream" +
             " adapterListener=$adapterListener" +
             " background=$requestedBackgroundPlayback")
         FeatureTrace.event("background", "series_native_callback", "observed",
