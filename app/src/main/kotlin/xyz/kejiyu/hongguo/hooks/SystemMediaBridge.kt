@@ -177,6 +177,9 @@ internal object SystemMediaBridge {
      * and the matching VideoShop owner. Real background is confirmed later.
      */
     private fun shouldHoldOriginalOnLeave(candidateEngine: Any?): Boolean {
+        // Once native EOF was observed, pause/release belongs to the host's
+        // NEXT episode handoff, not Android background lifecycle.
+        if (episodeMonitor.hasNativeCompletion()) return false
         val hold = backgroundTransition.canHold(
             ownerActivity = foregroundActivity.get(),
             ownerEngine = candidateEngine,
@@ -241,6 +244,7 @@ internal object SystemMediaBridge {
      * provisional handoff; a system media pause invalidates its pause epoch.
      */
     private fun seriesBusinessHandoffAllowed(player: Any?): Boolean {
+        if (episodeMonitor.hasNativeCompletion()) return false
         if (!enabled || foregroundActivity.get()?.javaClass?.name !=
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
             return false
@@ -356,6 +360,10 @@ internal object SystemMediaBridge {
      * suppress user-requested pause, foreground pause or a preload engine.
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
+        // The host can issue TTVideoEngine.pause() while advancing an
+        // episode. A blanket ten-minute background guard blocks that native
+        // transition and strands the player at duration == position.
+        if (episodeMonitor.hasNativeCompletion()) return false
         if (shouldHoldOriginalOnLeave(candidate)) {
             LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
             LogUtil.incr("systemMediaEarlyEnginePauseHeld")
@@ -1370,7 +1378,9 @@ internal object SystemMediaBridge {
         resumeAttempts = 0
         backgroundResumeBudget = 0
         backgroundPauseGuardEngine = WeakReference(engine)
-        backgroundPauseGuardUntil = now + 10L * 60_000L
+        // Only suppress pauses associated with the actual app-leave,
+        // NOT normal episode transitions throughout background playback.
+        backgroundPauseGuardUntil = now + BACKGROUND_PAUSE_GUARD_MS
         backgroundPauseSuppressed = 0
         setNativeBackgroundAllowance(true)
         val current = nativeIsPlaying(engine)
