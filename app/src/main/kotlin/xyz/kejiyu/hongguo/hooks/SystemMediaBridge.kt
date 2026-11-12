@@ -191,6 +191,22 @@ internal object SystemMediaBridge {
         return hold
     }
 
+    /** VideoShop is used on some pages, but this APK's full-series
+     * playback is x05.w, independent of VideoShop. Never protect an old
+     * or inactive VideoContext while the actual series TTVideoEngine belongs
+     * to x05.w; doing so can retain unrelated prepared decoders.
+     */
+    private fun videoShopOwnsPlayingEngine(candidate: Any?): Boolean {
+        if (candidate == null) return false
+        val actual = videoEngine.get() ?: return false
+        return try {
+            val engine = candidate.javaClass.methods.firstOrNull {
+                it.name == "getVideoEngine" && it.parameterCount == 0
+            }?.invoke(candidate)
+            engine != null && engine === actual
+        } catch (_: Throwable) { false }
+    }
+
     /**
      * Targeted APK hook: VideoContext.onLifeCycleOnStop() invokes
      * releaseAllPreparedVideoControllers(). Keep that exact prepared-video
@@ -203,8 +219,8 @@ internal object SystemMediaBridge {
      * the same VideoContext instance and pinned video engine.
      */
     fun shouldHoldPreparedControllerRelease(candidate: Any?): Boolean {
-        if (!enabled || candidate == null || candidate !== videoContext.get())
-            return false
+        if (!enabled || candidate == null || candidate !== videoContext.get() ||
+            !videoShopOwnsPlayingEngine(candidate)) return false
         val hold = backgroundTransition.canKeepPreparedOnStop(
             ownerActivity = foregroundActivity.get(),
             ownerEngine = videoEngine.get(),
@@ -1856,6 +1872,7 @@ internal object SystemMediaBridge {
         val active = controller.get()
         val context = videoContext.get()
         if (candidate != null && (candidate === active || candidate === context) &&
+            videoShopOwnsPlayingEngine(candidate) &&
             shouldHoldOriginalOnLeave(videoEngine.get())) {
             LogUtil.info("系统媒体: 离开红果前保留原生 VideoShop.pause")
             LogUtil.incr("systemMediaEarlyVideoShopPauseHeld")
@@ -1865,7 +1882,8 @@ internal object SystemMediaBridge {
             !requestedBackgroundPlayback || !knownPlaying) return false
         val now = SystemClock.uptimeMillis()
         if (now - leaveAt !in 0L..BACKGROUND_PAUSE_GUARD_MS) return false
-        if (candidate !== active && candidate !== context) return false
+        if ((candidate !== active && candidate !== context) ||
+            !videoShopOwnsPlayingEngine(candidate)) return false
         LogUtil.info("系统媒体: 忽略后台切换引发的 " +
             candidate.javaClass.simpleName + ".pause")
         LogUtil.incr("systemMediaLifecyclePauseGuard")
