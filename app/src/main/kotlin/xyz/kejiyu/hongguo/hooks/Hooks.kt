@@ -6429,6 +6429,36 @@ object Hooks {
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
             var installedSeriesHooks = 0
 
+            // Capture the actual business player as soon as it starts.
+            // x05.w.H() exposes its TTVideoEngine; all ownership checks
+            // require that engine to be the same native instance observed
+            // by the module's existing playback owner.
+            for (name in listOf("resume", "L")) {
+                try {
+                    val method = if (name == "L")
+                        nativeSeries.getDeclaredMethod(name, engineClass)
+                    else nativeSeries.getDeclaredMethod(name)
+                    module.hook(method)
+                        .setId("xhSeriesBusiness_" + name)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn)
+                                    SystemMediaBridge.onSeriesNativeCallback(
+                                        if (name == "L") "engine_bound"
+                                        else "business_resumed",
+                                        chain.thisObject)
+                            } catch (_: Throwable) { }
+                            result
+                        })
+                    installedSeriesHooks++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 官方全集播放入口 Hook 失败 " +
+                        name + ":" + e.javaClass.simpleName)
+                }
+            }
+
             val nativePause = nativeSeries.getDeclaredMethod("pause")
             module.hook(nativePause)
                 .setId("xhSeriesBusinessPause")
