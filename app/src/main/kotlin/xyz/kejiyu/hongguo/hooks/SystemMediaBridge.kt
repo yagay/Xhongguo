@@ -90,6 +90,7 @@ internal object SystemMediaBridge {
         val nativeAtCapture: Boolean?,
         val reason: String,
         val explicitPauseEpochAtCapture: Long,
+        val videoContext: WeakReference<Any>,
         var stopped: Boolean = false
     )
     @Volatile private var pendingExit: ExitSnapshot? = null
@@ -1057,6 +1058,7 @@ internal object SystemMediaBridge {
             recent?.at ?: now, wasPlaying,
             native ?: recent?.nativeAtCapture, reason,
             recent?.explicitPauseEpochAtCapture ?: explicitPauseEpoch,
+            WeakReference(videoContext.get()),
             recent?.stopped == true
         )
         pendingExit = snapshot
@@ -1252,37 +1254,52 @@ internal object SystemMediaBridge {
         LogUtil.info("系统媒体: 后台恢复依据" +
             " native=$current lifecyclePause=$lifecyclePaused" +
             " beforeLeave=${snapshot.wasPlaying} sameEngine=true")
-        // Single verified recovery of the SAME pinned engine only.
-        // Never fall back to VideoContext/Controller or another audio player.
-        val playMethod = engine.javaClass.methods.firstOrNull {
-            it.name == "play" && it.parameterCount == 0 &&
-                it.returnType == Void.TYPE
-        } ?: run {
-            LogUtil.warn("系统媒体: 离开前原生引擎没有安全的 play()")
-            LogUtil.incr("systemMediaBackgroundNoPlayMethod")
+        // Direct TTVideoEngine.play() can resume audio while bypassing the
+        // host's completion/next-episode controller. Never replay the bare
+        // decoder after an Activity lifecycle pause. Resume via the ORIGINAL
+        // VideoContext observed before this background transition instead.
+        val nativeContext = snapshot.videoContext.get()
+        val stillSameContext = nativeContext != null &&
+            videoContext.get() === nativeContext
+        val hostPlay = if (stillSameContext)
+            nativeContext?.javaClass?.methods?.firstOrNull {
+                it.name == "play" && it.parameterCount == 0 &&
+                    it.returnType == Void.TYPE
+            } else null
+        if (hostPlay == null) {
+            LogUtil.warn("系统媒体: 已确认后台但无匹配的原生 VideoContext.play();" +
+                " 不调用裸 TTVideoEngine.play() 避免损坏自动续集")
+            LogUtil.incr("systemMediaBackgroundNoHostPlay")
+            FeatureTrace.event("background", "resume_command", "degraded",
+                "hasOriginalContext=" + (nativeContext != null) +
+                    ",sameContext=" + stillSameContext,
+                flow = mediaFlow)
             return
         }
         try {
-            playMethod.invoke(engine)
-            LogUtil.info("系统媒体: 切换 App 后恢复同一 TTVideoEngine（仅一次）")
+            hostPlay.invoke(nativeContext)
+            LogUtil.info("系统媒体: 经原生 VideoContext 恢复同一视频控制链" +
+                " ratherThan=TTVideoEngine.play")
             LogUtil.incr("systemMediaAppSwitchRecovery")
             FeatureTrace.event("background", "resume_command", "sent",
-                "sameEngine=true", flow = mediaFlow)
+                "sameEngine=true,route=video_context", flow = mediaFlow)
             handler.postDelayed({
                 if (enabled && requestedBackgroundPlayback &&
-                    videoEngine.get() === engine) {
-                    val confirmed = nativeIsPlaying(engine)
-                    LogUtil.info("系统媒体: 切换 App 恢复校验 playing=$confirmed")
+                    videoEngine.get() === engine &&
+                    snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch) {
+                    val confirmed = nativeIsPlaying(nativeContext)
+                    LogUtil.info("系统媒体: VideoContext 恢复校验 playing=$confirmed")
                     FeatureTrace.event("background", "resume_check",
                         if (confirmed == true) "ok" else "degraded",
                         "nativeKnown=" + (confirmed != null),
                         flow = mediaFlow)
                     if (confirmed != null) onNativePlayback(
-                        confirmed, "app-switch-recovery-check", engine)
+                        confirmed, "app-switch-host-recovery-check",
+                        nativeContext)
                 }
             }, 430L)
         } catch (e: Throwable) {
-            LogUtil.warn("系统媒体: 切换 App 恢复原生引擎失败 " +
+            LogUtil.warn("系统媒体: 原生 VideoContext 恢复失败 " +
                 e.javaClass.simpleName)
             LogUtil.incr("systemMediaAppSwitchRecoveryFailed")
             FeatureTrace.event("background", "resume_command", "fail",
