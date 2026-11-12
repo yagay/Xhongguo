@@ -316,6 +316,74 @@ internal object SystemMediaBridge {
     private var lastProgressDiagnosticAt = 0L
     private val episodeMonitor = BackgroundEpisodeMonitor()
 
+    /**
+     * APK-verified completion stages:
+     * VideoController.onCompletion(engine) ->
+     * LayerHostMediaLayout.onVideoCompleted(inquirer, entity) ->
+     * VideoContext.onVideoCompleted(inquirer, entity) ->
+     * IVideoEngineStateListener.onVideoCompleted.
+     * Log AFTER chain.proceed() so native autoplay behavior stays untouched.
+     */
+    fun onHostCompletionStage(stage: String, candidate: Any?) {
+        if (!enabled || candidate == null) return
+        val matched = when (stage) {
+            "controller" -> candidate === controller.get()
+            "layer" -> candidate === layer.get()
+            "context" -> candidate === videoContext.get()
+            else -> false
+        }
+        val engine = try {
+            candidate.javaClass.methods.firstOrNull { method ->
+                method.name == "getVideoEngine" && method.parameterCount == 0
+            }?.invoke(candidate)
+        } catch (_: Throwable) { null }
+        val sameEngine = engine != null && engine === videoEngine.get()
+        val currentPage = foregroundActivity.get()
+        LogUtil.info("系统媒体: APK 原生完成事件阶段 stage=$stage" +
+            " matched=$matched sameEngine=$sameEngine" +
+            " background=$requestedBackgroundPlayback" +
+            " page=" + (currentPage?.javaClass?.simpleName ?: "none"))
+        FeatureTrace.event("background", "completion_stage", "observed",
+            "stage=" + stage + ",owner=" + matched +
+                ",sameEngine=" + sameEngine +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow)
+    }
+
+    /** Observe the host's registrations without changing any listener.
+     * This distinguishes an absent completion callback from a listener
+     * unregistered by the ShortSeriesActivity lifecycle.
+     */
+    fun onHostVideoListener(action: String, host: Any?, listener: Any?) {
+        if (!enabled || host == null || listener == null) return
+        if (host !== videoContext.get()) return
+        val ownerName = listener.javaClass.name.take(100)
+        LogUtil.info("系统媒体: 原生短剧播放监听器 $action" +
+            " listenerClass=$ownerName background=$requestedBackgroundPlayback")
+        FeatureTrace.event("background", "host_listener", "observed",
+            "action=" + action + ",shortSeries=" +
+                ownerName.contains("shortvideo") +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow, minIntervalMs = 200L)
+    }
+
+    fun onSeriesFragmentStopped(fragment: Any?) {
+        if (!enabled || fragment == null) return
+        val currentIndex = reflectNumber(fragment, "getCurrentPosition")?.toLong()
+        val listSize = try {
+            (fragment.javaClass.methods.firstOrNull {
+                it.name == "getDataList" && it.parameterCount == 0
+            }?.invoke(fragment) as? List<*>)?.size
+        } catch (_: Throwable) { null }
+        FeatureTrace.event("background", "series_fragment_stop", "observed",
+            "hasIndex=" + (currentIndex != null) +
+                ",hasItems=" + (listSize != null && listSize > 0) +
+                ",prePauseCandidate=" +
+                backgroundTransition.isProvisional() +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow)
+    }
+
     /** Called AFTER the host's original TTVideoEngine callback proceeds.
      * A completion event is evidence only; never replay the video here.
      */
