@@ -242,6 +242,69 @@ episode number/URL or forced next-episode command has been added.
 Full Gradle Debug build and real-device autoplay must still be tested.
 The original `main` branch is unaffected.
 
+## 2026-11-12 07:41 real x05.w EOF reaches adapter but does not advance
+
+Source: uploaded `Xhongguo-diagnostic-20261112-074103.zip` and
+offline DEX disassembly of official `红果免费短剧(1).apk`.
+
+The new beta hooks are installed (`x05.w/adapter hooks=8` in this
+reproduction). 07:40:27/28: `ShortSeriesActivity` left for background,
+`x05.w.pause` was held, and background progress kept moving.
+07:40:57: exact native `x05.w.onCompletion` fired, and the host
+`adapter.a.U1(String)` entered and returned successfully. 07:41:02:
+`completion_but_no_next` was reported. No next `TTVideoEngine.play`
+was observed.
+
+**Correction to earlier inference:** the APK's `adapter.a.U1()` calls
+`G4()` only behind `J3() != 1` and `b4()` guards. `G4()` plays the
+CURRENT holder (it does not choose the next episode). Missing G4 does
+not prove a broken autoplay callback. Also the earlier `listeners=3`
+log was tied to a previous video engine; `listeners=2` at EOF is not
+proof that a listener disappeared during background.
+
+APK findings:
+- The live `ShortSeriesSingleFragment.nh()` returns `adapter.f`,
+  a subclass of `adapter.a`. The old exact-class listener checks
+  incorrectly reported `seriesAdapters=0` and would skip protecting
+  the real subclass listener.
+- `x05.w.onCompletion` first calls `x05.e.h2(x05.f)`, when set.
+  `m15.a.h2` forwards through a non-null `fm4.a` callback.
+  This is independent of the `vm4.a.U1` observer fanout.
+- `adapter.a` has `D` (current index), `k` (native `ViewPager2`)
+  and inherited `gp4.f.h` (actual episode data). A native, explicit
+  viewpager item transition is therefore possible WITHOUT guessing
+  the next episode's URL or calling G4 on the wrong item.
+
+Beta changes:
+1. Match native series listeners by the adapter.a superclass rather
+   than exact runtime class; add live listener type and holder callback
+   availability diagnostics.
+2. Observe `m15.a.h2` both before and after original host dispatch.
+   Record the real `U1` branch conditions (J3 and b4) as diagnostics.
+3. Keep native completion/episode switching unmodified by default.
+   ONLY when background playback stalls at true EOF for 5.5 seconds,
+   the same engine is still active, the same ShortSeriesActivity still
+   owns playback, no new play occurred, and no media pause was requested,
+   look up the official adapter's loaded episode count, current index
+   and native ViewPager2 index. If the indexes match AND a loaded next
+   episode exists, request exactly one `ViewPager2.setCurrentItem(+1)`
+   via the host's own UI navigation. No synthetic URL, engine, G4
+   call or repeated replay. On the last episode or ambiguous data,
+   skip with a reason.
+4. Resolve inherited adapter fields by superclass traversal (the
+   runtime object is adapter.f, not adapter.a).
+
+Expected next-device logging includes
+`series_native_callback` listener classes/holder callback readiness,
+`series_holder_completion`, `U1 条件 probe`, and
+`series_pager_recovery` as `requested`, `degraded` or `fail`.
+The `requested` outcome means the host pager was instructed, NOT that
+a new episode definitively played: verify a real new engine/play event.
+
+The bounded recovery policy was checked with a local Kotlin compilation
+and 5 basic guard assertions. Full Android Debug CI and on-device
+behavior remain unverified. The `main` branch was not changed.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
