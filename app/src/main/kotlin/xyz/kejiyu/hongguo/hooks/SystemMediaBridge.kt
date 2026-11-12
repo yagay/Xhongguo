@@ -568,7 +568,7 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null || videoEngine.get() !== candidate ||
             episodeMonitor.hasNativeCompletion()) return
         episodeMonitor.onNativeCompletion()
-        LogUtil.info("系统媒体: 宿主原生 onCompletion 已执行" +
+        LogUtil.info("系统媒体: 宿主原生 onCompletion 已触发" +
             " background=$requestedBackgroundPlayback")
         FeatureTrace.event("background", "native_completion", "observed",
             "sameEngine=true", flow = mediaFlow)
