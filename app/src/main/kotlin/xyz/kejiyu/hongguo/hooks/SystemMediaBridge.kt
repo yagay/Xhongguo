@@ -253,6 +253,19 @@ internal object SystemMediaBridge {
     private const val SERIES_NATIVE_ADAPTER =
         "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
 
+    /** The real ShortSeriesSingleFragment.nh() returns adapter.f, which
+     * extends the APK's base adapter.a. A name-equality check made the old
+     * listener preservation and adapter count both silently fail.
+     */
+    private fun isSeriesAdapter(listener: Any?): Boolean {
+        var type = listener?.javaClass
+        while (type != null && type != Any::class.java) {
+            if (type.name == SERIES_NATIVE_ADAPTER) return true
+            type = type.superclass
+        }
+        return false
+    }
+
     private fun seriesPlayerEngine(player: Any?): Any? {
         if (player?.javaClass?.name != SERIES_NATIVE_PLAYER) return null
         return try {
@@ -302,7 +315,7 @@ internal object SystemMediaBridge {
      * Never fabricate an observer or synthesize a next-episode command.
      */
     fun shouldHoldSeriesListenerRemoval(player: Any?, listener: Any?): Boolean {
-        if (listener?.javaClass?.name != SERIES_NATIVE_ADAPTER ||
+        if (!isSeriesAdapter(listener) ||
             !seriesBusinessHandoffAllowed(player)) return false
         backgroundTransition.recordHeld()
         LogUtil.info("系统媒体: 保留当前全集自动续集监听器 x05.w.f")
@@ -330,14 +343,13 @@ internal object SystemMediaBridge {
             } catch (_: Throwable) { null }
             count = list?.size
             adapters = list?.count { entry ->
-                (entry as? WeakReference<*>)?.get()?.javaClass?.name ==
-                    SERIES_NATIVE_ADAPTER
+                isSeriesAdapter((entry as? WeakReference<*>)?.get())
             }
         } else {
             count = null
             adapters = null
         }
-        val adapterListener = listener?.javaClass?.name == SERIES_NATIVE_ADAPTER
+        val adapterListener = isSeriesAdapter(listener)
         val relevant = sameEngine || adapterListener
         if (!relevant) return
         if (sameEngine && player != null)
