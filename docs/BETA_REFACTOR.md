@@ -305,6 +305,61 @@ The bounded recovery policy was checked with a local Kotlin compilation
 and 5 basic guard assertions. Full Android Debug CI and on-device
 behavior remain unverified. The `main` branch was not changed.
 
+## 2026-11-12 08:01:09 background EOF: native pager ahead of business selection
+
+Reproduction from user ZIP `Xhongguo-diagnostic-20261112-080109.zip`
+(official app 7.3.5.32, beta):
+
+- At **08:00:20**, `ShortSeriesActivity` left for the background.
+  The original `x05.w.pause()` was held during the short handoff.
+- At **08:00:23**, native playback had advanced, confirming working
+  background transport.
+- At **08:00:53**, `x05.w.onCompletion()` fired, followed by
+  `m15.a.h2()` and native adapter `U1(String)`.
+- At **08:00:58**, `completion_but_no_next` fired and the previous
+  fallback reported `current=1 pager=2 available=11 eofNear=true`,
+  `reason=safety_guard,indexAligned=false,hasNext=true`.
+
+This is a **business selection lag**, not an invitation to move the pager
+again: official `ViewPager2.currentItem` is **already index 2**, while
+`adapter.a.D` remains **index 1**. A blind
+`setCurrentItem(D+1)` may be a no-op, and a blind
+`setCurrentItem(pager+1)` skips a real episode.
+
+Verified by inspecting official APK DEX (`classes4.dex`):
+- `adapter.a.D` is `currentSelectPosition`, while
+  `adapter.a.k` is `ViewPager2`.
+- `adapter.f.r4(int)` is public and overrides
+  `adapter.a.r4(int)`; the base calls `s4(int)`.
+- `adapter.a.s4(int)` writes the new selection into
+  `D`, handles the previous holder, and runs the native page-selected
+  pipeline; `G4()` plays the current holder, it does NOT select a new
+  episode.
+- `adapter.f.U1(String)` has additional outer autoplay logic after
+  its `super.U1(String)`; tracing only the base `U1` was incomplete.
+
+Changes in beta:
+- The bounded `SeriesAutoplayRecoveryPolicy` now differentiates
+  `ADVANCE_PAGER` for `D == pager`, and
+  `RECONCILE_SELECTION` for exactly `pager == D+1`.
+  Both still require native completion, a stable 5–18-second EOF window,
+  the same engine and Activity, loaded next item, and an unchanged user
+  pause epoch. Larger or unclear index differences are rejected.
+- For the **observed case** `D=1,pager=2`, the module calls the
+  original public `adapter.f.r4(2)` exactly ONCE and records whether
+  `D` updated. It does **not** advance ViewPager2 again, simulate a
+  HOME press, call G4 directly, or guess episode URLs.
+- Adds optional entry/exit diagnostics for
+  `adapter.f.U1(String)`, `adapter.f.r4(int)`,
+  `adapter.f.g()` (scroll-next) and `adapter.a.s4(int)`,
+  with the business index, actual pager index, and native page visibility
+  `j15.d.y4()`. The logs will identify any hidden-page gate that still
+  blocks resuming the selected episode.
+
+A local Kotlin compilation ran 9 pure-policy assertions, including the
+`D=1,pager=2` reconciliation and no-skip behavior. Full Android Debug
+CI and real-device playback are not yet confirmed; only `beta` changed.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
