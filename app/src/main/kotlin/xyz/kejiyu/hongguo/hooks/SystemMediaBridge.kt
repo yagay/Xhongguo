@@ -55,6 +55,9 @@ internal object SystemMediaBridge {
     private var layer = WeakReference<Any>(null)
     private var videoContext = WeakReference<Any>(null)
     private var videoEngine = WeakReference<Any>(null)
+    // x05.w is the official full-series business player. Unlike
+    // VideoContext it owns vm4.a.U1 -> next episode callbacks.
+    private var nativeSeriesPlayer = WeakReference<Any>(null)
     // No feature writes directly to a second MediaSession. All pages pass
     // through this common refresh and publication lifecycle.
     private val mediaPresentation = MediaPresentationState()
@@ -311,6 +314,8 @@ internal object SystemMediaBridge {
         val adapterListener = listener?.javaClass?.name == SERIES_NATIVE_ADAPTER
         val relevant = sameEngine || adapterListener
         if (!relevant) return
+        if (sameEngine && player != null)
+            nativeSeriesPlayer = WeakReference(player)
         LogUtil.info("系统媒体: 官方全集业务回调 stage=$stage" +
             " nativeOwner=$sameEngine listeners=" + (count ?: -1) +
             " seriesAdapters=" + (adapters ?: -1) +
@@ -1472,48 +1477,63 @@ internal object SystemMediaBridge {
         LogUtil.info("系统媒体: 后台恢复依据" +
             " native=$current lifecyclePause=$lifecyclePaused" +
             " beforeLeave=${snapshot.wasPlaying} sameEngine=true")
-        // Direct TTVideoEngine.play() can resume audio while bypassing the
-        // host's completion/next-episode controller. Never replay the bare
-        // decoder after an Activity lifecycle pause. Resume via the ORIGINAL
-        // VideoContext observed before this background transition instead.
-        val nativeContext = snapshot.videoContext.get()
-        val stillSameContext = nativeContext != null &&
-            videoContext.get() === nativeContext
-        val hostPlay = if (stillSameContext)
-            nativeContext?.javaClass?.methods?.firstOrNull {
-                it.name == "play" && it.parameterCount == 0 &&
-                    it.returnType == Void.TYPE
-            } else null
+        // The full-series native business player is x05.w, not VideoShop.
+        // Its resume() re-enters the same host-owned controller and preserves
+        // vm4.a.U1 / adapter.G4() autoplay. Fallback to VideoContext.play()
+        // only if it ACTUALLY wraps this exact TTVideoEngine instance.
+        val nativeSeries = nativeSeriesPlayer.get()?.takeIf { player ->
+            seriesPlayerEngine(player) === engine &&
+                activity.javaClass.name ==
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        }
+        val candidateContext = snapshot.videoContext.get()
+        val contextEngine = try {
+            candidateContext?.javaClass?.methods?.firstOrNull {
+                it.name == "getVideoEngine" && it.parameterCount == 0
+            }?.invoke(candidateContext)
+        } catch (_: Throwable) { null }
+        val nativeContext = candidateContext?.takeIf {
+            it === videoContext.get() && contextEngine === engine
+        }
+        val host = nativeSeries ?: nativeContext
+        val hostMethod = if (nativeSeries != null) "resume" else "play"
+        val hostPlay = host?.javaClass?.methods?.firstOrNull {
+            it.name == hostMethod && it.parameterCount == 0 &&
+                it.returnType == Void.TYPE
+        }
         if (hostPlay == null) {
-            LogUtil.warn("系统媒体: 已确认后台但无匹配的原生 VideoContext.play();" +
+            LogUtil.warn("系统媒体: 已确认后台但无匹配的原生业务恢复入口;" +
                 " 不调用裸 TTVideoEngine.play() 避免损坏自动续集")
             LogUtil.incr("systemMediaBackgroundNoHostPlay")
             FeatureTrace.event("background", "resume_command", "degraded",
-                "hasOriginalContext=" + (nativeContext != null) +
-                    ",sameContext=" + stillSameContext,
+                "hasNativeSeriesPlayer=" + (nativeSeries != null) +
+                    ",hasMatchingVideoContext=" + (nativeContext != null),
                 flow = mediaFlow)
             return
         }
         try {
-            hostPlay.invoke(nativeContext)
-            LogUtil.info("系统媒体: 经原生 VideoContext 恢复同一视频控制链" +
-                " ratherThan=TTVideoEngine.play")
+            hostPlay.invoke(host)
+            LogUtil.info("系统媒体: 经原生业务播放器恢复同一视频控制链" +
+                " route=" + (if (nativeSeries != null) "x05.w.resume" else
+                    "VideoContext.play"))
             LogUtil.incr("systemMediaAppSwitchRecovery")
             FeatureTrace.event("background", "resume_command", "sent",
-                "sameEngine=true,route=video_context", flow = mediaFlow)
+                "sameEngine=true,route=" +
+                    (if (nativeSeries != null) "x05.w" else "video_context"),
+                flow = mediaFlow)
             handler.postDelayed({
                 if (enabled && requestedBackgroundPlayback &&
                     videoEngine.get() === engine &&
                     snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch) {
-                    val confirmed = nativeIsPlaying(nativeContext)
-                    LogUtil.info("系统媒体: VideoContext 恢复校验 playing=$confirmed")
+                    val confirmed = nativeIsPlaying(host)
+                    LogUtil.info("系统媒体: 原生业务播放器恢复校验 playing=$confirmed")
                     FeatureTrace.event("background", "resume_check",
                         if (confirmed == true) "ok" else "degraded",
                         "nativeKnown=" + (confirmed != null),
                         flow = mediaFlow)
                     if (confirmed != null) onNativePlayback(
                         confirmed, "app-switch-host-recovery-check",
-                        nativeContext)
+                        host)
                 }
             }, 430L)
         } catch (e: Throwable) {
@@ -2154,6 +2174,7 @@ internal object SystemMediaBridge {
         layer.clear()
         videoContext.clear()
         videoEngine.clear()
+        nativeSeriesPlayer.clear()
         foregroundActivity.clear()
         originalBackgroundFlag = null
         originalBackgroundHost.clear()
