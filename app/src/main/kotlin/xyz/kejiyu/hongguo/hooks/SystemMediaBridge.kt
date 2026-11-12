@@ -552,8 +552,8 @@ internal object SystemMediaBridge {
                     positionMs >= durationMs - 350L,
                 alreadyAttempted = nativeEofRecoveryAttempted
             )
-            val next = SeriesAutoplayRecoveryPolicy.nextIndex(evidence)
-            if (next == null) {
+            val decision = SeriesAutoplayRecoveryPolicy.decision(evidence)
+            if (decision == null) {
                 LogUtil.info("系统媒体: 后台自然连播未恢复；原生选集校验未通过" +
                     " current=$current pager=$pagerPosition" +
                     " available=$count eofNear=" + evidence.nearRealNativeEnd)
@@ -565,18 +565,44 @@ internal object SystemMediaBridge {
                 return
             }
             nativeEofRecoveryAttempted = true
-            // Native ViewPager2 triggers the host's own page-selection
-            // callbacks. Do NOT call adapter.G4, native TTVideoEngine.play,
-            // or invent a next-video URL/ID.
-            pager.javaClass.getMethod("setCurrentItem",
-                Int::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType).invoke(pager, next, false)
-            LogUtil.info("系统媒体: 后台结尾停滞，已请求官方选集切换" +
-                " current=$current next=$next total=$count")
+            if (decision.action ==
+                SeriesAutoplayRecoveryPolicy.Action.RECONCILE_SELECTION) {
+                // Log 08:00:58 showed D=1 yet ViewPager2.currentItem=2.
+                // The UI page is ALREADY on the next episode. Moving the
+                // pager again would silently skip an episode. Instead run
+                // the official adapter.f.r4(position), which calls
+                // adapter.a.r4/s4 to update D and select the existing page.
+                val nativeSelection = adapter.javaClass.getMethod(
+                    "r4", Int::class.javaPrimitiveType)
+                val accepted = nativeSelection.invoke(
+                    adapter, decision.targetIndex) as? Boolean
+                val updated = (inheritedFieldValue(adapter, "D") as? Number)
+                    ?.toInt()
+                LogUtil.info("系统媒体: 后台选集页面已前进，补齐官方业务选中回调" +
+                    " old=$current pager=$pagerPosition" +
+                    " new=$updated accepted=$accepted")
+                FeatureTrace.event("background", "series_pager_recovery",
+                    if (updated == decision.targetIndex) "requested"
+                    else "degraded",
+                    "route=adapter_r4,indexUpdated=" +
+                        (updated == decision.targetIndex) +
+                        ",accepted=" + accepted,
+                    flow = mediaFlow)
+            } else {
+                // The pager itself remains on D: request only the ONE
+                // loaded next item through the host's native ViewPager2.
+                pager.javaClass.getMethod("setCurrentItem",
+                    Int::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType).invoke(
+                    pager, decision.targetIndex, false)
+                LogUtil.info("系统媒体: 后台结尾停滞，已请求官方选集切换" +
+                    " current=$current next=" + decision.targetIndex +
+                    " total=$count")
+                FeatureTrace.event("background", "series_pager_recovery",
+                    "requested", "route=native_viewpager2,hasNext=true",
+                    flow = mediaFlow)
+            }
             LogUtil.incr("systemMediaSeriesPagerRecovery")
-            FeatureTrace.event("background", "series_pager_recovery",
-                "requested", "route=native_viewpager2,hasNext=true",
-                flow = mediaFlow)
         } catch (e: Throwable) {
             nativeEofRecoveryAttempted = true
             LogUtil.warn("系统媒体: 原生选集补救失败 " +
