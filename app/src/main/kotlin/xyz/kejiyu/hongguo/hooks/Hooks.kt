@@ -6417,6 +6417,126 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
+        // Official 7.3.5.32 full-series playback is NOT driven by the
+        // VideoShop VideoContext completion route. APK DEX confirmed:
+        // x05.w.onCompletion(TTVideoEngine) -> vm4.a.U1(String)
+        // -> v2.view.adapter.a.U1(String) -> G4().
+        // Hook those existing native boundaries rather than simulating HOME.
+        try {
+            val nativeSeries = Class.forName("x05.w", false, classLoader)
+            val nativeListener = Class.forName("vm4.a", false, classLoader)
+            val engineClass = Class.forName(
+                "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
+            var installedSeriesHooks = 0
+
+            val nativePause = nativeSeries.getDeclaredMethod("pause")
+            module.hook(nativePause)
+                .setId("xhSeriesBusinessPause")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn &&
+                        SystemMediaBridge.shouldHoldSeriesBusinessPause(
+                            chain.thisObject)) return@Hooker null
+                    chain.proceed()
+                })
+            installedSeriesHooks++
+
+            // APK x05.w.f(listener) removes a WeakReference;
+            // v(listener) adds it. Preserve ONLY the active short-series
+            // adapter listener while the original Activity is backgrounding.
+            for (name in listOf("f", "v")) {
+                try {
+                    val method = nativeSeries.getDeclaredMethod(name, nativeListener)
+                    module.hook(method)
+                        .setId("xhSeriesListener_" + name)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val listener = try { chain.getArg(0) }
+                                catch (_: Throwable) { null }
+                            if (name == "f" && gMasterOn && gSystemMediaOn &&
+                                SystemMediaBridge.shouldHoldSeriesListenerRemoval(
+                                    chain.thisObject, listener)) {
+                                return@Hooker null
+                            }
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn) {
+                                    SystemMediaBridge.onSeriesNativeCallback(
+                                        if (name == "f") "listener_removed"
+                                        else "listener_registered",
+                                        chain.thisObject, listener)
+                                }
+                            } catch (_: Throwable) { }
+                            result
+                        })
+                    installedSeriesHooks++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 官方全集监听器 Hook 失败 " +
+                        name + ":" + e.javaClass.simpleName)
+                }
+            }
+
+            val complete = nativeSeries.getDeclaredMethod(
+                "onCompletion", engineClass)
+            module.hook(complete)
+                .setId("xhSeriesNativeCompletion")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    try {
+                        if (gMasterOn && gSystemMediaOn)
+                            SystemMediaBridge.onSeriesNativeCallback(
+                                "onCompletion_before", chain.thisObject)
+                    } catch (_: Throwable) { }
+                    val result = chain.proceed()
+                    try {
+                        if (gMasterOn && gSystemMediaOn)
+                            SystemMediaBridge.onSeriesNativeCallback(
+                                "onCompletion_after", chain.thisObject)
+                    } catch (_: Throwable) { }
+                    result
+                })
+            installedSeriesHooks++
+
+            val adapter = Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
+                false, classLoader)
+            for (name in listOf("U1", "G4")) {
+                try {
+                    val method = if (name == "U1")
+                        adapter.getDeclaredMethod(name, String::class.java)
+                    else adapter.getDeclaredMethod(name)
+                    module.hook(method)
+                        .setId("xhSeriesAdapter_" + name)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            try {
+                                if (gMasterOn && gSystemMediaOn) {
+                                    SystemMediaBridge.onSeriesAdapterCallback(
+                                        name, "before")
+                                }
+                            } catch (_: Throwable) { }
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn) {
+                                    SystemMediaBridge.onSeriesAdapterCallback(
+                                        name, "after")
+                                }
+                            } catch (_: Throwable) { }
+                            result
+                        })
+                    installedSeriesHooks++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 官方全集适配器 Hook 失败 " +
+                        name + ":" + e.javaClass.simpleName)
+                }
+            }
+            LogUtil.info("  ✓ 官方全集 x05.w/adapter 自动续集观察与保活 Hook 数=" +
+                installedSeriesHooks)
+        } catch (e: Throwable) {
+            LogUtil.warn("  官方全集 x05.w Hook 不可用 " +
+                e.javaClass.simpleName + ":" + e.message)
+        }
+
         // Read stable SaasVideoDetailModel objects rather than guessing an
         // obfuscated uo4.y0.x Runnable which is absent in Hongguo 7.3.5.32.
         // Constructor observation is a fallback; Gson.fromJson captures the
