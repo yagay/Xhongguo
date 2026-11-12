@@ -6124,6 +6124,75 @@ object Hooks {
                         method.name + ": " + e.message)
                 }
             }
+            // APK-verified VideoShop completion stage. Observe AFTER
+            // original delivery so the host's listeners still run normally.
+            for (name in listOf("onVideoPreCompleted", "onVideoCompleted")) {
+                videoContextClass.declaredMethods.filter { method ->
+                    method.name == name && method.parameterCount == 2 &&
+                        method.returnType == Void.TYPE
+                }.forEachIndexed { index, method ->
+                    try {
+                        module.hook(method)
+                            .setId("xhHostContextCompletion_${name}_$index")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val result = chain.proceed()
+                                try {
+                                    if (gMasterOn && gSystemMediaOn) {
+                                        SystemMediaBridge.onHostCompletionStage(
+                                            if (name == "onVideoCompleted") "context"
+                                            else "context_pre", chain.thisObject)
+                                    }
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 上层完成事件探测失败 " +
+                                        e.javaClass.simpleName)
+                                }
+                                result
+                            })
+                        mediaHookCount++
+                    } catch (e: Throwable) {
+                        LogUtil.warn("系统媒体: $name Hook 失败 " +
+                            e.javaClass.simpleName)
+                    }
+                }
+            }
+            // The registered listeners are the bridge from VideoContext to
+            // the Hongguo business controller. Log register/unregister
+            // separately to detect listeners lost during Activity.onStop.
+            for (name in listOf("registerVideoPlayListener",
+                "unregisterVideoPlayListener")) {
+                videoContextClass.declaredMethods.filter { method ->
+                    method.name == name && method.parameterCount == 1 &&
+                        method.returnType == Void.TYPE
+                }.forEachIndexed { index, method ->
+                    try {
+                        module.hook(method)
+                            .setId("xhHostVideoListener_${name}_$index")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                val observedListener = try { chain.getArg(0) }
+                                    catch (_: Throwable) { null }
+                                val result = chain.proceed()
+                                try {
+                                    if (gMasterOn && gSystemMediaOn) {
+                                        SystemMediaBridge.onHostVideoListener(
+                                            if (name.startsWith("unregister"))
+                                                "unregister" else "register",
+                                            chain.thisObject, observedListener)
+                                    }
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: 原生监听器探测失败 " +
+                                        e.javaClass.simpleName)
+                                }
+                                result
+                            })
+                        mediaHookCount++
+                    } catch (e: Throwable) {
+                        LogUtil.warn("系统媒体: 视频监听器 Hook 失败 " +
+                            e.javaClass.simpleName)
+                    }
+                }
+            }
             for (name in listOf("onLifeCycleOnPause", "onLifeCycleOnStop")) {
                 videoContextClass.declaredMethods.filter { it.name == name }
                     .forEachIndexed { index, method ->
