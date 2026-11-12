@@ -93,6 +93,7 @@ internal object SystemMediaBridge {
         var stopped: Boolean = false
     )
     @Volatile private var pendingExit: ExitSnapshot? = null
+    private val backgroundTransition = BackgroundTransitionState()
     private const val EXIT_SNAPSHOT_WINDOW_MS = 4800L
     // Explicit media-card pause after a snapshot cancels pending auto-resume.
     @Volatile private var explicitPauseEpoch = 0L
@@ -120,12 +121,23 @@ internal object SystemMediaBridge {
             override fun onActivityPrePaused(activity: Activity) {
                 if (!enabled || !isVideoActivity(activity)) return
                 try {
-                    if (foregroundActivity.get() === activity &&
-                        lastUserLeaveEngine.get() === videoEngine.get() &&
-                        lastUserLeaveWasPlaying) {
-                        userLeavePrePauseAt = SystemClock.uptimeMillis()
+                    val snapshot = rememberExitSnapshot(
+                        activity, "Application.prePause")
+                    val engine = snapshot?.engine?.get()
+                    if (snapshot != null && engine != null &&
+                        snapshot.wasPlaying && !activity.isFinishing &&
+                        foregroundActivity.get() === activity &&
+                        snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch) {
+                        // All exits share this provisional guard: no reliance
+                        // on Android's optional onUserLeaveHint callback.
+                        backgroundTransition.begin(activity, engine, true,
+                            explicitPauseEpoch, SystemClock.uptimeMillis())
+                        FeatureTrace.event("background", "pre_pause_candidate",
+                            "captured", "hint=" + lastUserLeaveWasPlaying +
+                                ",nativeKnown=" +
+                                (snapshot.nativeAtCapture != null),
+                            flow = mediaFlow)
                     }
-                    rememberExitSnapshot(activity, "Application.prePause")
                 } catch (e: Throwable) {
                     LogUtil.warn("系统媒体: PrePause 快照失败 " +
                         e.javaClass.simpleName)
@@ -149,35 +161,20 @@ internal object SystemMediaBridge {
     private var backgroundPauseGuardEngine = WeakReference<Any>(null)
     private var backgroundPauseGuardUntil = 0L
     private var backgroundPauseSuppressed = 0
-    private var earlyHandoffEngine = WeakReference<Any>(null)
-    private var earlyHandoffSuppressed = 0
-    private var leaveExplicitPauseEpoch = 0L
-    private var userLeavePrePauseAt = 0L
 
-    /** Protect only the exact engine captured at a genuine user-leave hint.
-     * The host can otherwise release its completion dispatcher before
-     * Activity.onStop confirms that another app is foreground.
+    /** A short provisional guard is armed by ActivityPrePaused, not by
+     * the optional onUserLeaveHint. It protects only the pinned native engine
+     * and the matching VideoShop owner. Real background is confirmed later.
      */
     private fun shouldHoldOriginalOnLeave(candidateEngine: Any?): Boolean {
-        val owner = videoEngine.get()
-        val sameEngine = candidateEngine != null && owner === candidateEngine &&
-            lastUserLeaveEngine.get() === candidateEngine &&
-            pendingExit?.engine?.get() === candidateEngine
-        val hold = BackgroundHandoffPolicy.protectOnUserLeave(
-            mediaEnabled = enabled,
-            wasPlaying = lastUserLeaveWasPlaying,
-            userPauseInProgress = userCommandInProgress ||
-                explicitPauseEpoch != leaveExplicitPauseEpoch,
-            ownershipTransition = SinglePlaybackOwner.isOwnershipTransition(),
-            samePinnedEngine = sameEngine,
-            sameVideoActivity = isVideoActivity(foregroundActivity.get()) &&
-                userLeavePrePauseAt >= lastUserLeaveAt &&
-                SystemClock.uptimeMillis() - userLeavePrePauseAt in 0L..2500L,
-            elapsedMs = SystemClock.uptimeMillis() - lastUserLeaveAt)
-        if (hold) {
-            earlyHandoffEngine = WeakReference(owner)
-            earlyHandoffSuppressed++
-        }
+        val hold = backgroundTransition.canHold(
+            ownerActivity = foregroundActivity.get(),
+            ownerEngine = candidateEngine,
+            explicitPauseEpoch = explicitPauseEpoch,
+            explicitCommand = userCommandInProgress,
+            ownershipSwitch = SinglePlaybackOwner.isOwnershipTransition(),
+            nowMs = SystemClock.uptimeMillis())
+        if (hold) backgroundTransition.recordHeld()
         return hold
     }
 
@@ -189,7 +186,7 @@ internal object SystemMediaBridge {
             method !in setOf("onLifeCycleOnPause", "onLifeCycleOnStop")) return false
         if (!shouldHoldOriginalOnLeave(videoEngine.get())) return false
         LogUtil.info("系统媒体: 保留宿主播放生命周期 method=$method" +
-            " sameEngine=true reason=user-leave")
+            " sameEngine=true reason=pre-pause")
         LogUtil.incr("systemMediaHostLifecycleHeld")
         FeatureTrace.event("background", "host_lifecycle", "held",
             "method=" + method, flow = mediaFlow)
@@ -209,7 +206,7 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
             LogUtil.incr("systemMediaEarlyEnginePauseHeld")
             FeatureTrace.event("background", "engine_pause", "held",
-                "reason=user-leave", flow = mediaFlow, minIntervalMs = 1000L)
+                "reason=pre-pause", flow = mediaFlow, minIntervalMs = 1000L)
             return true
         }
         if (!enabled || candidate == null || userCommandInProgress ||
@@ -1136,6 +1133,13 @@ internal object SystemMediaBridge {
             return
         }
         val now = SystemClock.uptimeMillis()
+        val transitionConfirmed = backgroundTransition.confirm(
+            activity, engine, explicitPauseEpoch, now)
+        FeatureTrace.event("background", "transition", "confirmed",
+            "prePause=" + transitionConfirmed +
+                ",hint=" + lastUserLeaveWasPlaying +
+                ",heldCallbacks=" + backgroundTransition.heldCount(),
+            flow = mediaFlow)
         requestedBackgroundPlayback = true
         leaveAt = now
         resumeAttempts = 0
@@ -1156,8 +1160,8 @@ internal object SystemMediaBridge {
             snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch
         val hostHeld = BackgroundHandoffPolicy.shouldTreatUnknownNativeStateAsRunning(
             confirmedBackground = true,
-            heldNativePauseOrLifecycle = earlyHandoffEngine.get() === engine &&
-                earlyHandoffSuppressed > 0,
+            heldNativePauseOrLifecycle = transitionConfirmed &&
+                backgroundTransition.heldFor(engine),
             sameEngine = videoEngine.get() === engine,
             explicitPauseUnchanged =
                 snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch,
@@ -1168,7 +1172,7 @@ internal object SystemMediaBridge {
             // low-level play() again: that path leaves the host's autoplay
             // controller behind and stalls forever on the last video frame.
             LogUtil.info("系统媒体: 宿主播放器完整保活，不重复低层 play()" +
-                " heldEvents=" + earlyHandoffSuppressed)
+                " heldEvents=" + backgroundTransition.heldCount())
             FeatureTrace.event("background", "native_lifecycle_handoff",
                 "preserved", "engine=true,playReplay=false", flow = mediaFlow)
             updateMediaNotification(true)
@@ -1472,10 +1476,6 @@ internal object SystemMediaBridge {
         // A hint is useful evidence, but not required for recents/app switches.
         // Real background confirmation happens after onPause / onStop.
         lastUserLeaveAt = SystemClock.uptimeMillis()
-        leaveExplicitPauseEpoch = explicitPauseEpoch
-        userLeavePrePauseAt = 0L
-        earlyHandoffSuppressed = 0
-        earlyHandoffEngine.clear()
         lastUserLeaveWasPlaying = true
         lastUserLeaveEngine = WeakReference(videoEngine.get())
         rememberExitSnapshot(activity, "onUserLeaveHint")
@@ -1492,9 +1492,7 @@ internal object SystemMediaBridge {
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
-        earlyHandoffEngine.clear()
-        earlyHandoffSuppressed = 0
-        userLeavePrePauseAt = 0L
+        backgroundTransition.cancel()
         episodeMonitor.reset()
         if (backgroundPauseGuardEngine.get() != null) {
             backgroundPauseGuardEngine.clear()
@@ -1847,9 +1845,7 @@ internal object SystemMediaBridge {
         lastUserLeaveAt = 0L
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
-        earlyHandoffEngine.clear()
-        earlyHandoffSuppressed = 0
-        userLeavePrePauseAt = 0L
+        backgroundTransition.cancel()
         episodeMonitor.reset()
         pendingExit = null
         backgroundResumeBudget = 0
