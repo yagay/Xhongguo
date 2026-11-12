@@ -182,6 +182,66 @@ episode EOF. Examine `completion_stage`, `host_listener`,
 `episode_end_stall` events. Native hook presence and Android Debug build
 must still be confirmed by CI and a real device.
 
+## 2026-11-12 07:11 native full-series autoplay diagnosis
+
+The uploaded `Xhongguo-diagnostic-20261112-071122.zip` confirmed that
+**both** a pre-pause transition containing `onUserLeaveHint` (07:10:21)
+and one without the hint (07:11:00) protected the native engine, kept
+playback progress moving, received `onCompletion`, and then stalled at
+EOF (`completion_but_no_next`). Merely simulating `onUserLeaveHint`
+cannot fix the problem.
+
+Forensic DEX review of the uploaded 7.3.5.32 official APK identified
+the **actual full-series business callback route**, separate from
+VideoShop:
+
+```text
+x05.w.onCompletion(TTVideoEngine)
+  -> CopyOnWriteArrayList<WeakReference<vm4.a>> (field v)
+  -> vm4.a.U1(String)
+  -> com.dragon.read.component.shortvideo.impl.v2.view.adapter.a.U1(String)
+  -> adapter.a.G4() (native current/next episode selection)
+```
+
+`x05.w.H()` is a concrete public getter for its native `TTVideoEngine`
+(field `h`); `x05.w.v(vm4.a)` registers a listener; `x05.w.f(vm4.a)`
+removes it. The host fragment's `ShortSeriesSingleFragment.onStop()`
+may call `adapter.x()`, whose bytecode invokes `x05.f.pause()`.
+Protecting only `TTVideoEngine.pause()` is insufficient: the business
+player can still enter a paused state or lose its next-episode listener.
+
+The beta now:
+- Hooks the verified `x05.w` player and adapter callbacks for evidence
+  of `onCompletion_before/after`, `U1_before/after`, `G4_before/after`,
+  current business listener counts, registration/removal and pause.
+- Suppresses `x05.w.pause()` and removal of the **same** adapter's
+  `vm4.a` listener only while a current-engine-matched, user-pause-free,
+  provisional/confirmed Android app-leave handoff is active.
+- Treats actual x05.w as the preferred recovery target:
+  `x05.w.resume()`, not an unrelated `VideoContext.play()` or bare
+  `TTVideoEngine.play()`. Every candidate is matched to the pinned
+  native engine first.
+- Changes the old 10-minute blanket TTVideoEngine pause suppression to a
+  short app-leave window. Crucially, marks native completion **before**
+  the host callback executes so a nested U1/G4 autoplay transition is never
+  mistaken for an Android lifecycle pause. The event is idempotent when
+  the separate callback observer later sees the same native completion.
+- Limits VideoShop prepared-controller and pause guards to a context or
+  controller whose `getVideoEngine()` actually owns the current engine,
+  rather than holding a stale VideoContext (the export recorded
+  `getLayerHostMediaLayout() == null`, `VideoContext.isPlaying() == false`).
+
+Expected next diagnostics on the phone:
+`series_native_callback stage=onCompletion_before` and listener counts;
+`series_adapter method=U1`, then `method=G4`; and a later
+`TTVideoEngine.play` / new video ID. If U1 never appears despite
+registered listeners, inspect the exact x05.w observer list; if U1 appears
+but G4 declines to play, inspect adapter navigation state. No synthetic
+episode number/URL or forced next-episode command has been added.
+
+Full Gradle Debug build and real-device autoplay must still be tested.
+The original `main` branch is unaffected.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
