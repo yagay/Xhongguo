@@ -6626,6 +6626,37 @@ object Hooks {
             val controller = Class.forName(
                 "com.ss.android.videoshop.controller.VideoController", false, classLoader
             )
+            // This is the first stable VideoShop stage after native
+            // TTVideoEngine.onCompletion, before layered business callbacks.
+            for ((i, method) in controller.declaredMethods
+                .filter { it.name == "onCompletion" &&
+                    it.parameterCount == 1 &&
+                    it.parameterTypes[0].name ==
+                        "com.ss.ttvideoengine.TTVideoEngine" &&
+                    it.returnType == Void.TYPE }.withIndex()) {
+                try {
+                    module.hook(method)
+                        .setId("xhHostControllerCompletion_$i")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn) {
+                                    SystemMediaBridge.rememberController(chain.thisObject)
+                                    SystemMediaBridge.onHostCompletionStage(
+                                        "controller", chain.thisObject)
+                                }
+                            } catch (e: Throwable) {
+                                LogUtil.warn("系统媒体: Controller 完成事件探测失败 " +
+                                    e.javaClass.simpleName)
+                            }
+                            result
+                        })
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: Controller completion Hook 失败 " +
+                        e.javaClass.simpleName)
+                }
+            }
             for ((i, method) in controller.declaredMethods
                 .filter { it.name == "play" && it.parameterCount == 0 }.withIndex()) {
                 module.hook(method)
@@ -6805,6 +6836,20 @@ object Hooks {
                 when (command) {
                     208 -> refreshVideoPauseState("command=208", true)
                     207, 214 -> refreshVideoPauseState("command=$command", false)
+                }
+                result
+            }
+            ham(c, "onVideoCompleted", "xhHostLayerCompletion") { chain ->
+                val result = chain.proceed()
+                try {
+                    if (gMasterOn && gSystemMediaOn) {
+                        SystemMediaBridge.rememberLayer(chain.thisObject)
+                        SystemMediaBridge.onHostCompletionStage(
+                            "layer", chain.thisObject)
+                    }
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: LayerHost 完成事件探测失败 " +
+                        e.javaClass.simpleName)
                 }
                 result
             }
