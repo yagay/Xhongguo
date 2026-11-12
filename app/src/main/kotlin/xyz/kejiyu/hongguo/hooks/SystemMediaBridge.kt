@@ -483,6 +483,24 @@ internal object SystemMediaBridge {
             flow = mediaFlow, minIntervalMs = 100L)
     }
 
+    /** APK's live adapter is a subclass (adapter.f); D/k/U2 fields live
+     * in superclass adapter.a, while the data h field lives in gp4.f.
+     * getDeclaredField() on the runtime class alone always misses these.
+     */
+    private fun inheritedFieldValue(target: Any, name: String): Any? {
+        var type: Class<*>? = target.javaClass
+        while (type != null && type != Any::class.java) {
+            try {
+                val field = type.getDeclaredField(name)
+                field.isAccessible = true
+                return field.get(target)
+            } catch (_: NoSuchFieldException) {
+                type = type.superclass
+            }
+        }
+        return null
+    }
+
     /** A conservative last resort after native EOF, not an automatic loop.
      * Only advance the existing APK ViewPager2 when the current item/index,
      * engine identity, native EOF, explicit pause epoch and actual loaded
@@ -505,12 +523,9 @@ internal object SystemMediaBridge {
 
         try {
             readCurrentTimeline()
-            val current = adapter.javaClass.getDeclaredField("D").apply {
-                isAccessible = true
-            }.getInt(adapter)
-            val pager = adapter.javaClass.getDeclaredField("k").apply {
-                isAccessible = true
-            }.get(adapter) ?: return
+            val current = (inheritedFieldValue(adapter, "D") as? Number)
+                ?.toInt() ?: return
+            val pager = inheritedFieldValue(adapter, "k") ?: return
             val pagerPosition = (pager.javaClass.getMethod("getCurrentItem")
                 .invoke(pager) as? Number)?.toInt() ?: return
             val pagerAdapter = pager.javaClass.getMethod("getAdapter")
@@ -519,19 +534,8 @@ internal object SystemMediaBridge {
                 .invoke(pagerAdapter) as? Number)?.toInt() ?: return
             // gp4.f is the official RecyclerView adapter base; h contains
             // the actual available SaasVideoDetailModel items.
-            var inherited: Class<*>? = adapter.javaClass
-            var dataCount = -1
-            while (inherited != null && inherited != Any::class.java) {
-                try {
-                    val field = inherited.getDeclaredField("h")
-                    field.isAccessible = true
-                    val list = field.get(adapter) as? List<*>
-                    if (list != null) dataCount = list.size
-                    break
-                } catch (_: NoSuchFieldException) {
-                    inherited = inherited.superclass
-                }
-            }
+            val dataCount =
+                (inheritedFieldValue(adapter, "h") as? List<*>)?.size ?: -1
             val count = if (dataCount > 0) minOf(dataCount, pagerCount) else -1
             val evidence = SeriesAutoplayRecoveryPolicy.Evidence(
                 background = requestedBackgroundPlayback,
