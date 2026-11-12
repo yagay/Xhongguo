@@ -6193,6 +6193,30 @@ object Hooks {
                     }
                 }
             }
+            // APK-verified VideoContext.onLifeCycleOnStop() calls this
+            // narrower preparation-release method. Unlike bypassing the
+            // entire onPause/onStop, this preserves native state dispatch.
+            val releasePrepared = videoContextClass.declaredMethods.firstOrNull {
+                it.name == "releaseAllPreparedVideoControllers" &&
+                    it.parameterCount == 0 && it.returnType == Void.TYPE
+            }
+            if (releasePrepared != null) {
+                try {
+                    module.hook(releasePrepared)
+                        .setId("xhHostPreparedControllerRelease")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            if (gMasterOn && gSystemMediaOn &&
+                                SystemMediaBridge.shouldHoldPreparedControllerRelease(
+                                    chain.thisObject)) return@Hooker null
+                            chain.proceed()
+                        })
+                    LogUtil.info("  ✓ APK prepared-episode controller release guard")
+                } catch (e: Throwable) {
+                    LogUtil.warn("  APK prepared-controller guard failed " +
+                        e.javaClass.simpleName)
+                }
+            }
             for (name in listOf("onLifeCycleOnPause", "onLifeCycleOnStop")) {
                 videoContextClass.declaredMethods.filter { it.name == name }
                     .forEachIndexed { index, method ->
@@ -6203,14 +6227,11 @@ object Hooks {
                                 .intercept(Hooker { chain ->
                                     LogUtil.info("系统媒体: VideoContext.$name before" +
                                         " isEnabled=" + SystemMediaBridge.enabled)
-                                    // The native host completion/autoplay callbacks
-                                    // must survive a verified app-leave. Do not
-                                    // skip unrelated page switches or non-void APIs.
-                                    if (method.returnType == Void.TYPE &&
-                                        SystemMediaBridge.shouldHoldHostVideoLifecycle(
-                                            chain.thisObject, name)) {
-                                        return@Hooker null
-                                    }
+                                    // Keep the entire native lifecycle intact.
+                                    // Background protection is now at the exact
+                                    // prepared-controller-release method above.
+                                    // This avoids suppressing host bookkeeping
+                                    // and potentially losing completion listeners.
                                     val result = chain.proceed()
                                     LogUtil.info("系统媒体: VideoContext.$name after")
                                     result
