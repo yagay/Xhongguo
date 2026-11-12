@@ -45,6 +45,29 @@ class BackgroundTransitionStateTest {
         assertEquals(0, state.heldCount())
     }
 
+    @Test fun preparedControllerGuardWorksBeforeAndAfterBackgroundConfirmation() {
+        val activity = Any()
+        val engine = Any()
+        val state = BackgroundTransitionState()
+        state.begin(activity, engine, true, 7L, 1000L)
+        assertTrue(state.canKeepPreparedOnStop(
+            activity, engine, 7L, false, false, 1350L))
+        assertTrue(state.confirm(activity, engine, 7L, 1800L))
+        // Some Android versions confirm process importance before the
+        // host dispatches onStop() and its prepared-controller cleanup.
+        assertTrue(state.canKeepPreparedOnStop(
+            activity, engine, 7L, false, false, 2400L))
+        assertFalse(state.canKeepPreparedOnStop(
+            activity, engine, 7L, true, false, 2400L))
+        assertFalse(state.canKeepPreparedOnStop(
+            activity, engine, 8L, false, false, 2400L))
+        assertFalse(state.canKeepPreparedOnStop(
+            activity, engine, 7L, false, false, 8000L))
+        state.cancel()
+        assertFalse(state.canKeepPreparedOnStop(
+            activity, engine, 7L, false, false, 2600L))
+    }
+
     @Test fun stoppedOrUserPausedPlaybackDoesNotArmProvisionalProtection() {
         val state = BackgroundTransitionState()
         assertFalse(state.begin(Any(), Any(), false, 0L, 1000L))
