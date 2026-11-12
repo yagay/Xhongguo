@@ -6572,6 +6572,36 @@ object Hooks {
                         name + ":" + e.javaClass.simpleName)
                 }
             }
+            // In APK dex, x05.w.onCompletion() first notifies x05.e.h2.
+            // m15.a.h2 forwards to fm4.a.onCompletion() if a live
+            // downstream callback exists. This is separate from U1/G4.
+            try {
+                val holder = Class.forName("m15.a", false, classLoader)
+                val nativePlayerInterface = Class.forName(
+                    "x05.f", false, classLoader)
+                val h2 = holder.getDeclaredMethod("h2", nativePlayerInterface)
+                module.hook(h2)
+                    .setId("xhSeriesHolderCompletion")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        try {
+                            if (gMasterOn && gSystemMediaOn)
+                                SystemMediaBridge.onSeriesHolderCompletion(
+                                    chain.thisObject, "before")
+                        } catch (_: Throwable) { }
+                        val result = chain.proceed()
+                        try {
+                            if (gMasterOn && gSystemMediaOn)
+                                SystemMediaBridge.onSeriesHolderCompletion(
+                                    chain.thisObject, "after")
+                        } catch (_: Throwable) { }
+                        result
+                    })
+                installedSeriesHooks++
+            } catch (e: Throwable) {
+                LogUtil.warn("系统媒体: 官方 holder 完成回调 Hook 不可用 " +
+                    e.javaClass.simpleName)
+            }
             LogUtil.info("  ✓ 官方全集 x05.w/adapter 自动续集观察与保活 Hook 数=" +
                 installedSeriesHooks)
         } catch (e: Throwable) {
