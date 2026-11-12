@@ -55,9 +55,15 @@ internal object SystemMediaBridge {
     private var layer = WeakReference<Any>(null)
     private var videoContext = WeakReference<Any>(null)
     private var videoEngine = WeakReference<Any>(null)
-    // x05.w is the official full-series business player. Unlike
-    // VideoContext it owns vm4.a.U1 -> next episode callbacks.
+    // x05.w is the official full-series business player. Its completion
+    // can be received without the background ViewPager2 advancing.
     private var nativeSeriesPlayer = WeakReference<Any>(null)
+    private var nativeEofEngine = WeakReference<Any>(null)
+    private var nativeEofAt = 0L
+    private var nativeEofPauseEpoch = 0L
+    private var nativeEofGeneration = 0L
+    private var nativeEofRecoveryScheduled = false
+    private var nativeEofRecoveryAttempted = false
     // No feature writes directly to a second MediaSession. All pages pass
     // through this common refresh and publication lifecycle.
     private val mediaPresentation = MediaPresentationState()
@@ -355,9 +361,51 @@ internal object SystemMediaBridge {
      * Record both entry and return to identify a missing listener vs
      * an adapter which receives EOF but declines to move the episode list.
      */
-    fun onSeriesAdapterCallback(method: String, phase: String) {
+    /**
+     * APK's adapter.a.U1(String) emits the host's completion callback, but
+     * a.U1 only conditionally invokes G4(): G4 plays the CURRENT holder,
+     * not the next episode. Never force G4() when the host is backgrounded.
+     *
+     * If the host did not advance by itself after EOF, a bounded recovery
+     * may select the existing next episode through its OWN ViewPager2.
+     */
+    fun onSeriesAdapterCallback(method: String, phase: String, adapter: Any? = null) {
         if (!enabled) return
         val currentPage = foregroundActivity.get()?.javaClass?.simpleName
+        if (method == "U1" && phase == "before" && adapter != null) {
+            // Bytecode confirms J3 and b4 are read-only condition getters.
+            // A missing G4 is not sufficient proof of failed autoplay.
+            val gate = try {
+                val m = adapter.javaClass.getMethod("J3")
+                m.invoke(adapter) as? Number
+            } catch (_: Throwable) { null }
+            val specialReplay = try {
+                adapter.javaClass.getMethod("b4").invoke(adapter) as? Boolean
+            } catch (_: Throwable) { null }
+            LogUtil.info("系统媒体: 官方 U1 条件 probe" +
+                " J3IsOne=" + (gate?.toInt() == 1) +
+                " b4=" + (specialReplay?.toString() ?: "unknown"))
+            val engine = videoEngine.get()
+            val owner = nativeSeriesPlayer.get()
+            if (engine != null && owner != null &&
+                seriesPlayerEngine(owner) === engine &&
+                nativeEofEngine.get() === engine &&
+                episodeMonitor.hasNativeCompletion() &&
+                requestedBackgroundPlayback && !nativeEofRecoveryScheduled &&
+                currentPage == "ShortSeriesActivity") {
+                nativeEofRecoveryScheduled = true
+                val epoch = nativeEofPauseEpoch
+                val generation = nativeEofGeneration
+                val originalActivity = foregroundActivity.get()
+                // Pin the current adapter for just one delayed diagnostic /
+                // recovery operation; no permanent strong listener or
+                // copied video URL/episode model.
+                handler.postDelayed({
+                    maybeRecoverSeriesNativePager(adapter, engine,
+                        originalActivity, epoch, generation)
+                }, 5500L)
+            }
+        }
         LogUtil.info("系统媒体: 官方全集适配器事件 method=$method" +
             " phase=$phase background=$requestedBackgroundPlayback" +
             " page=" + (currentPage ?: "none"))
@@ -365,6 +413,105 @@ internal object SystemMediaBridge {
             "method=" + method + ",phase=" + phase +
                 ",background=" + requestedBackgroundPlayback,
             flow = mediaFlow, minIntervalMs = 100L)
+    }
+
+    /** A conservative last resort after native EOF, not an automatic loop.
+     * Only advance the existing APK ViewPager2 when the current item/index,
+     * engine identity, native EOF, explicit pause epoch and actual loaded
+     * next-item count all agree. Last episode is never advanced.
+     */
+    private fun maybeRecoverSeriesNativePager(
+        adapter: Any, completedEngine: Any, activity: Activity?,
+        pauseEpoch: Long, generation: Long
+    ) {
+        if (!enabled || nativeEofRecoveryAttempted ||
+            generation != nativeEofGeneration ||
+            nativeEofEngine.get() !== completedEngine ||
+            videoEngine.get() !== completedEngine ||
+            !episodeMonitor.hasNativeCompletion() ||
+            lastNativeEngineAt > nativeEofAt ||
+            activity == null || foregroundActivity.get() !== activity ||
+            activity.isFinishing || userCommandInProgress ||
+            explicitPauseEpoch != pauseEpoch || !requestedBackgroundPlayback)
+            return
+
+        try {
+            readCurrentTimeline()
+            val current = adapter.javaClass.getDeclaredField("D").apply {
+                isAccessible = true
+            }.getInt(adapter)
+            val pager = adapter.javaClass.getDeclaredField("k").apply {
+                isAccessible = true
+            }.get(adapter) ?: return
+            val pagerPosition = (pager.javaClass.getMethod("getCurrentItem")
+                .invoke(pager) as? Number)?.toInt() ?: return
+            val pagerAdapter = pager.javaClass.getMethod("getAdapter")
+                .invoke(pager) ?: return
+            val pagerCount = (pagerAdapter.javaClass.getMethod("getItemCount")
+                .invoke(pagerAdapter) as? Number)?.toInt() ?: return
+            // gp4.f is the official RecyclerView adapter base; h contains
+            // the actual available SaasVideoDetailModel items.
+            var inherited: Class<*>? = adapter.javaClass
+            var dataCount = -1
+            while (inherited != null && inherited != Any::class.java) {
+                try {
+                    val field = inherited.getDeclaredField("h")
+                    field.isAccessible = true
+                    val list = field.get(adapter) as? List<*>
+                    if (list != null) dataCount = list.size
+                    break
+                } catch (_: NoSuchFieldException) {
+                    inherited = inherited.superclass
+                }
+            }
+            val count = if (dataCount > 0) minOf(dataCount, pagerCount) else -1
+            val evidence = SeriesAutoplayRecoveryPolicy.Evidence(
+                background = requestedBackgroundPlayback,
+                eofObserved = episodeMonitor.hasNativeCompletion(),
+                sameNativeEngine = videoEngine.get() === completedEngine,
+                sameSeriesActivity = activity.javaClass.name ==
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
+                explicitPauseUnchanged = explicitPauseEpoch == pauseEpoch,
+                noNewVideoStarted = lastNativeEngineAt <= nativeEofAt,
+                completionAgeMs = SystemClock.uptimeMillis() - nativeEofAt,
+                currentIndex = current, pagerIndex = pagerPosition,
+                itemCount = count,
+                nearRealNativeEnd = durationMs > 5000L &&
+                    positionMs >= durationMs - 350L,
+                alreadyAttempted = nativeEofRecoveryAttempted
+            )
+            val next = SeriesAutoplayRecoveryPolicy.nextIndex(evidence)
+            if (next == null) {
+                LogUtil.info("系统媒体: 后台自然连播未恢复；原生选集校验未通过" +
+                    " current=$current pager=$pagerPosition" +
+                    " available=$count eofNear=" + evidence.nearRealNativeEnd)
+                FeatureTrace.event("background", "series_pager_recovery",
+                    "degraded", "reason=safety_guard,indexAligned=" +
+                        (current == pagerPosition) +
+                        ",hasNext=" + (count > current + 1),
+                    flow = mediaFlow)
+                return
+            }
+            nativeEofRecoveryAttempted = true
+            // Native ViewPager2 triggers the host's own page-selection
+            // callbacks. Do NOT call adapter.G4, native TTVideoEngine.play,
+            // or invent a next-video URL/ID.
+            pager.javaClass.getMethod("setCurrentItem",
+                Int::class.javaPrimitiveType,
+                Boolean::class.javaPrimitiveType).invoke(pager, next, false)
+            LogUtil.info("系统媒体: 后台结尾停滞，已请求官方选集切换" +
+                " current=$current next=$next total=$count")
+            LogUtil.incr("systemMediaSeriesPagerRecovery")
+            FeatureTrace.event("background", "series_pager_recovery",
+                "requested", "route=native_viewpager2,hasNext=true",
+                flow = mediaFlow)
+        } catch (e: Throwable) {
+            nativeEofRecoveryAttempted = true
+            LogUtil.warn("系统媒体: 原生选集补救失败 " +
+                e.javaClass.simpleName + ":" + (e.message ?: "unknown"))
+            FeatureTrace.event("background", "series_pager_recovery", "fail",
+                "errorType=" + e.javaClass.simpleName, flow = mediaFlow)
+        }
     }
 
     /** Explicit notification/media-control pause must never be swallowed by
@@ -568,6 +715,12 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null || videoEngine.get() !== candidate ||
             episodeMonitor.hasNativeCompletion()) return
         episodeMonitor.onNativeCompletion()
+        nativeEofEngine = WeakReference(candidate)
+        nativeEofAt = SystemClock.uptimeMillis()
+        nativeEofPauseEpoch = explicitPauseEpoch
+        nativeEofGeneration++
+        nativeEofRecoveryScheduled = false
+        nativeEofRecoveryAttempted = false
         LogUtil.info("系统媒体: 宿主原生 onCompletion 已触发" +
             " background=$requestedBackgroundPlayback")
         FeatureTrace.event("background", "native_completion", "observed",
@@ -794,6 +947,11 @@ internal object SystemMediaBridge {
      */
     private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
         episodeMonitor.reset()
+        nativeEofGeneration++
+        nativeEofEngine.clear()
+        nativeEofAt = 0L
+        nativeEofRecoveryScheduled = false
+        nativeEofRecoveryAttempted = false
         mediaFlow = FeatureTrace.newFlow("media", reason)
         FeatureTrace.event("playback", "video_transition", "started",
             "sameSeries=" + sameSeries, flow = mediaFlow)
@@ -2204,6 +2362,11 @@ internal object SystemMediaBridge {
         videoContext.clear()
         videoEngine.clear()
         nativeSeriesPlayer.clear()
+        nativeEofEngine.clear()
+        nativeEofAt = 0L
+        nativeEofGeneration++
+        nativeEofRecoveryScheduled = false
+        nativeEofRecoveryAttempted = false
         foregroundActivity.clear()
         originalBackgroundFlag = null
         originalBackgroundHost.clear()
