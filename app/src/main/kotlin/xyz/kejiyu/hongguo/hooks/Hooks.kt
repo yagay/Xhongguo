@@ -6519,9 +6519,15 @@ object Hooks {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     try {
-                        if (gMasterOn && gSystemMediaOn)
+                        if (gMasterOn && gSystemMediaOn) {
+                            // Mark EOF BEFORE the host starts its next-episode
+                            // handoff. Otherwise the native pause guard may
+                            // swallow pause/release performed *inside* U1/G4.
+                            SystemMediaBridge.onNativeCompletion(
+                                chain.getArg(0))
                             SystemMediaBridge.onSeriesNativeCallback(
                                 "onCompletion_before", chain.thisObject)
+                        }
                     } catch (_: Throwable) { }
                     val result = chain.proceed()
                     try {
