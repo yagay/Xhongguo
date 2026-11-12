@@ -565,7 +565,8 @@ internal object SystemMediaBridge {
      * A completion event is evidence only; never replay the video here.
      */
     fun onNativeCompletion(candidate: Any?) {
-        if (!enabled || candidate == null || videoEngine.get() !== candidate) return
+        if (!enabled || candidate == null || videoEngine.get() !== candidate ||
+            episodeMonitor.hasNativeCompletion()) return
         episodeMonitor.onNativeCompletion()
         LogUtil.info("系统媒体: 宿主原生 onCompletion 已执行" +
             " background=$requestedBackgroundPlayback")
