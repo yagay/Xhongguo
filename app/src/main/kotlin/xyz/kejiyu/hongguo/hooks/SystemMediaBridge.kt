@@ -501,6 +501,48 @@ internal object SystemMediaBridge {
         return null
     }
 
+    /** Observe the exact APK business page-selection methods, not just
+     * ViewPager2.currentItem. r4/s4 update the adapter's selection D; the
+     * controller's y4() reports whether the host thinks its page is visible.
+     * Never mutate that flag here: Android navigation/visibility is real.
+     */
+    fun onSeriesPageSelection(
+        adapter: Any?, method: String, phase: String,
+        selected: Int? = null, result: Any? = null
+    ) {
+        if (!enabled || !isSeriesAdapter(adapter) ||
+            foregroundActivity.get()?.javaClass?.simpleName !=
+                "ShortSeriesActivity") return
+        val target = adapter ?: return
+        val selectedIndex = (inheritedFieldValue(target, "D") as? Number)
+            ?.toInt() ?: -1
+        val pager = inheritedFieldValue(target, "k")
+        val pagerIndex = try {
+            (pager?.javaClass?.getMethod("getCurrentItem")
+                ?.invoke(pager) as? Number)?.toInt() ?: -1
+        } catch (_: Throwable) { -1 }
+        val controller = inheritedFieldValue(target, "m")
+        val pageVisible = try {
+            controller?.javaClass?.methods?.firstOrNull {
+                it.name == "y4" && it.parameterCount == 0
+            }?.invoke(controller) as? Boolean
+        } catch (_: Throwable) { null }
+        if (requestedBackgroundPlayback || episodeMonitor.hasNativeCompletion() ||
+            method == "f.U1") {
+            LogUtil.info("系统媒体: 官方选集业务阶段 method=$method" +
+                " phase=$phase arg=" + (selected ?: -1) +
+                " selection=$selectedIndex pager=$pagerIndex" +
+                " pageVisible=" + (pageVisible?.toString() ?: "?") +
+                " accepted=" + (result?.toString() ?: "?"))
+            FeatureTrace.event("background", "series_page_selection", "observed",
+                "method=" + method + ",phase=" + phase +
+                    ",selection=" + selectedIndex +
+                    ",pager=" + pagerIndex +
+                    ",visible=" + (pageVisible?.toString() ?: "unknown"),
+                flow = mediaFlow, minIntervalMs = 100L)
+        }
+    }
+
     /** A conservative last resort after native EOF, not an automatic loop.
      * Only advance the existing APK ViewPager2 when the current item/index,
      * engine identity, native EOF, explicit pause epoch and actual loaded
