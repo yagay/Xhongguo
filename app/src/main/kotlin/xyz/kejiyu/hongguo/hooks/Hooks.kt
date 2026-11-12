@@ -6702,6 +6702,41 @@ object Hooks {
             LogUtil.warn("  mini player pause guard unavailable: " + e.message)
         }
 
+        // The supplied APK's ShortSeriesSingleFragment.onStop() calls
+        // adapter.T1() and adapter.e(): monitor the actual business fragment
+        // stop that can disable automatic next-episode navigation. Never
+        // intercept it or synthesize a fake next episode.
+        try {
+            val seriesFragment = Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                false, classLoader)
+            val stop = seriesFragment.declaredMethods.firstOrNull {
+                it.name == "onStop" && it.parameterCount == 0 &&
+                    it.returnType == Void.TYPE
+            }
+            if (stop != null) {
+                module.hook(stop)
+                    .setId("xhSeriesNativeFragmentStop")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        try {
+                            if (gMasterOn && gSystemMediaOn)
+                                SystemMediaBridge.onSeriesFragmentStopped(
+                                    chain.thisObject)
+                        } catch (e: Throwable) {
+                            LogUtil.warn("系统媒体: SeriesFragment stop 探测失败 " +
+                                e.javaClass.simpleName)
+                        }
+                        result
+                    })
+                LogUtil.info("  ✓ APK full-series fragment stop probe")
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("  APK full-series fragment probe unavailable: " +
+                e.javaClass.simpleName)
+        }
+
         val shortVideoHolderClasses =
             listOf(gNames.holderBaseS1).filter { it.isNotBlank() }
         var shortPlaybackHookCount = 0
