@@ -185,21 +185,6 @@ internal object SystemMediaBridge {
         return hold
     }
 
-    /** Keep VideoShop's completion/next-item dispatcher alive only for the
-     * verified original page when the user explicitly leaves the app.
-     */
-    fun shouldHoldHostVideoLifecycle(candidate: Any?, method: String): Boolean {
-        if (candidate == null || candidate !== videoContext.get() ||
-            method !in setOf("onLifeCycleOnPause", "onLifeCycleOnStop")) return false
-        if (!shouldHoldOriginalOnLeave(videoEngine.get())) return false
-        LogUtil.info("系统媒体: 保留宿主播放生命周期 method=$method" +
-            " sameEngine=true reason=pre-pause")
-        LogUtil.incr("systemMediaHostLifecycleHeld")
-        FeatureTrace.event("background", "host_lifecycle", "held",
-            "method=" + method, flow = mediaFlow)
-        return true
-    }
-
     /**
      * Targeted APK hook: VideoContext.onLifeCycleOnStop() invokes
      * releaseAllPreparedVideoControllers(). Keep that exact prepared-video
