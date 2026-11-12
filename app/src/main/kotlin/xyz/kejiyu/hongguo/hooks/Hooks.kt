@@ -7412,12 +7412,17 @@ object Hooks {
                     .setId("xhSystemMediaActivityStop")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
+                        // Let the real host onStop finish its own lifecycle
+                        // first. A native prepared-controller release inside
+                        // it can then consult the pre-pause guard. Confirming
+                        // process background prematurely may invalidate that.
+                        val result = chain.proceed()
                         try {
                             SystemMediaBridge.onActivityStopped(chain.thisObject as? Activity)
                         } catch (e: Throwable) {
                             LogUtil.warn("系统媒体: Activity.onStop 诊断失败: " + e.message)
                         }
-                        chain.proceed()
+                        result
                     })
                 LogUtil.info("  ✓ system media Activity.onStop observer")
             } catch (e: Throwable) {
