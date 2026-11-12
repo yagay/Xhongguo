@@ -2,6 +2,8 @@ package xyz.kejiyu.hongguo.hooks
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class BackgroundEpisodeMonitorTest {
@@ -12,6 +14,15 @@ class BackgroundEpisodeMonitorTest {
         assertEquals("no_completion_callback",
             monitor.onSample(100_000, 100_000, true, true, 4200L))
         assertNull(monitor.onSample(100_000, 100_000, true, true, 7200L))
+    }
+
+    @Test fun completionUnblocksNativeEpisodeHandoffAndResetRearmsGuard() {
+        val monitor = BackgroundEpisodeMonitor()
+        assertFalse(monitor.hasNativeCompletion())
+        monitor.onNativeCompletion()
+        assertTrue(monitor.hasNativeCompletion())
+        monitor.reset() // a new real video/engine was observed
+        assertFalse(monitor.hasNativeCompletion())
     }
 
     @Test fun completionObservedButNoNextIsDiagnosedSeparately() {
