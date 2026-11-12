@@ -200,6 +200,29 @@ internal object SystemMediaBridge {
         return true
     }
 
+    /**
+     * Targeted APK hook: VideoContext.onLifeCycleOnStop() invokes
+     * releaseAllPreparedVideoControllers(). Keep that exact prepared-video
+     * owner during a provisional external-app exit rather than skipping the
+     * ENTIRE VideoContext lifecycle. This leaves native completion listeners,
+     * normal pause bookkeeping and app-internal navigation intact.
+     *
+     * This hold is provisional until Activity.onStop + process importance
+     * confirm a real background transition. The short guard is scoped to
+     * the same VideoContext instance and pinned video engine.
+     */
+    fun shouldHoldPreparedControllerRelease(candidate: Any?): Boolean {
+        if (!enabled || candidate == null || candidate !== videoContext.get())
+            return false
+        if (!shouldHoldOriginalOnLeave(videoEngine.get())) return false
+        LogUtil.info("系统媒体: 保护原生下一集预备播放器（仅当前后台过渡）")
+        LogUtil.incr("systemMediaPreparedControllersHeld")
+        FeatureTrace.event("background", "prepared_controller_release",
+            "held", "scope=same_video_context", flow = mediaFlow,
+            minIntervalMs = 1000L)
+        return true
+    }
+
     /** Explicit notification/media-control pause must never be swallowed by
      * the in-app mini player's short navigation guard. */
     fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
