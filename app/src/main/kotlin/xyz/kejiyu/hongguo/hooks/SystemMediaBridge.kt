@@ -216,6 +216,115 @@ internal object SystemMediaBridge {
         return true
     }
 
+    // The official 7.3.5.32 short-series player is x05.w (x05.f), NOT
+    // VideoShop VideoContext. The real next-episode route is:
+    // x05.w.onCompletion(TTVideoEngine) -> vm4.a.U1(String) ->
+    // v2.view.adapter.a.U1(String) -> G4().
+    // Protect that native business player, rather than just its decoder.
+    private const val SERIES_NATIVE_PLAYER = "x05.w"
+    private const val SERIES_NATIVE_ADAPTER =
+        "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
+
+    private fun seriesPlayerEngine(player: Any?): Any? {
+        if (player?.javaClass?.name != SERIES_NATIVE_PLAYER) return null
+        return try {
+            // APK-confirmed x05.w.H(): TTVideoEngine (reads field h).
+            player.javaClass.getMethod("H").invoke(player)
+        } catch (_: Throwable) { null }
+    }
+
+    /** Protect exactly the current native series player while the same
+     * Activity is leaving for background. An in-app page switch cancels the
+     * provisional handoff; a system media pause invalidates its pause epoch.
+     */
+    private fun seriesBusinessHandoffAllowed(player: Any?): Boolean {
+        if (!enabled || foregroundActivity.get()?.javaClass?.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
+            return false
+        val engine = seriesPlayerEngine(player) ?: return false
+        if (videoEngine.get() !== engine) return false
+        return backgroundTransition.canKeepPreparedOnStop(
+            ownerActivity = foregroundActivity.get(),
+            ownerEngine = engine,
+            explicitPauseEpoch = explicitPauseEpoch,
+            explicitCommand = userCommandInProgress,
+            ownershipSwitch = SinglePlaybackOwner.isOwnershipTransition(),
+            nowMs = SystemClock.uptimeMillis())
+    }
+
+    /** APK-native business pause (x05.w.pause) can be called from
+     * ShortSeriesSingleFragment.onStop -> adapter.x. It updates the
+     * host player's own state even if TTVideoEngine.pause is suppressed.
+     */
+    fun shouldHoldSeriesBusinessPause(player: Any?): Boolean {
+        if (!seriesBusinessHandoffAllowed(player)) return false
+        backgroundTransition.recordHeld()
+        LogUtil.info("系统媒体: 保留官方全集播放器 x05.w.pause" +
+            "（防止业务连播控制器提前暂停）")
+        LogUtil.incr("systemMediaSeriesBusinessPauseHeld")
+        FeatureTrace.event("background", "series_business_pause", "held",
+            "sameNativeEngine=true", flow = mediaFlow, minIntervalMs = 500L)
+        return true
+    }
+
+    /** x05.w.f(vm4.a) removes an observer from its weak listener list,
+     * whereas x05.w.v(vm4.a) registers it. Keep only the existing
+     * ShortSeries adapter observer during the same verified exit.
+     * Never fabricate an observer or synthesize a next-episode command.
+     */
+    fun shouldHoldSeriesListenerRemoval(player: Any?, listener: Any?): Boolean {
+        if (listener?.javaClass?.name != SERIES_NATIVE_ADAPTER ||
+            !seriesBusinessHandoffAllowed(player)) return false
+        backgroundTransition.recordHeld()
+        LogUtil.info("系统媒体: 保留当前全集自动续集监听器 x05.w.f")
+        LogUtil.incr("systemMediaSeriesListenerHeld")
+        FeatureTrace.event("background", "series_listener_remove", "held",
+            "adapter=true,sameNativeEngine=true", flow = mediaFlow,
+            minIntervalMs = 500L)
+        return true
+    }
+
+    /** A narrow observation at the actual native business callback, not
+     * a guess based on the unused VideoShop completion hooks.
+     */
+    fun onSeriesNativeCallback(stage: String, player: Any?, listener: Any? = null) {
+        if (!enabled) return
+        val engine = seriesPlayerEngine(player)
+        val sameEngine = engine != null && engine === videoEngine.get()
+        val count: Int?
+        val adapters: Int?
+        if (player?.javaClass?.name == SERIES_NATIVE_PLAYER) {
+            val list = try {
+                val field = player.javaClass.getDeclaredField("v")
+                field.isAccessible = true
+                field.get(player) as? List<*>
+            } catch (_: Throwable) { null }
+            count = list?.size
+            adapters = list?.count { entry ->
+                (entry as? WeakReference<*>)?.get()?.javaClass?.name ==
+                    SERIES_NATIVE_ADAPTER
+            }
+        } else {
+            count = null
+            adapters = null
+        }
+        val adapterListener = listener?.javaClass?.name == SERIES_NATIVE_ADAPTER
+        val relevant = sameEngine || adapterListener
+        if (!relevant) return
+        LogUtil.info("系统媒体: 官方全集业务回调 stage=$stage" +
+            " nativeOwner=$sameEngine listeners=" + (count ?: -1) +
+            " seriesAdapters=" + (adapters ?: -1) +
+            " adapterListener=$adapterListener" +
+            " background=$requestedBackgroundPlayback")
+        FeatureTrace.event("background", "series_native_callback", "observed",
+            "stage=" + stage + ",nativeOwner=" + sameEngine +
+                ",listeners=" + (count ?: -1) +
+                ",adapters=" + (adapters ?: -1) +
+                ",adapterListener=" + adapterListener +
+                ",background=" + requestedBackgroundPlayback,
+            flow = mediaFlow, minIntervalMs = 100L)
+    }
+
     /** Explicit notification/media-control pause must never be swallowed by
      * the in-app mini player's short navigation guard. */
     fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
