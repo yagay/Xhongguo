@@ -2207,6 +2207,9 @@ internal object SystemMediaBridge {
         if (activity === previous || activity.packageName != previous.packageName)
             return
         backgroundTransition.cancel()
+        exitSeriesBusinessPausedEngine.clear()
+        exitSeriesBusinessPausedOwner.clear()
+        exitSeriesBusinessPausedAt = 0L
         if (pendingExit?.activity?.get() === previous &&
             !requestedBackgroundPlayback) pendingExit = null
         if (!requestedBackgroundPlayback && backgroundFlagApplied) {
@@ -2230,6 +2233,9 @@ internal object SystemMediaBridge {
         lastUserLeaveEngine.clear()
         backgroundTransition.cancel()
         episodeMonitor.reset()
+        exitSeriesBusinessPausedEngine.clear()
+        exitSeriesBusinessPausedOwner.clear()
+        exitSeriesBusinessPausedAt = 0L
         if (backgroundFlagApplied && !requestedBackgroundPlayback) {
             if (originalBackgroundFlag != null)
                 setNativeBackgroundAllowance(originalBackgroundFlag == true)
