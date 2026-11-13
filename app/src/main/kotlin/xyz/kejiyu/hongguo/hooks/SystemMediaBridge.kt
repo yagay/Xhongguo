@@ -563,6 +563,29 @@ internal object SystemMediaBridge {
                     ",visible=" + (pageVisible?.toString() ?: "unknown"),
                 flow = mediaFlow, minIntervalMs = 100L)
         }
+        if (phase == "after" && result == false &&
+            method in setOf("a.s4", "f.r4") &&
+            episodeMonitor.hasNativeCompletion()) {
+            // APK bytecode: a.s4 can reject a page selection because of
+            // current/old selection and removal/mark flags. Capture the
+            // actual branch state without modifying any host-owned field.
+            val flags = listOf("D", "E", "H2", "Y", "Z", "y2",
+                "P0", "T1", "x1", "L1", "v2")
+            val evidence = flags.joinToString(",") { field ->
+                val value = inheritedFieldValue(target, field)
+                field + "=" + (value?.toString() ?: "?")
+            }
+            LogUtil.warn("系统媒体: 原生业务拒绝选中下一集" +
+                " method=" + method + " requested=" + (selected ?: -1) +
+                " pager=" + pagerIndex + " visible=" + pageVisible +
+                " flags=" + evidence)
+            FeatureTrace.event("background", "series_selection_rejected",
+                "degraded",
+                "method=" + method + ",indexDiff=" +
+                    (pagerIndex - selectedIndex) +
+                    ",visible=" + pageVisible + "," + evidence,
+                flow = mediaFlow, minIntervalMs = 500L)
+        }
     }
 
     /** A conservative last resort after native EOF, not an automatic loop.
