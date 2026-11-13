@@ -383,7 +383,7 @@ internal object SystemMediaBridge {
         // the next episode or replace the current playing owner.
         val selection = nativeSelectionScope.get()
         if (stage == "listener_registered" && player != null &&
-            listener === selection?.adapter && !sameEngine &&
+            selection != null && listener === selection.adapter && !sameEngine &&
             seriesPlayerEngine(player) !== selection.engine) {
             selection.nextPlayer = WeakReference(player)
             FeatureTrace.event("background", "series_next_player", "observed",
