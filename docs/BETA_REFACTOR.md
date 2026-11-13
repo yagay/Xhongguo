@@ -411,6 +411,66 @@ A missing native resume should log a degraded reason.
 No Android Gradle Debug APK compilation or real-device success
 confirmation was available at the time of this commit; main unchanged.
 
+## 2026-11-13: verified APK root cause of background next-episode rejection
+
+The previously uploaded official APK is **com.phoenix.read 7.3.5.32**
+(AndroidManifest.xml versionCode 73532), matching the actual host in
+the 06:58 diagnostic. A targeted DEX disassembly of
+`classes4.dex` confirms that `adapter.a.s4(int)` logs the exact
+string `mPageController.isPageInVisible()` and calls the
+`j15.d.y4()` interface method during its page-selection gate.
+
+**Critical correction:** previous beta event names `pageVisible=true`
+were **inverted**: `y4()==true` means `isPageInVisible=true` —
+the host page is considered **INVISIBLE**. With ordinary background
+lifecycle state and no exceptional mark flag, `s4()` can return
+`false` before updating `D`, even when ViewPager2 has moved to
+the loaded next episode. This matches the real Nov 13 Home-path
+reproduction: completion + U1 -> r4(9)/s4(9) false, D=8,
+pager=9, no new native play. Re-running r4 five seconds later
+returns false for the same reason.
+
+The beta now uses a MUCH narrower workaround instead of permanently
+spoofing Activity visibility or replaying the old video:
+1. Observe the original native `adapter.a.s4(nextIndex)` call.
+2. Verify the exact series Activity, same x05.w/TTVideoEngine,
+   actual native EOF within 9 seconds, unchanged user pause,
+   current business position D, ViewPager2.currentItem equal to
+   D+1, and that the next item is already loaded in the existing
+   adapter data. A pure Kotlin policy verifies all these constraints.
+3. Hook the runtime concrete implementation of `j15.d.y4()`
+   if necessary. ONLY while the current thread is synchronously
+   executing that matching host `s4()`, turn the host's original
+   `isPageInVisible()==true` answer into `false`. All other
+   callers, other threads, pages, user pause, last episode and
+   foreground UI operations see the untouched original return value.
+   The scope is always cleared in `finally`.
+4. Let `s4()`, `r4()`, host adapter, and actual next-episode
+   playback continue normally. Never write private visibility flags,
+   synthesize a URL, create a parallel ExoPlayer, simulate HOME,
+   or skip the next episode.
+5. Fix trace field labels from `pageVisible` to
+   `pageInvisible` so subsequent exports cannot invert the result.
+
+For rollback isolation, hint-bearing Home-like exits also let original
+`x05.w.pause()` run rather than suppressing the business callback,
+and then resume the same x05.w owner only AFTER Android confirms the
+process really backgrounded. The registered next-episode listener is
+preserved. We also avoid the ineffective delayed r4 retry in this
+hint-bearing path.
+
+Expected diagnosis if still failing:
+`native_page_visibility_scope=enabled` followed by
+`native_page_invisible=masked`; then the original
+`a.s4(...)=true`, updated business D and new TTVideoEngine.play.
+If the scope is not armed, check loaded count, pager index and engine
+identity. If no masked event appears, inspect the native query Hook
+installation/error (runtime concrete class).
+
+This is APK-based reasoning and **code-only remediation**. The full
+Android Debug build and actual device confirmation are still required;
+main branch remains unchanged.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
