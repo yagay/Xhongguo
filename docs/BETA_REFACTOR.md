@@ -505,3 +505,29 @@ migration remains a separate task: isolate UI menus/settings further from
 `Hooks.kt`, integrate more direct hook sites into circuit breakers, and
 extract official DTO resolution from the media bridge. None of these should
 be merged into main without a device-level regression pass.
+
+
+## 2026-11-13 18:02:07 selected next episode but native play did not start
+
+The device trace records native EOF on episode index 0, the host's
+\`f.U1 -> f.r4(1) -> a.s4(1)\` with \`accepted=true\`,
+and the official next \`x05.w\` registering the exact series adapter
+inside \`G4()\`. There was no subsequent \`TTVideoEngine.play()\`
+in the supplied capture. The earlier narrow visibility workaround
+solved selection rejection but did not guarantee native playback startup.
+
+After that specific native selection, beta now captures the newly
+registered \`x05.w\` (not the completed player) and waits 2.1 seconds
+for the host to start it naturally. A one-shot \`resume()\` on that
+already-selected new player is permitted only when the original EOF,
+unmodified pause epoch, same stopped Activity, same completed engine,
+current business index and ViewPager2 index, loaded next item, and
+exact attached adapter still agree. The code never replays \`r4()\`,
+increments a pager, calls the old holder or bare engine \`play()\`,
+or retries indefinitely. It logs \`series_next_player\`,
+\`series_next_start\` and \`series_next_start_recovery\` including
+a failure signal if the native host still does not start.
+
+This is a code-level mitigation, **not yet a real-device pass**.
+Test Home, Recents, explicit media pause, foreground next episode,
+the last episode, in-app mini-player and switching series.
