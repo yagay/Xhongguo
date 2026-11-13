@@ -620,7 +620,7 @@ internal object SystemMediaBridge {
 
     /** Observe the exact APK business page-selection methods, not just
      * ViewPager2.currentItem. r4/s4 update the adapter's selection D; the
-     * controller's y4() reports whether the host thinks its page is visible.
+     * controller's y4() is APK isPageInVisible() (true = INvisible).
      * Never mutate that flag here: Android navigation/visibility is real.
      */
     fun onSeriesPageSelection(
@@ -639,7 +639,7 @@ internal object SystemMediaBridge {
                 ?.invoke(pager) as? Number)?.toInt() ?: -1
         } catch (_: Throwable) { -1 }
         val controller = inheritedFieldValue(target, "m")
-        val pageVisible = try {
+        val pageInvisible = try {
             controller?.javaClass?.methods?.firstOrNull {
                 it.name == "y4" && it.parameterCount == 0
             }?.invoke(controller) as? Boolean
@@ -649,13 +649,13 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 官方选集业务阶段 method=$method" +
                 " phase=$phase arg=" + (selected ?: -1) +
                 " selection=$selectedIndex pager=$pagerIndex" +
-                " pageVisible=" + (pageVisible?.toString() ?: "?") +
+                " pageInvisible=" + (pageInvisible?.toString() ?: "?") +
                 " accepted=" + (result?.toString() ?: "?"))
             FeatureTrace.event("background", "series_page_selection", "observed",
                 "method=" + method + ",phase=" + phase +
                     ",selection=" + selectedIndex +
                     ",pager=" + pagerIndex +
-                    ",visible=" + (pageVisible?.toString() ?: "unknown"),
+                    ",invisible=" + (pageInvisible?.toString() ?: "unknown"),
                 flow = mediaFlow, minIntervalMs = 100L)
         }
         if (method == "a.s4" && phase == "before" &&
@@ -667,7 +667,7 @@ internal object SystemMediaBridge {
             }
             FeatureTrace.event("background", "series_selection_gate",
                 "observed", "requested=" + (selected ?: -1) +
-                    ",visible=" + pageVisible + "," + snapshot,
+                    ",invisible=" + pageInvisible + "," + snapshot,
                 flow = mediaFlow, minIntervalMs = 100L)
         }
         if (phase == "after" && result == false &&
@@ -684,13 +684,13 @@ internal object SystemMediaBridge {
             }
             LogUtil.warn("系统媒体: 原生业务拒绝选中下一集" +
                 " method=" + method + " requested=" + (selected ?: -1) +
-                " pager=" + pagerIndex + " visible=" + pageVisible +
+                " pager=" + pagerIndex + " invisible=" + pageInvisible +
                 " flags=" + evidence)
             FeatureTrace.event("background", "series_selection_rejected",
                 "degraded",
                 "method=" + method + ",indexDiff=" +
                     (pagerIndex - selectedIndex) +
-                    ",visible=" + pageVisible + "," + evidence,
+                    ",invisible=" + pageInvisible + "," + evidence,
                 flow = mediaFlow, minIntervalMs = 500L)
         }
     }
