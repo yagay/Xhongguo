@@ -6662,19 +6662,23 @@ object Hooks {
                                             e.javaClass.simpleName)
                                     }
                                 }
-                                try {
-                                    val original = chain.proceed()
-                                    try {
-                                        if (gMasterOn && gSystemMediaOn)
-                                            SystemMediaBridge.onSeriesPageSelection(
-                                                chain.thisObject, stage, "after",
-                                                targetPosition, original)
-                                    } catch (_: Throwable) { }
-                                    original
+                                // The synthetic isPageInVisible answer is
+                                // scoped strictly to ORIGINAL s4 bytecode.
+                                // Clear it BEFORE our own after-proceed
+                                // diagnostics query y4() again.
+                                val original = try {
+                                    chain.proceed()
                                 } finally {
                                     if (scoped) SystemMediaBridge
                                         .endNativeNextEpisodeSelection()
                                 }
+                                try {
+                                    if (gMasterOn && gSystemMediaOn)
+                                        SystemMediaBridge.onSeriesPageSelection(
+                                            chain.thisObject, stage, "after",
+                                            targetPosition, original)
+                                } catch (_: Throwable) { }
+                                original
                             })
                         installedSeriesHooks++
                     } catch (e: Throwable) {
