@@ -569,7 +569,7 @@ internal object SystemMediaBridge {
             originalEngineStillActive = seriesPlayerEngine(owner) === engine,
             sameSeriesActivity = activity.javaClass.name ==
                 "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
-                !activity.isFinishing,
+                !activity.isFinishing && !activity.hasWindowFocus(),
             userPauseUnchanged = explicitPauseEpoch == nativeEofPauseEpoch,
             noNewVideoStarted = lastNativeEngineAt <= nativeEofAt,
             completionAgeMs = SystemClock.uptimeMillis() - nativeEofAt,
@@ -579,8 +579,12 @@ internal object SystemMediaBridge {
         if (!NativeSelectionVisibilityPolicy.mayOverride(e)) return false
         nativeSelectionScope.set(NativeSelectionScope(
             controller, engine, nativeEofGeneration, requested))
-        FeatureTrace.event("background", "native_page_visibility_scope",
-            "enabled", "nextLoaded=true,sameEngine=true", flow=mediaFlow)
+        try {
+            FeatureTrace.event("background", "native_page_visibility_scope",
+                "enabled", "nextLoaded=true,sameEngine=true", flow=mediaFlow)
+        } catch (_: Throwable) {
+            // Diagnostic failures must never leave a stale thread scope.
+        }
         return true
     }
 
