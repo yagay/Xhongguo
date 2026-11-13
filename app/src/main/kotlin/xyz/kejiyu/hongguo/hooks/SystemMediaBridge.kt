@@ -488,26 +488,16 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 官方 U1 条件 probe" +
                 " J3IsOne=" + (gate?.toInt() == 1) +
                 " b4=" + (specialReplay?.toString() ?: "unknown"))
-            val engine = videoEngine.get()
-            val owner = nativeSeriesPlayer.get()
-            if (engine != null && owner != null &&
-                seriesPlayerEngine(owner) === engine &&
-                nativeEofEngine.get() === engine &&
-                episodeMonitor.hasNativeCompletion() &&
-                requestedBackgroundPlayback && !nativeEofRecoveryScheduled &&
-                !lastUserLeaveWasPlaying &&
-                currentPage == "ShortSeriesActivity") {
-                nativeEofRecoveryScheduled = true
-                val epoch = nativeEofPauseEpoch
-                val generation = nativeEofGeneration
-                val originalActivity = foregroundActivity.get()
-                // Pin the current adapter for just one delayed diagnostic /
-                // recovery operation; no permanent strong listener or
-                // copied video URL/episode model.
-                handler.postDelayed({
-                    maybeRecoverSeriesNativePager(adapter, engine,
-                        originalActivity, epoch, generation)
-                }, 5500L)
+            // Native a.s4() now handles the real next episode through a
+            // synchronous, narrowly scoped isPageInVisible query. Do NOT
+            // schedule the old +5.5s ViewPager2/r4 replay: that operation
+            // can advance a second time if the real next episode is merely
+            // buffering, silently skipping one episode.
+            if (episodeMonitor.hasNativeCompletion() &&
+                requestedBackgroundPlayback) {
+                FeatureTrace.event("background", "series_pager_recovery",
+                    "disabled", "reason=use_native_s4_visibility_gate",
+                    flow=mediaFlow, minIntervalMs=2000L)
             }
         }
         LogUtil.info("系统媒体: 官方全集适配器事件 method=$method" +
