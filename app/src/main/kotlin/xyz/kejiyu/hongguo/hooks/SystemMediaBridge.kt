@@ -577,6 +577,18 @@ internal object SystemMediaBridge {
                     ",visible=" + (pageVisible?.toString() ?: "unknown"),
                 flow = mediaFlow, minIntervalMs = 100L)
         }
+        if (method == "a.s4" && phase == "before" &&
+            episodeMonitor.hasNativeCompletion()) {
+            val fields = listOf("D", "E", "H2", "Y", "Z", "y2",
+                "P0", "T1", "x1", "L1", "v2")
+            val snapshot = fields.joinToString(",") {
+                it + "=" + (inheritedFieldValue(target, it)?.toString() ?: "?")
+            }
+            FeatureTrace.event("background", "series_selection_gate",
+                "observed", "requested=" + (selected ?: -1) +
+                    ",visible=" + pageVisible + "," + snapshot,
+                flow = mediaFlow, minIntervalMs = 100L)
+        }
         if (phase == "after" && result == false &&
             method in setOf("a.s4", "f.r4") &&
             episodeMonitor.hasNativeCompletion()) {
