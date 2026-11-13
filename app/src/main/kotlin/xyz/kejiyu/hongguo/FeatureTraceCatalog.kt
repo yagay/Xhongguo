@@ -41,6 +41,8 @@ object FeatureTraceCatalog {
             name.startsWith("systemMediaSeriesBusinessPause") ||
             name.startsWith("systemMediaSeriesListener") ||
             name.startsWith("systemMediaSeriesPagerRecovery") ||
+            name.startsWith("systemMediaSeriesBusinessResume") ||
+            name.startsWith("systemMediaNativePageInvisible") ||
             name.startsWith("systemMediaBackgroundNoHostPlay") ||
             name.startsWith("systemMediaEpisodeEndStall") ||
             name.startsWith("systemMediaNativeCompletionHook") ||
