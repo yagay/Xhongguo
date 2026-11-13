@@ -58,6 +58,12 @@ internal object SystemMediaBridge {
     // x05.w is the official full-series business player. Its completion
     // can be received without the background ViewPager2 advancing.
     private var nativeSeriesPlayer = WeakReference<Any>(null)
+    // A business-layer pause cannot be treated as "fully preserved"
+    // merely because TTVideoEngine.pause() was suppressed. Mark it for
+    // one native x05.w.resume() after Android confirms real background.
+    private var exitSeriesBusinessPausedEngine = WeakReference<Any>(null)
+    private var exitSeriesBusinessPausedOwner = WeakReference<Any>(null)
+    private var exitSeriesBusinessPausedAt = 0L
     private var nativeEofEngine = WeakReference<Any>(null)
     private var nativeEofAt = 0L
     private var nativeEofPauseEpoch = 0L
@@ -373,8 +379,18 @@ internal object SystemMediaBridge {
         val adapterListener = isSeriesAdapter(listener)
         val relevant = sameEngine || adapterListener
         if (!relevant) return
-        if (sameEngine && player != null)
+        if (sameEngine && player != null) {
             nativeSeriesPlayer = WeakReference(player)
+            if (stage == "business_pause_executed" &&
+                backgroundTransition.isProvisional() &&
+                !userCommandInProgress) {
+                exitSeriesBusinessPausedEngine = WeakReference(engine)
+                exitSeriesBusinessPausedOwner = WeakReference(player)
+                exitSeriesBusinessPausedAt = SystemClock.uptimeMillis()
+                FeatureTrace.event("background", "series_business_pause",
+                    "observed", "reason=real_host_pause", flow = mediaFlow)
+            }
+        }
         val listeners = try {
             val list = player?.javaClass?.getDeclaredField("v")?.apply {
                 isAccessible = true
@@ -1753,6 +1769,50 @@ internal object SystemMediaBridge {
             lastLifecyclePauseWasPlaying &&
             now - lastLifecyclePauseAt in 0L..EXIT_SNAPSHOT_WINDOW_MS &&
             snapshot.explicitPauseEpochAtCapture == explicitPauseEpoch
+        // An observed x05.w.pause() changes the BUSINESS player state even
+        // when the low-level engine was left running. Home/autoplay worked
+        // before we started swallowing the business pause. On a real app
+        // exit, restore the same original x05.w owner ONCE, so its next
+        // episode controller returns to a playing state.
+        val businessPaused = exitSeriesBusinessPausedEngine.get() === engine &&
+            now - exitSeriesBusinessPausedAt in 0L..EXIT_SNAPSHOT_WINDOW_MS
+        if (businessPaused) {
+            val originalSeries = exitSeriesBusinessPausedOwner.get()
+            val sameOwner = originalSeries != null &&
+                seriesPlayerEngine(originalSeries) === engine
+            val nativeResume = if (sameOwner)
+                originalSeries?.javaClass?.methods?.firstOrNull {
+                    it.name == "resume" && it.parameterCount == 0 &&
+                        it.returnType == Void.TYPE
+                } else null
+            exitSeriesBusinessPausedEngine.clear()
+            exitSeriesBusinessPausedOwner.clear()
+            exitSeriesBusinessPausedAt = 0L
+            if (nativeResume != null) {
+                try {
+                    nativeResume.invoke(originalSeries)
+                    LogUtil.info("系统媒体: Home 后已恢复原生 x05.w 业务播放器" +
+                        "，保持官方自动续集控制链")
+                    LogUtil.incr("systemMediaSeriesBusinessResume")
+                    FeatureTrace.event("background", "series_business_resume",
+                        "requested", "route=x05.w.resume,sameEngine=true",
+                        flow = mediaFlow)
+                    updateMediaNotification(true)
+                    scheduleTimelinePoll(400L)
+                    return
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 原生业务状态恢复失败 " +
+                        e.javaClass.simpleName)
+                    FeatureTrace.event("background", "series_business_resume",
+                        "fail", "errorType=" + e.javaClass.simpleName,
+                        flow = mediaFlow)
+                }
+            } else {
+                FeatureTrace.event("background", "series_business_resume",
+                    "degraded", "reason=missing_owner_or_resume",
+                    flow = mediaFlow)
+            }
+        }
         val hostHeld = BackgroundHandoffPolicy.shouldTreatUnknownNativeStateAsRunning(
             confirmedBackground = true,
             heldNativePauseOrLifecycle = transitionConfirmed &&
@@ -2547,6 +2607,9 @@ internal object SystemMediaBridge {
         videoContext.clear()
         videoEngine.clear()
         nativeSeriesPlayer.clear()
+        exitSeriesBusinessPausedEngine.clear()
+        exitSeriesBusinessPausedOwner.clear()
+        exitSeriesBusinessPausedAt = 0L
         nativeEofEngine.clear()
         nativeEofAt = 0L
         nativeEofGeneration++
