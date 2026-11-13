@@ -6592,6 +6592,40 @@ object Hooks {
                     Triple(baseSeriesAdapter, "s4",
                         arrayOf<Class<*>>(Int::class.javaPrimitiveType!!))
                 )
+                // APK's j15.d.y4() means isPageInVisible(), NOT
+                // isPageVisible(). Hook the concrete runtime implementation
+                // just once, and override its true result ONLY during the
+                // synchronous host adapter.a.s4(nextIndex) operation that
+                // SystemMediaBridge has validated against real native EOF.
+                val installedInvisibleQueries = java.util.Collections.synchronizedSet(
+                    mutableSetOf<java.lang.reflect.Method>())
+                fun hookNativeInvisibleQuery(controller: Any) {
+                    val query = controller.javaClass.methods.firstOrNull {
+                        it.name == "y4" && it.parameterCount == 0 &&
+                            it.returnType == Boolean::class.javaPrimitiveType &&
+                            !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                    } ?: return
+                    if (!installedInvisibleQueries.add(query)) return
+                    try {
+                        module.hook(query)
+                            .setId("xhSeriesNativePageInvisible_" +
+                                query.declaringClass.name.hashCode())
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { queryChain ->
+                                val hostAnswer = queryChain.proceed()
+                                if (hostAnswer == true && gMasterOn && gSystemMediaOn &&
+                                    SystemMediaBridge.shouldMaskNativePageInvisible(
+                                        queryChain.thisObject)) false
+                                else hostAnswer
+                            })
+                        LogUtil.info("  ✓ 全集原生 isPageInVisible 精确查询 Hook " +
+                            query.declaringClass.simpleName)
+                    } catch (e: Throwable) {
+                        installedInvisibleQueries.remove(query)
+                        LogUtil.warn("  原生 isPageInVisible Hook 失败 " +
+                            e.javaClass.simpleName)
+                    }
+                }
                 for ((idx, info) in boundaries.withIndex()) {
                     try {
                         val (clazz, methodName, args) = info
@@ -6611,14 +6645,36 @@ object Hooks {
                                             chain.thisObject, stage, "before",
                                             targetPosition)
                                 } catch (_: Throwable) { }
-                                val original = chain.proceed()
+                                var scoped = false
+                                if (methodName == "s4" && gMasterOn &&
+                                    gSystemMediaOn) {
+                                    try {
+                                        SystemMediaBridge.getNativeSeriesPageController(
+                                            chain.thisObject)?.let {
+                                            hookNativeInvisibleQuery(it)
+                                        }
+                                        scoped = SystemMediaBridge
+                                            .beginNativeNextEpisodeSelection(
+                                                chain.thisObject, targetPosition)
+                                    } catch (e: Throwable) {
+                                        LogUtil.warn(
+                                            "系统媒体: 原生 s4 可见性作用域失败 " +
+                                            e.javaClass.simpleName)
+                                    }
+                                }
                                 try {
-                                    if (gMasterOn && gSystemMediaOn)
-                                        SystemMediaBridge.onSeriesPageSelection(
-                                            chain.thisObject, stage, "after",
-                                            targetPosition, original)
-                                } catch (_: Throwable) { }
-                                original
+                                    val original = chain.proceed()
+                                    try {
+                                        if (gMasterOn && gSystemMediaOn)
+                                            SystemMediaBridge.onSeriesPageSelection(
+                                                chain.thisObject, stage, "after",
+                                                targetPosition, original)
+                                    } catch (_: Throwable) { }
+                                    original
+                                } finally {
+                                    if (scoped) SystemMediaBridge
+                                        .endNativeNextEpisodeSelection()
+                                }
                             })
                         installedSeriesHooks++
                     } catch (e: Throwable) {
