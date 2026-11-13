@@ -451,6 +451,14 @@ spoofing Activity visibility or replaying the old video:
    or skip the next episode.
 5. Fix trace field labels from `pageVisible` to
    `pageInvisible` so subsequent exports cannot invert the result.
+6. Retire the delayed manual `ViewPager2`/`r4()` fallback on ALL
+   exits: if the official next video is buffering for more than 5.5s,
+   that delayed replay can otherwise skip an episode. Let original
+   `s4()` select exactly once.
+7. Clear the temporary thread-local override before module-owned
+   after-callback diagnostics read `y4()`, preventing a false-positive
+   mask in the trace. Also require that the activity has no window
+   focus as independent background evidence.
 
 For rollback isolation, hint-bearing Home-like exits also let original
 `x05.w.pause()` run rather than suppressing the business callback,
