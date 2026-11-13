@@ -360,6 +360,57 @@ A local Kotlin compilation ran 9 pure-policy assertions, including the
 `D=1,pager=2` reconciliation and no-skip behavior. Full Android Debug
 CI and real-device playback are not yet confirmed; only `beta` changed.
 
+## 2026-11-13 06:58 Home autoplay regression: isolate native business pause
+
+Source: attached `Xhongguo-diagnostic-20261113-065801.zip`
+(app 7.3.5.32, process 1905, 06:55:34 onward).
+
+- **06:55:43** `onUserLeaveHint` was observed. The unified
+  `ActivityPrePaused` snapshot was captured. The new module
+  `x05.w.pause()` hook suppressed **two genuine host calls** before
+  the Activity stopped.
+- Background was confirmed at 06:55:44 and progress advanced normally.
+  At 06:57:37 the actual `x05.w.onCompletion` fired; `m15.a.h2`
+  and `adapter.f.U1(String)` ran; registered native adapter listener
+  remained alive.
+- The original `adapter.f.r4(9)` -> `adapter.a.s4(9)` returned
+  **false**, leaving business index `D=8` while the official
+  `ViewPager2.currentItem=9` and `y4()=true`. This was a real host
+  rejection, not a missing completion callback.
+- 5.5 seconds later, the module's `r4(9)` retry also returned
+  **false** with the same indexes; this proves repeating r4 does not
+  recover this state.
+
+Hypothesis, not yet proven causally: the newer native
+`x05.w.pause()` interception changed the full-series business
+player's lifecycle bookkeeping, producing an EOF page-selection
+rejection even for Home; that hook did not exist when Home autoplay
+previously worked. The regression rollback in `beta` therefore:
+1. For a recent genuine `onUserLeaveHint`, allow the original
+   `x05.w.pause()` to execute. Continue holding only the matching
+   TTVideoEngine at the short Android leave boundary; keep the native
+   next-episode listener.
+2. After process importance and Activity.onStop prove the app truly
+   backgrounded, detect that this SAME x05.w business owner was paused
+   by its original code. Resume it **once through x05.w.resume()**;
+   do not assume the whole business player is active merely because
+   the low-level decoder progressed.
+3. Do not schedule the ineffective delayed `adapter.r4()` or
+   ViewPager2 next-item replay for this hinted Home-like path.
+4. Log APK-native `adapter.a.s4()` gate flags before it executes
+   (D,E,H2,Y,Z,y2,P0,T1,x1,L1,v2) and after a rejection. Never
+   force any of these private fields to fabricated values.
+
+This is a small, reversible regression isolation change, not a
+validated cure: it must be tested on the actual Android host.
+Confirm next test has `series_business_pause=passthrough` and
+`series_business_resume=requested` before
+`series_page_selection` and actual new TTVideoEngine.play events.
+A missing native resume should log a degraded reason.
+
+No Android Gradle Debug APK compilation or real-device success
+confirmation was available at the time of this commit; main unchanged.
+
 ## Manual regression checklist
 
 - [ ] Open feed and verify current title/official poster in the media card.
