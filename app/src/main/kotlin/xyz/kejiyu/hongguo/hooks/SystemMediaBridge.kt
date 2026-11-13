@@ -336,12 +336,10 @@ internal object SystemMediaBridge {
      * Never fabricate an observer or synthesize a next-episode command.
      */
     fun shouldHoldSeriesListenerRemoval(player: Any?, listener: Any?): Boolean {
-        // Preserve stock Home behavior for both native pause and listener
-        // lifetime. This is a rollback of our newer business-layer hold,
-        // not a synthetic HOME event.
-        if (lastUserLeaveWasPlaying &&
-            SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..4000L)
-            return false
+        // Preserve the native autoplay listener in the background.
+        // The Nov 13 regression showed a.s4 rejected selection even while
+        // its adapter was still registered; allowing x05.w.pause does NOT
+        // mean discarding the real listener on Activity.onStop.
         if (!isSeriesAdapter(listener) ||
             !seriesBusinessHandoffAllowed(player)) return false
         backgroundTransition.recordHeld()
