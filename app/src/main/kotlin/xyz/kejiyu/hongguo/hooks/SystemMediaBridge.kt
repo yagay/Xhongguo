@@ -537,6 +537,87 @@ internal object SystemMediaBridge {
         return null
     }
 
+    /** This marker lives ONLY during one synchronous host s4() call.
+     * It is never a permanent "app visible" spoof. Calls on other threads,
+     * pages, controller instances or outside s4 return the native value.
+     */
+    private data class NativeSelectionScope(
+        val controller: Any,
+        val engine: Any,
+        val eofGeneration: Long,
+        val requestedIndex: Int
+    )
+    private val nativeSelectionScope = ThreadLocal<NativeSelectionScope?>()
+
+    fun getNativeSeriesPageController(adapter: Any?): Any? =
+        if (isSeriesAdapter(adapter)) adapter?.let {
+            inheritedFieldValue(it, "m")
+        } else null
+
+    fun beginNativeNextEpisodeSelection(adapter: Any?, requested: Int?): Boolean {
+        if (!enabled || adapter == null || requested == null ||
+            !isSeriesAdapter(adapter) || !requestedBackgroundPlayback ||
+            !episodeMonitor.hasNativeCompletion() || userCommandInProgress)
+            return false
+        val activity = foregroundActivity.get() ?: return false
+        val engine = videoEngine.get() ?: return false
+        val owner = nativeSeriesPlayer.get() ?: return false
+        val controller = getNativeSeriesPageController(adapter) ?: return false
+        val selected = (inheritedFieldValue(adapter, "D") as? Number)
+            ?.toInt() ?: return false
+        val pager = inheritedFieldValue(adapter, "k") ?: return false
+        val pagerIndex = try {
+            (pager.javaClass.getMethod("getCurrentItem")
+                .invoke(pager) as? Number)?.toInt() ?: -1
+        } catch (_: Throwable) { -1 }
+        val count = (inheritedFieldValue(adapter, "h") as? List<*>)
+            ?.size ?: -1
+        val e = NativeSelectionVisibilityPolicy.Evidence(
+            backgroundConfirmed = requestedBackgroundPlayback,
+            nativeCompletionObserved = nativeEofEngine.get() === engine &&
+                episodeMonitor.hasNativeCompletion(),
+            originalEngineStillActive = seriesPlayerEngine(owner) === engine,
+            sameSeriesActivity = activity.javaClass.name ==
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
+                !activity.isFinishing,
+            userPauseUnchanged = explicitPauseEpoch == nativeEofPauseEpoch,
+            noNewVideoStarted = lastNativeEngineAt <= nativeEofAt,
+            completionAgeMs = SystemClock.uptimeMillis() - nativeEofAt,
+            businessIndex = selected, pagerIndex = pagerIndex,
+            requestedIndex = requested, loadedEpisodeCount = count
+        )
+        if (!NativeSelectionVisibilityPolicy.mayOverride(e)) return false
+        nativeSelectionScope.set(NativeSelectionScope(
+            controller, engine, nativeEofGeneration, requested))
+        FeatureTrace.event("background", "native_page_visibility_scope",
+            "enabled", "nextLoaded=true,sameEngine=true", flow=mediaFlow)
+        return true
+    }
+
+    fun shouldMaskNativePageInvisible(controller: Any?): Boolean {
+        val scope = nativeSelectionScope.get() ?: return false
+        val active = enabled && requestedBackgroundPlayback &&
+            episodeMonitor.hasNativeCompletion() &&
+            scope.controller === controller &&
+            scope.engine === videoEngine.get() &&
+            scope.eofGeneration == nativeEofGeneration &&
+            !userCommandInProgress &&
+            explicitPauseEpoch == nativeEofPauseEpoch
+        if (active) {
+            LogUtil.info("系统媒体: 仅原生 s4(" + scope.requestedIndex +
+                ") 内忽略 isPageInVisible=true，允许正常下一集")
+            LogUtil.incr("systemMediaNativePageInvisibleMasked")
+            FeatureTrace.event("background", "native_page_invisible",
+                "masked", "scope=original_s4", flow=mediaFlow,
+                minIntervalMs=100L)
+        }
+        return active
+    }
+
+    fun endNativeNextEpisodeSelection() {
+        nativeSelectionScope.remove()
+    }
+
     /** Observe the exact APK business page-selection methods, not just
      * ViewPager2.currentItem. r4/s4 update the adapter's selection D; the
      * controller's y4() reports whether the host thinks its page is visible.
