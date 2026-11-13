@@ -299,6 +299,21 @@ internal object SystemMediaBridge {
      * host player's own state even if TTVideoEngine.pause is suppressed.
      */
     fun shouldHoldSeriesBusinessPause(player: Any?): Boolean {
+        // Regression 2026-11-13: Home-like exit reached the official
+        // x05.w.pause TWICE, while the video completed but a.s4 denied
+        // selecting the next episode. Do not suppress the original business
+        // pause on a hint-bearing exit; keep the lower-level, narrowly timed
+        // TTVideoEngine handoff guard. This restores the native lifecycle
+        // ordering that previously allowed Home autoplay.
+        val hintExit = lastUserLeaveWasPlaying &&
+            SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..4000L
+        if (hintExit) {
+            FeatureTrace.event("background", "series_business_pause",
+                "passthrough", "reason=user_leave_hint", flow=mediaFlow,
+                minIntervalMs=700L)
+            LogUtil.info("系统媒体: Home 类离开，允许原生 x05.w.pause 正常执行")
+            return false
+        }
         if (!seriesBusinessHandoffAllowed(player)) return false
         backgroundTransition.recordHeld()
         LogUtil.info("系统媒体: 保留官方全集播放器 x05.w.pause" +
@@ -315,6 +330,12 @@ internal object SystemMediaBridge {
      * Never fabricate an observer or synthesize a next-episode command.
      */
     fun shouldHoldSeriesListenerRemoval(player: Any?, listener: Any?): Boolean {
+        // Preserve stock Home behavior for both native pause and listener
+        // lifetime. This is a rollback of our newer business-layer hold,
+        // not a synthetic HOME event.
+        if (lastUserLeaveWasPlaying &&
+            SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..4000L)
+            return false
         if (!isSeriesAdapter(listener) ||
             !seriesBusinessHandoffAllowed(player)) return false
         backgroundTransition.recordHeld()
@@ -460,6 +481,7 @@ internal object SystemMediaBridge {
                 nativeEofEngine.get() === engine &&
                 episodeMonitor.hasNativeCompletion() &&
                 requestedBackgroundPlayback && !nativeEofRecoveryScheduled &&
+                !lastUserLeaveWasPlaying &&
                 currentPage == "ShortSeriesActivity") {
                 nativeEofRecoveryScheduled = true
                 val epoch = nativeEofPauseEpoch
