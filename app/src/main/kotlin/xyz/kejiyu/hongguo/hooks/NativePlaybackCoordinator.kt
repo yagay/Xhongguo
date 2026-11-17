@@ -149,6 +149,19 @@ internal class NativePlaybackCoordinator {
     fun canDispatchEpisodeCommand(): Boolean =
         phase != Phase.COMPLETED && phase != Phase.IDLE
 
+    /** Only the already accepted host selection can have a one-shot
+     * continuation. Never permit a second transition after new play(). */
+    @Synchronized
+    fun canContinueAcceptedSelection(
+        adapter: Any?, targetIndex: Int, completedEngine: Any?
+    ): Boolean =
+        !explicitlyPaused &&
+        (phase == Phase.SELECTED || phase == Phase.BOUND) &&
+        pendingIndex == targetIndex &&
+        selectedAdapter.get() === adapter &&
+        activeEngine.get() === completedEngine &&
+        finishedEngine.get() === completedEngine
+
     @Synchronized
     fun reset() {
         generation++
