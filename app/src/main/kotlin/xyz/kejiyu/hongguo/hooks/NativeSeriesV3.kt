@@ -170,6 +170,13 @@ internal object NativeSeriesV3 {
         resumeAttemptGeneration = -1L
         trace("eof", "observed", "generation=$g,background=" +
             SystemMediaBridge.isOfficialSeriesBackground())
+        // Diagnostics only. No speculative s4(), pager movement or play().
+        handler.postDelayed({
+            if (state.snapshot().generation == g &&
+                state.snapshot().phase == NativeSeriesV3State.Phase.COMPLETED)
+                trace("selection", "degraded",
+                    "host_did_not_accept_next_after_eof")
+        }, 4200L)
     }
 
     fun onAutoplay(a: Any?, phase: String) {
