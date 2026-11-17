@@ -7761,6 +7761,16 @@ object Hooks {
                     e.javaClass.simpleName)
             }
             try {
+                ham(c, "onWindowFocusChanged", "foregroundWindowFocus") { chain ->
+                    val result = chain.proceed()
+                    try {
+                        ForegroundLaunchTrace.onWindowFocus(
+                            chain.thisObject as? Activity, chain.getArg(0) as? Boolean == true)
+                    } catch (_: Throwable) {}
+                    result
+                }
+            } catch (_: Throwable) {}
+            try {
                 ham(c, "onNewIntent", "foregroundNewIntent") { chain ->
                     try {
                         ForegroundLaunchTrace.onNewIntent(chain.thisObject as? Activity)
