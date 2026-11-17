@@ -491,7 +491,7 @@ internal object SystemMediaBridge {
         // navigation. No ViewPager2 move followed by a delayed r4 patch.
         handler.post {
             if (!enabled || userCommandInProgress) return@post
-            val result = OfficialSeriesPlayback.skipNative(delta)
+            val result = NativeSeriesV3.skipNative(delta)
             FeatureTrace.event("media", "episode_skip",
                 if (result == "selected") "requested" else "degraded",
                 "source=$reason,route=host_business,indexDelta=$delta,result=$result",
@@ -609,12 +609,12 @@ internal object SystemMediaBridge {
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
         // A completed series episode MUST be allowed to pause/release its
         // own decoder while the host binds the next holder.
-        if (OfficialSeriesPlayback.isSeriesEngine(candidate) &&
-            OfficialSeriesPlayback.snapshot().phase in setOf(
-                OfficialSeriesTimeline.Phase.COMPLETED,
-                OfficialSeriesTimeline.Phase.SELECTED,
-                OfficialSeriesTimeline.Phase.BOUND,
-                OfficialSeriesTimeline.Phase.STARTING)) return false
+        if (NativeSeriesV3.isSeriesEngine(candidate) &&
+            NativeSeriesV3.snapshot().phase in setOf(
+                NativeSeriesV3State.Phase.COMPLETED,
+                NativeSeriesV3State.Phase.SELECTED,
+                NativeSeriesV3State.Phase.BOUND,
+                NativeSeriesV3State.Phase.STARTING)) return false
         // The host can issue TTVideoEngine.pause() while advancing an
         // episode. A blanket ten-minute background guard blocks that native
         // transition and strands the player at duration == position.
@@ -892,7 +892,7 @@ internal object SystemMediaBridge {
                 lastVisibleInfoAt = now
                 captureVisibleMediaInfo(activeActivity)
             }
-            if (knownPlaying || OfficialSeriesPlayback.needsProgressPolling())
+            if (knownPlaying || NativeSeriesV3.needsProgressPolling())
                 scheduleTimelinePoll(900L)
         }
     }
@@ -944,7 +944,7 @@ internal object SystemMediaBridge {
             // background auto-start. A UI page, play() call or stale
             // metadata duration alone is not evidence.
             if (nativeDuration != null && nativePosition != null &&
-                OfficialSeriesPlayback.onProgress(
+                NativeSeriesV3.onProgress(
                     engine, nativePosition, nativeDuration)) {
                 onNativePlayback(true, "v2_official_series_progress", engine)
                 updateSessionMetadata()
@@ -1507,7 +1507,7 @@ internal object SystemMediaBridge {
         if (action == "play") {
             lastLifecyclePauseWasPlaying = false
             val seriesStarting =
-                OfficialSeriesPlayback.awaitingProgress(candidate)
+                NativeSeriesV3.awaitingProgress(candidate)
             if (seriesStarting) {
                 knownPlaying = false
                 updateSessionState(false)
@@ -2188,7 +2188,7 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
-        OfficialSeriesPlayback.onActivityResumed(activity)
+        NativeSeriesV3.onActivityResumed(activity)
         pendingExit = null
         lastPlayerActivityPauseAt = 0L
         lastUserLeaveAt = 0L
@@ -2409,7 +2409,7 @@ internal object SystemMediaBridge {
         if (!play && reason.startsWith("system") ||
             !play && reason == "notification-action") {
             explicitPauseEpoch++
-            OfficialSeriesPlayback.onExplicitPause()
+            NativeSeriesV3.onExplicitPause()
             pendingExit = null
             backgroundTransition.cancel()
             backgroundPauseGuardEngine.clear()
@@ -2566,7 +2566,7 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
-        OfficialSeriesPlayback.reset()
+        NativeSeriesV3.reset()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }
