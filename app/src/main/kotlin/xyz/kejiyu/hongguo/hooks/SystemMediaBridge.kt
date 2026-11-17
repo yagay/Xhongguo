@@ -396,6 +396,34 @@ internal object SystemMediaBridge {
             pendingNativeNextStart?.player?.get() === player
         val relevant = sameEngine || adapterListener || selectedNextPlayer
         if (!relevant) return
+        // Initial fullscreen playback may not re-enter s4(). If the
+        // officially active x05.w has resumed on the engine already
+        // observed by TTVideoEngine.play(), bind its ALIGNED native
+        // current selection to the same coordinator. Do not infer a
+        // preloaded episode from an unrelated player or fragment.
+        if (stage == "business_resumed" && sameEngine && player != null) {
+            val activity = foregroundActivity.get()
+            val adapter = nativeSeriesAdapter.get()
+            if (adapter != null && activity != null &&
+                nativeSeriesAdapterActivity.get() === activity &&
+                activity.javaClass.name ==
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") {
+                NativeSeriesPort.selection(adapter)?.takeIf {
+                    it.pagerAligned
+                }?.let { current ->
+                    nativePlayback.onNativeSelection(
+                        adapter, current.index, accepted = true)
+                    nativePlayback.onNativeHolderBound(player, engine)
+                    if (nativePlayback.snapshot().playingIndex == current.index) {
+                        FeatureTrace.event("playback", "native_episode_verified",
+                            "playing", "index=" + current.index +
+                                ",source=active_native_holder",
+                            flow=mediaFlow, minIntervalMs=250L)
+                        handler.post { mediaRefresh.onNativeDataChanged() }
+                    }
+                }
+            }
+        }
         // The accepted native s4() creates the next x05.w inside G4().
         // Capture only the listener registered on the exact adapter whose
         // selection is in progress; do not confuse preloaded players with
