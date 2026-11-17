@@ -262,8 +262,15 @@ internal object NativeSeriesV3 {
 
     /** Called BEFORE x05.w.L(engine) to avoid blocking a nested host play. */
     fun onEngineBindingStart(holder: Any?, e: Any?) {
-        if (holder?.javaClass?.name == SERIES_PLAYER && e != null)
-            bindingEngine = WeakReference(e)
+        if (holder?.javaClass?.name != SERIES_PLAYER || e == null) return
+        bindingEngine = WeakReference(e)
+        // First-series play() may execute synchronously INSIDE L(engine).
+        // Register this original host holder before the nested engine call
+        // so the MediaSession does not announce success prematurely.
+        if (currentEngine.get() == null && isSeriesRoute()) {
+            currentEngine = WeakReference(e)
+            currentHolder = WeakReference(holder)
+        }
     }
 
     fun onEngineBound(holder: Any?, e: Any?) {
