@@ -1149,18 +1149,59 @@ internal object SystemMediaBridge {
             " index=" + pending.targetIndex +
             " mode=" + resumeResult.reason +
             " engineBound=" + (newHolderEngine != null))
+        // Diagnostics only: do NOT issue a second play()/resume()/r4().
+        // The host fetches VideoModel asynchronously and c15.d.c() needs
+        // the same no-Surface flag when its PlayCommand runs later.
         handler.postDelayed({
-            if (pendingNativeNextStart === pending &&
-                nativeEofGeneration == pending.generation &&
-                videoEngine.get() === completedEngine &&
-                lastNativeEngineAt <= nativeEofAt) {
-                FeatureTrace.event("background", "series_next_start", "degraded",
-                    "reason=no_native_play_after_resume,index=" +
-                        pending.targetIndex, flow=mediaFlow)
-                LogUtil.warn("系统媒体: 下一集原生 resume 后仍未观察到新视频播放")
-                pendingNativeNextStart = null
+            if (newHolderEngine != null &&
+                NativeSeriesPort.hasActiveNoSurfaceMode(newHolderEngine)) {
+                val state = nativePlayback.snapshot().phase
+                val readiness = NativeSeriesPort.engineReadiness(newHolderEngine)
+                FeatureTrace.event("background", "series_next_start",
+                    "pending", "reason=awaiting_engine_progress,index=" +
+                        pending.targetIndex + ",phase=$state" +
+                        ",prepared=" + readiness.prepared +
+                        ",hasVideoModel=" + readiness.hasModel +
+                        ",nativeState=" + readiness.playbackState,
+                    flow=mediaFlow)
             }
-        }, 3000L)
+        }, 5000L)
+        // Scope safety: do not leave the original APK's internal no-Surface
+        // flag enabled indefinitely if the network/model never becomes ready.
+        handler.postDelayed({
+            if (newHolderEngine != null &&
+                NativeSeriesPort.hasActiveNoSurfaceMode(newHolderEngine)) {
+                val readiness = NativeSeriesPort.engineReadiness(newHolderEngine)
+                NativeSeriesPort.finishAcceptedBackgroundEpisode(
+                    newHolderEngine, "start_timeout")
+                FeatureTrace.event("background", "series_next_start",
+                    "degraded", "reason=no_progress_after_native_resume" +
+                        ",index=" + pending.targetIndex +
+                        ",prepared=" + readiness.prepared +
+                        ",hasVideoModel=" + readiness.hasModel +
+                        ",nativeState=" + readiness.playbackState,
+                    flow=mediaFlow)
+                LogUtil.warn("系统媒体: 下一集没有真实进度，已撤回无 Surface " +
+                    "交接许可（未重跳集）")
+            }
+        }, 45000L)
+    }
+
+    /** APK's own onPrepared/onPlaybackStateChanged are the source-ready
+     * evidence for the same x05.w holder, not a reason to create a player. */
+    fun onSeriesEngineReadiness(stage: String, holder: Any?, candidate: Any?) {
+        if (!enabled || holder == null || candidate == null ||
+            !NativeSeriesPort.hasActiveNoSurfaceMode(candidate)) return
+        if (seriesPlayerEngine(holder) !== candidate) return
+        val r = NativeSeriesPort.engineReadiness(candidate)
+        FeatureTrace.event("background", "series_engine_readiness",
+            "observed", "stage=$stage,prepared=" + r.prepared +
+                ",hasVideoModel=" + r.hasModel +
+                ",nativeState=" + r.playbackState,
+            flow=mediaFlow, minIntervalMs=150L)
+        LogUtil.info("系统媒体: 后台下一集官方引擎阶段 $stage" +
+            " prepared=" + r.prepared + " hasModel=" + r.hasModel +
+            " playbackState=" + r.playbackState)
     }
 
     /** Observe the exact APK business page-selection methods, not just
