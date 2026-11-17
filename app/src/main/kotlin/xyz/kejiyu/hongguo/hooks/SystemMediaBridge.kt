@@ -196,7 +196,7 @@ internal object SystemMediaBridge {
     private fun shouldHoldOriginalOnLeave(candidateEngine: Any?): Boolean {
         // Once native EOF was observed, pause/release belongs to the host's
         // NEXT episode handoff, not Android background lifecycle.
-        if (episodeMonitor.hasNativeCompletion()) return false
+        if (hasCurrentNativeEof()) return false
         val hold = backgroundTransition.canHold(
             ownerActivity = foregroundActivity.get(),
             ownerEngine = candidateEngine,
@@ -290,7 +290,7 @@ internal object SystemMediaBridge {
      * provisional handoff; a system media pause invalidates its pause epoch.
      */
     private fun seriesBusinessHandoffAllowed(player: Any?): Boolean {
-        if (episodeMonitor.hasNativeCompletion()) return false
+        if (hasCurrentNativeEof()) return false
         if (!enabled || foregroundActivity.get()?.javaClass?.name !=
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity")
             return false
@@ -580,7 +580,7 @@ internal object SystemMediaBridge {
             // schedule the old +5.5s ViewPager2/r4 replay: that operation
             // can advance a second time if the real next episode is merely
             // buffering, silently skipping one episode.
-            if (episodeMonitor.hasNativeCompletion() &&
+            if (hasCurrentNativeEof() &&
                 requestedBackgroundPlayback) {
                 FeatureTrace.event("background", "series_pager_recovery",
                     "disabled", "reason=use_native_s4_visibility_gate",
@@ -823,7 +823,7 @@ internal object SystemMediaBridge {
     fun beginNativeNextEpisodeSelection(adapter: Any?, requested: Int?): Boolean {
         if (!enabled || adapter == null || requested == null ||
             !isSeriesAdapter(adapter) || !requestedBackgroundPlayback ||
-            !episodeMonitor.hasNativeCompletion() || userCommandInProgress)
+            !hasCurrentNativeEof() || userCommandInProgress)
             return false
         val activity = foregroundActivity.get() ?: return false
         val engine = videoEngine.get() ?: return false
@@ -841,7 +841,7 @@ internal object SystemMediaBridge {
         val e = NativeSelectionVisibilityPolicy.Evidence(
             backgroundConfirmed = requestedBackgroundPlayback,
             nativeCompletionObserved = nativeEofEngine.get() === engine &&
-                episodeMonitor.hasNativeCompletion(),
+                hasCurrentNativeEof(),
             originalEngineStillActive = seriesPlayerEngine(owner) === engine,
             sameSeriesActivity = activity.javaClass.name ==
                 "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
@@ -867,7 +867,7 @@ internal object SystemMediaBridge {
     fun shouldMaskNativePageInvisible(controller: Any?): Boolean {
         val scope = nativeSelectionScope.get() ?: return false
         val active = enabled && requestedBackgroundPlayback &&
-            episodeMonitor.hasNativeCompletion() &&
+            hasCurrentNativeEof() &&
             scope.controller === controller &&
             scope.engine === videoEngine.get() &&
             scope.eofGeneration == nativeEofGeneration &&
@@ -931,7 +931,7 @@ internal object SystemMediaBridge {
             scope.eofGeneration != nativeEofGeneration ||
             scope.requestedIndex != targetIndex ||
             nativeEofEngine.get() !== completedEngine ||
-            !episodeMonitor.hasNativeCompletion() ||
+            !hasCurrentNativeEof() ||
             !requestedBackgroundPlayback || userCommandInProgress ||
             explicitPauseEpoch != nativeEofPauseEpoch ||
             activity.javaClass.name !=
@@ -975,7 +975,7 @@ internal object SystemMediaBridge {
             if (!enabled || !requestedBackgroundPlayback ||
                 handoff.eofGeneration != nativeEofGeneration ||
                 handoff.pauseEpoch != explicitPauseEpoch ||
-                !episodeMonitor.hasNativeCompletion() ||
+                !hasCurrentNativeEof() ||
                 nativeEofEngine.get() !== completed ||
                 videoEngine.get() !== completed ||
                 foregroundActivity.get() !== activity ||
@@ -1006,7 +1006,7 @@ internal object SystemMediaBridge {
      * official new engine from this accepted background series handoff. */
     fun isVerifiedNextSeriesEngine(candidate: Any?): Boolean {
         if (candidate == null || !enabled || !requestedBackgroundPlayback ||
-            !episodeMonitor.hasNativeCompletion() ||
+            !hasCurrentNativeEof() ||
             userCommandInProgress) return false
         val pending = pendingNativeNextStart ?: return false
         if (pending.generation != nativeEofGeneration ||
@@ -1083,7 +1083,7 @@ internal object SystemMediaBridge {
         val newHolderEngine = seriesPlayerEngine(nextPlayer)
         val evidence = SeriesNextPlayerRecoveryPolicy.Evidence(
             background = requestedBackgroundPlayback,
-            nativeEofObserved = episodeMonitor.hasNativeCompletion() &&
+            nativeEofObserved = hasCurrentNativeEof() &&
                 completedEngine != null && nativeEofEngine.get() === completedEngine,
             sameCompletedEngine = completedEngine != null &&
                 videoEngine.get() === completedEngine,
@@ -1201,7 +1201,7 @@ internal object SystemMediaBridge {
                 it.name == "y4" && it.parameterCount == 0
             }?.invoke(controller) as? Boolean
         } catch (_: Throwable) { null }
-        if (requestedBackgroundPlayback || episodeMonitor.hasNativeCompletion() ||
+        if (requestedBackgroundPlayback || hasCurrentNativeEof() ||
             method == "f.U1") {
             LogUtil.info("系统媒体: 官方选集业务阶段 method=$method" +
                 " phase=$phase arg=" + (selected ?: -1) +
@@ -1216,7 +1216,7 @@ internal object SystemMediaBridge {
                 flow = mediaFlow, minIntervalMs = 100L)
         }
         if (method == "a.s4" && phase == "before" &&
-            episodeMonitor.hasNativeCompletion()) {
+            hasCurrentNativeEof()) {
             val fields = listOf("D", "E", "H2", "Y", "Z", "y2",
                 "P0", "T1", "x1", "L1", "v2")
             val snapshot = fields.joinToString(",") {
@@ -1229,7 +1229,7 @@ internal object SystemMediaBridge {
         }
         if (phase == "after" && result == false &&
             method in setOf("a.s4", "f.r4") &&
-            episodeMonitor.hasNativeCompletion()) {
+            hasCurrentNativeEof()) {
             // APK bytecode: a.s4 can reject a page selection because of
             // current/old selection and removal/mark flags. Capture the
             // actual branch state without modifying any host-owned field.
@@ -1268,7 +1268,7 @@ internal object SystemMediaBridge {
         // The host can issue TTVideoEngine.pause() while advancing an
         // episode. A blanket ten-minute background guard blocks that native
         // transition and strands the player at duration == position.
-        if (episodeMonitor.hasNativeCompletion()) return false
+        if (hasCurrentNativeEof()) return false
         if (shouldHoldOriginalOnLeave(candidate)) {
             LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
             LogUtil.incr("systemMediaEarlyEnginePauseHeld")
@@ -1383,6 +1383,18 @@ internal object SystemMediaBridge {
     private val episodeMonitor = BackgroundEpisodeMonitor()
 
     /**
+     * One durable completion identity used by ALL native handoff gates.
+     * The timeline monitor can reset on an incomplete duration sample;
+     * its diagnostic flag is not authority for starting an accepted
+     * next x05.w holder. The coordinator preserves that actual callback.
+     */
+    private fun hasCurrentNativeEof(): Boolean {
+        val engine = videoEngine.get() ?: return false
+        return nativeEofEngine.get() === engine &&
+            nativePlayback.hasPendingNativeCompletion(engine)
+    }
+
+    /**
      * APK-verified completion stages:
      * VideoController.onCompletion(engine) ->
      * LayerHostMediaLayout.onVideoCompleted(inquirer, entity) ->
@@ -1455,7 +1467,7 @@ internal object SystemMediaBridge {
      */
     fun onNativeCompletion(candidate: Any?) {
         if (!enabled || candidate == null || videoEngine.get() !== candidate ||
-            episodeMonitor.hasNativeCompletion()) return
+            hasCurrentNativeEof()) return
         episodeMonitor.onNativeCompletion()
         nativePlayback.onNativeCompletion(candidate)
         FeatureTrace.event("playback", "native_episode_completed",
