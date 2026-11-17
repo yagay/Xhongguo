@@ -7,6 +7,43 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativePlaybackCoordinatorTest {
+    @Test fun eofSurvivesTimelineMonitorResetUntilNewHolderPlays() {
+        val state = NativePlaybackCoordinator()
+        val monitor = BackgroundEpisodeMonitor()
+        val oldEngine = Any()
+        val nextEngine = Any()
+        val adapter = Any()
+        state.onNativePlay(oldEngine)
+        monitor.onNativeCompletion()
+        state.onNativeCompletion(oldEngine)
+
+        // A stale/invalid duration is common while the next video loads.
+        // This legitimately resets the stall diagnostic, NOT native EOF.
+        monitor.onSample(
+            positionMs = -1L, durationMs = -1L,
+            backgroundActive = true, playing = true, nowMs = 2000L)
+        assertFalse(monitor.hasNativeCompletion())
+        assertTrue(state.hasPendingNativeCompletion(oldEngine))
+
+        state.onNativeSelection(adapter, 1, accepted = true)
+        state.onNativeHolderBound(Any(), nextEngine)
+        assertTrue(state.canContinueAcceptedSelection(adapter, 1, oldEngine))
+        assertTrue(state.hasPendingNativeCompletion(oldEngine))
+        state.onNativePlay(nextEngine)
+        assertFalse(state.hasPendingNativeCompletion(oldEngine))
+        assertFalse(state.canContinueAcceptedSelection(adapter, 1, oldEngine))
+    }
+
+    @Test fun playbackWithoutCompletionNeverHasEofPermission() {
+        val state = NativePlaybackCoordinator()
+        val oldEngine = Any()
+        val adapter = Any()
+        state.onNativePlay(oldEngine)
+        state.onNativeSelection(adapter, 1, accepted = true)
+        assertFalse(state.hasPendingNativeCompletion(oldEngine))
+        assertFalse(state.canContinueAcceptedSelection(adapter, 1, oldEngine))
+    }
+
     @Test fun confirmsNextEpisodeOnlyAfterActualBoundEnginePlays() {
         val state = NativePlaybackCoordinator()
         val old = Any()
