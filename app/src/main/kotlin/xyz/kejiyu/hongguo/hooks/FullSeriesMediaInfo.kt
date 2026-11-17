@@ -750,6 +750,16 @@ internal object FullSeriesMediaInfo {
             vid(it) == videoId
         } else null
         val observed = observedForEngine(engine)
+        // Use the host adapter's own l0() selection only after V3 has
+        // verified this exact engine is making progress. Its SaasVideoData
+        // may use a different video-ID namespace than TTVideoEngine.
+        val nativeSelected = NativeSeriesV3.confirmedSelectedSeriesModel(engine)
+        val nativeSelectedSeries = seriesId(field(nativeSelected, "episodesId")) ?:
+            seriesId(field(nativeSelected, "seriesId"))
+        val nativeSelectedDetail = detailForSeries(nativeSelectedSeries)
+        val verifiedNativeModel = nativeSelected?.takeIf {
+            nativeSelectedSeries != null && nativeSelectedDetail != null
+        }
         val fragment = mediaFromActiveFragment(activity,
             seriesKey = null, total = null, engineVideoId = videoId)
 
@@ -779,7 +789,12 @@ internal object FullSeriesMediaInfo {
         val safePresenter = if (active == null &&
             presenterVideoId != null && presenterSeriesId != null &&
             presenterDetail != null && modelAdvanced) presenterModel else null
-        val playingModel = active ?: safePresenter
+        val playingModel = active ?: verifiedNativeModel ?: safePresenter
+        if (verifiedNativeModel != null && active == null) {
+            FeatureTrace.event("media", "native_selected_model", "verified",
+                "engineProgress=true,adapterAligned=true,detailMatched=true",
+                minIntervalMs = 1800L)
+        }
         if (safePresenter != null) {
             LogUtil.info("系统媒体: 全集使用当前 Presenter 及匹配详情" +
                 " engineIdComparable=false" +
@@ -963,6 +978,7 @@ internal object FullSeriesMediaInfo {
             episode = episode,
             source = when {
                 active != null -> "saas-current-video-verified"
+                verifiedNativeModel != null -> "saas-native-selected-detail"
                 safePresenter != null -> "saas-presenter-matched-detail"
                 fragment.videoId != null -> "saas-visible-fragment-verified"
                 observed.seriesId != null -> "saas-observed-video-id"
