@@ -6291,7 +6291,6 @@ object Hooks {
                                 // for the next SERIES holder. Never reject
                                 // native play before series ownership is
                                 // confirmed by the source/progress pipeline.
-                                !OfficialSeriesPlayback.isSeriesRoute() &&
                                 !OfficialSeriesPlayback.isSeriesEngine(
                                     chain.thisObject) &&
                                 SinglePlaybackOwner.shouldBlockPlay(chain.thisObject)) {
@@ -6318,7 +6317,6 @@ object Hooks {
                             try {
                                 if (method.name == "play") {
                                     if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn) &&
-                                        !OfficialSeriesPlayback.isSeriesRoute() &&
                                         !OfficialSeriesPlayback.isSeriesEngine(
                                             chain.thisObject))
                                         SinglePlaybackOwner.onEnginePlayed(chain.thisObject)
@@ -6475,6 +6473,9 @@ object Hooks {
                 .setId("v2SeriesEngineBound")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn)
+                        OfficialSeriesPlayback.onEngineBindingStart(
+                            chain.thisObject, chain.getArg(0))
                     val result = chain.proceed()
                     if (gMasterOn && gSystemMediaOn) try {
                         OfficialSeriesPlayback.onEngineBound(
