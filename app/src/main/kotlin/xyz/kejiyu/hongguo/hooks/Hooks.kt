@@ -6666,19 +6666,23 @@ object Hooks {
                                 // scoped strictly to ORIGINAL s4 bytecode.
                                 // Clear it BEFORE our own after-proceed
                                 // diagnostics query y4() again.
-                                val original = try {
-                                    chain.proceed()
+                                // Keep the verified s4() scope until AFTER
+                                // its accepted return has been recorded. A
+                                // holder registered later will then match the
+                                // durable accepted-selection state.
+                                try {
+                                    val original = chain.proceed()
+                                    try {
+                                        if (gMasterOn && gSystemMediaOn)
+                                            SystemMediaBridge.onSeriesPageSelection(
+                                                chain.thisObject, stage, "after",
+                                                targetPosition, original)
+                                    } catch (_: Throwable) { }
+                                    original
                                 } finally {
                                     if (scoped) SystemMediaBridge
                                         .endNativeNextEpisodeSelection()
                                 }
-                                try {
-                                    if (gMasterOn && gSystemMediaOn)
-                                        SystemMediaBridge.onSeriesPageSelection(
-                                            chain.thisObject, stage, "after",
-                                            targetPosition, original)
-                                } catch (_: Throwable) { }
-                                original
                             })
                         installedSeriesHooks++
                     } catch (e: Throwable) {
