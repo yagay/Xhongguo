@@ -6390,8 +6390,13 @@ object Hooks {
                                                 .intercept(Hooker { callbackChain ->
                                                     val completed = callbackChain.proceed()
                                                     try {
-                                                        SystemMediaBridge.onNativeCompletion(
-                                                            callbackChain.getArg(0))
+                                                        // x05.w.onCompletion is the
+                                                        // SOLE authoritative series EOF.
+                                                        // Keep SDK callback observation
+                                                        // only for other playback routes.
+                                                        if (!OfficialSeriesPlayback.isSeriesRoute())
+                                                            SystemMediaBridge.onNativeCompletion(
+                                                                callbackChain.getArg(0))
                                                     } catch (e: Throwable) {
                                                         LogUtil.warn(
                                                             "系统媒体: completion 观察失败 " +
@@ -6531,6 +6536,32 @@ object Hooks {
                     }
                 })
             nativeCount++
+
+            // Read the ACTUAL autoplay-block decision made inside G4.
+            // Do not call i9() or I4() from a diagnostic probe: both are
+            // native business-policy methods, not free getters.
+            try {
+                val controllerClass = Class.forName("j15.d", false, classLoader)
+                val gates = controllerClass.declaredMethods.filter {
+                    it.name == "i9" && it.parameterCount == 0 &&
+                        it.returnType == Boolean::class.javaPrimitiveType
+                }
+                for ((index, gate) in gates.withIndex()) {
+                    module.hook(gate)
+                        .setId("v2SeriesNativeAutoplayGate_" + index)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn)
+                                OfficialSeriesPlayback.onNativeAutoplayGate(
+                                    chain.thisObject, result)
+                            result
+                        })
+                    nativeCount++
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("V2 i9 native gate: " + e.javaClass.simpleName)
+            }
 
             // Observe *only* original s4 selections, never synthesize an
             // extra ViewPager2.setCurrentItem/r4 selection after an EOF.
