@@ -6546,13 +6546,9 @@ object Hooks {
                     mutableSetOf<java.lang.reflect.Method>())
             fun ensureConcreteAutoplayGate(controller: Any) {
                 val gate = controller.javaClass.methods.firstOrNull {
-                    it.name == "i9" && it.parameterCount == 0 &&
-                        it.returnType == Boolean::class.javaPrimitiveType &&
-                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                    ConcreteNativeHookPolicy.isConcreteBooleanNoArgs(it, "i9")
                 } ?: controller.javaClass.declaredMethods.firstOrNull {
-                    it.name == "i9" && it.parameterCount == 0 &&
-                        it.returnType == Boolean::class.javaPrimitiveType &&
-                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                    ConcreteNativeHookPolicy.isConcreteBooleanNoArgs(it, "i9")
                 } ?: return
                 if (!observedAutoPlayGates.add(gate)) return
                 try {
@@ -6587,9 +6583,7 @@ object Hooks {
                     ?: return
                 ensureConcreteAutoplayGate(controller)
                 val query = controller.javaClass.methods.firstOrNull {
-                    it.name == "y4" && it.parameterCount == 0 &&
-                        it.returnType == Boolean::class.javaPrimitiveType &&
-                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                    ConcreteNativeHookPolicy.isConcreteBooleanNoArgs(it, "y4")
                 } ?: return
                 if (!installedVisibilityQueries.add(query)) return
                 try {
