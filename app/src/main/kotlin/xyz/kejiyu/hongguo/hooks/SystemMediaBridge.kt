@@ -389,6 +389,12 @@ internal object SystemMediaBridge {
             FeatureTrace.event("background", "series_next_player", "observed",
                 "stage=registered_during_native_selection", flow=mediaFlow)
         }
+        // The official new holder may register after s4() returns and its
+        // synchronous page-visibility scope has already been cleared.
+        if (stage == "listener_registered" && player != null &&
+            listener != null && adapterListener) {
+            rememberSelectedNextSeriesPlayer(player, listener)
+        }
         if (sameEngine && player != null) {
             nativeSeriesPlayer = WeakReference(player)
             if (stage == "business_pause_executed" &&
@@ -520,8 +526,12 @@ internal object SystemMediaBridge {
                 ",background=" + requestedBackgroundPlayback,
             flow = mediaFlow, minIntervalMs = 100L)
         if (method == "G4" && phase == "after" && adapter != null) {
-            nativeSelectionScope.get()?.takeIf { it.adapter === adapter }?.let {
-                scheduleNativeNextEpisodeStartCheck(it)
+            // Do not start a holder before s4() confirms selection.
+            nativeSelectionScope.get()?.takeIf { it.adapter === adapter &&
+                it.nextPlayer.get() != null }?.let {
+                FeatureTrace.event("background", "series_next_player",
+                    "observed", "stage=g4_waiting_for_selection",
+                    flow=mediaFlow)
             }
         }
     }
@@ -557,6 +567,20 @@ internal object SystemMediaBridge {
         var nextPlayer: WeakReference<Any> = WeakReference(null)
     )
     private val nativeSelectionScope = ThreadLocal<NativeSelectionScope?>()
+
+    /** Accepted HOST selection survives the s4() ThreadLocal and can
+     * match a subsequent native x05.w registration on another thread.
+     * Does not move the pager, fabricate an episode, or own a decoder. */
+    private data class AcceptedNativeNextEpisode(
+        val activity: WeakReference<Activity>,
+        val adapter: WeakReference<Any>,
+        val completedEngine: WeakReference<Any>,
+        val eofGeneration: Long,
+        val pauseEpoch: Long,
+        val targetIndex: Int,
+        val selectedAt: Long
+    )
+    @Volatile private var acceptedNativeNextEpisode: AcceptedNativeNextEpisode? = null
 
     fun getNativeSeriesPageController(adapter: Any?): Any? =
         if (isSeriesAdapter(adapter)) adapter?.let {
@@ -631,6 +655,109 @@ internal object SystemMediaBridge {
         nativeSelectionScope.remove()
     }
 
+    /**
+     * Record a host-selected page only while its real s4() scope is open.
+     * An early listener is captured now; a late registration matches the
+     * same adapter, EOF generation, activity and selected index afterwards.
+     */
+    private fun rememberAcceptedNativeNextEpisode(
+        adapter: Any, targetIndex: Int, selectedIndex: Int, pagerIndex: Int
+    ) {
+        val scope = nativeSelectionScope.get() ?: return
+        val activity = foregroundActivity.get() ?: return
+        val completedEngine = videoEngine.get() ?: return
+        val now = SystemClock.uptimeMillis()
+        if (scope.adapter !== adapter || scope.engine !== completedEngine ||
+            scope.eofGeneration != nativeEofGeneration ||
+            scope.requestedIndex != targetIndex ||
+            nativeEofEngine.get() !== completedEngine ||
+            !episodeMonitor.hasNativeCompletion() ||
+            !requestedBackgroundPlayback || userCommandInProgress ||
+            explicitPauseEpoch != nativeEofPauseEpoch ||
+            activity.javaClass.name !=
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            activity.isFinishing || activity.hasWindowFocus() ||
+            targetIndex < 1 || selectedIndex != targetIndex ||
+            pagerIndex != targetIndex ||
+            now - nativeEofAt !in 0L..9000L) return
+
+        val handoff = AcceptedNativeNextEpisode(
+            WeakReference(activity), WeakReference(adapter),
+            WeakReference(completedEngine), nativeEofGeneration,
+            explicitPauseEpoch, targetIndex, now)
+        acceptedNativeNextEpisode = handoff
+        FeatureTrace.event("background", "series_next_selection",
+            "accepted", "index=$targetIndex,asyncRegistrationAllowed=true",
+            flow=mediaFlow)
+
+        scope.nextPlayer.get()?.let { next ->
+            rememberSelectedNextSeriesPlayer(next, adapter)
+        }
+        // Expire rather than force a stale next-episode play.
+        handler.postDelayed({
+            if (acceptedNativeNextEpisode === handoff &&
+                pendingNativeNextStart?.generation != handoff.eofGeneration) {
+                acceptedNativeNextEpisode = null
+                FeatureTrace.event("background", "series_next_player",
+                    "degraded", "reason=selected_but_holder_not_registered,index=" +
+                        handoff.targetIndex, flow=mediaFlow)
+            }
+        }, 12000L)
+    }
+
+    private fun rememberSelectedNextSeriesPlayer(player: Any, adapter: Any) {
+        // Native listener registration can occur off the main thread.
+        handler.post {
+            val handoff = acceptedNativeNextEpisode ?: return@post
+            val activity = handoff.activity.get() ?: return@post
+            val completed = handoff.completedEngine.get() ?: return@post
+            val now = SystemClock.uptimeMillis()
+            if (!enabled || !requestedBackgroundPlayback ||
+                handoff.eofGeneration != nativeEofGeneration ||
+                handoff.pauseEpoch != explicitPauseEpoch ||
+                !episodeMonitor.hasNativeCompletion() ||
+                nativeEofEngine.get() !== completed ||
+                videoEngine.get() !== completed ||
+                foregroundActivity.get() !== activity ||
+                activity.isFinishing || activity.hasWindowFocus() ||
+                handoff.adapter.get() !== adapter ||
+                now - handoff.selectedAt !in 0L..12000L ||
+                player === nativeSeriesPlayer.get() ||
+                seriesPlayerEngine(player) === completed ||
+                userCommandInProgress ||
+                SinglePlaybackOwner.isOwnershipTransition()) return@post
+            val currentIndex = (inheritedFieldValue(adapter, "D") as? Number)
+                ?.toInt()
+            if (currentIndex != handoff.targetIndex) return@post
+            val pending = pendingNativeNextStart
+            if (pending?.generation == handoff.eofGeneration &&
+                pending.targetIndex == handoff.targetIndex) return@post
+            FeatureTrace.event("background", "series_next_player",
+                "observed", "stage=selected_holder_registered,index=" +
+                    handoff.targetIndex, flow=mediaFlow)
+            scheduleNativeNextEpisodeStartCheck(handoff, player)
+        }
+    }
+
+    /** Exception to the single-player route guard, limited to the exact
+     * official new engine from this accepted background series handoff. */
+    fun isVerifiedNextSeriesEngine(candidate: Any?): Boolean {
+        if (candidate == null || !enabled || !requestedBackgroundPlayback ||
+            !episodeMonitor.hasNativeCompletion() ||
+            userCommandInProgress) return false
+        val pending = pendingNativeNextStart ?: return false
+        if (pending.generation != nativeEofGeneration ||
+            pending.pauseEpoch != explicitPauseEpoch) return false
+        val next = pending.player.get() ?: return false
+        val adapter = pending.adapter.get() ?: return false
+        val activity = pending.activity.get() ?: return false
+        return foregroundActivity.get() === activity &&
+            !activity.isFinishing && !activity.hasWindowFocus() &&
+            seriesPlayerEngine(next) === candidate &&
+            (inheritedFieldValue(adapter, "D") as? Number)?.toInt() ==
+                pending.targetIndex
+    }
+
     // The original s4() can return true and D/currentItem can both advance
     // without ever starting the new x05.w. The G4() listener registration in
     // the 2026-11-13 diagnostic identifies the host's actual next holder.
@@ -648,24 +775,21 @@ internal object SystemMediaBridge {
     )
     private var pendingNativeNextStart: NativeNextEpisodeStart? = null
 
-    private fun scheduleNativeNextEpisodeStartCheck(scope: NativeSelectionScope) {
-        val next = scope.nextPlayer.get() ?: run {
-            FeatureTrace.event("background", "series_next_player", "degraded",
-                "reason=no_next_holder_in_g4", flow=mediaFlow)
-            return
-        }
-        val activity = foregroundActivity.get() ?: return
-        if (pendingNativeNextStart?.generation == scope.eofGeneration &&
-            pendingNativeNextStart?.targetIndex == scope.requestedIndex) return
+    private fun scheduleNativeNextEpisodeStartCheck(
+        handoff: AcceptedNativeNextEpisode, next: Any
+    ) {
+        if (pendingNativeNextStart?.generation == handoff.eofGeneration &&
+            pendingNativeNextStart?.targetIndex == handoff.targetIndex) return
         val pending = NativeNextEpisodeStart(
-            WeakReference(activity), WeakReference(scope.adapter),
-            WeakReference(next), WeakReference(scope.engine),
-            scope.eofGeneration, explicitPauseEpoch, scope.requestedIndex)
+            handoff.activity, handoff.adapter,
+            WeakReference(next), handoff.completedEngine,
+            handoff.eofGeneration, handoff.pauseEpoch, handoff.targetIndex)
         pendingNativeNextStart = pending
-        LogUtil.info("系统媒体: 原生下一集播放器已注册，等待宿主启动验证" +
-            " index=" + scope.requestedIndex)
+        LogUtil.info("系统媒体: 官方下一集播放器已注册，等待宿主启动验证" +
+            " index=" + handoff.targetIndex)
         FeatureTrace.event("background", "series_next_start", "pending",
-            "index=" + scope.requestedIndex + ",route=native_holder",
+            "index=" + handoff.targetIndex +
+                ",route=accepted_native_selection",
             flow=mediaFlow)
         handler.postDelayed({ recoverNativeNextEpisodeStart(pending) }, 2100L)
     }
@@ -811,6 +935,11 @@ internal object SystemMediaBridge {
                     ",pager=" + pagerIndex +
                     ",invisible=" + (pageInvisible?.toString() ?: "unknown"),
                 flow = mediaFlow, minIntervalMs = 100L)
+        }
+        if (method == "a.s4" && phase == "after" &&
+            result == true && selected != null) {
+            rememberAcceptedNativeNextEpisode(
+                target, selected, selectedIndex, pagerIndex)
         }
         if (method == "a.s4" && phase == "before" &&
             episodeMonitor.hasNativeCompletion()) {
@@ -1394,6 +1523,7 @@ internal object SystemMediaBridge {
     private fun invalidateForVideoTransition(sameSeries: Boolean, reason: String) {
         episodeMonitor.reset()
         pendingNativeNextStart = null
+        acceptedNativeNextEpisode = null
         nativeEofGeneration++
         nativeEofEngine.clear()
         nativeEofAt = 0L
@@ -2874,6 +3004,7 @@ internal object SystemMediaBridge {
         nativeEofEngine.clear()
         nativeEofAt = 0L
         pendingNativeNextStart = null
+        acceptedNativeNextEpisode = null
         nativeEofGeneration++
         nativeEofRecoveryScheduled = false
         nativeEofRecoveryAttempted = false
