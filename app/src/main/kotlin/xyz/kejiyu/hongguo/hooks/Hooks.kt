@@ -6417,13 +6417,23 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
+        val nativeContract = NativeSeriesPort.verify(classLoader)
+        LogUtil.info("原生播放核心: APK 7.3.5.32 签名自检 " +
+            nativeContract.present + "/" + nativeContract.expected +
+            " missing=" + nativeContract.missing.joinToString(";"))
+        FeatureTrace.event("playback", "native_hook_contract",
+            if (nativeContract.compatible) "ok" else "degraded",
+            "verified=" + nativeContract.present + "/" +
+                nativeContract.expected +
+                ",missing=" + nativeContract.missing.joinToString(";").take(350))
+
         // Official 7.3.5.32 full-series playback is NOT driven by the
         // VideoShop VideoContext completion route. APK DEX confirmed:
         // x05.w.onCompletion(TTVideoEngine) -> vm4.a.U1(String)
         // -> v2.view.adapter.a.U1(String) -> G4().
         // Hook those existing native boundaries rather than simulating HOME.
         try {
-            val nativeSeries = Class.forName("x05.w", false, classLoader)
+            val nativeSeries = Class.forName(NativeSeriesPort.SERIES_PLAYER, false, classLoader)
             val nativeListener = Class.forName("vm4.a", false, classLoader)
             val engineClass = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
@@ -6539,6 +6549,38 @@ object Hooks {
                 })
             installedSeriesHooks++
 
+            // Two OFFICIAL player readiness callbacks (APK 7.3.5.32).
+            // They only observe source preparation for the exact pending
+            // x05.w/TTVideoEngine; all features use the same state machine.
+            for (name in listOf("onPrepared", "onPlaybackStateChanged")) {
+                try {
+                    val parameters = if (name == "onPrepared")
+                        arrayOf<Class<*>>(engineClass)
+                    else arrayOf<Class<*>>(
+                        engineClass, Int::class.javaPrimitiveType!!)
+                    val method = nativeSeries.getDeclaredMethod(name, *parameters)
+                    module.hook(method)
+                        .setId("xhSeriesSourceReady_" + name)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn)
+                                    SystemMediaBridge.onSeriesEngineReadiness(
+                                        name, chain.thisObject, chain.getArg(0))
+                            } catch (e: Throwable) {
+                                LogUtil.warn("系统媒体: 原生准备事件检查失败 " +
+                                    name + ":" + e.javaClass.simpleName)
+                            }
+                            result
+                        })
+                    installedSeriesHooks++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 原生准备状态 Hook 不可用 " +
+                        name + ":" + e.javaClass.simpleName)
+                }
+            }
+
             val adapter = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
                 false, classLoader)
@@ -6578,10 +6620,10 @@ object Hooks {
             // original selection updater that writes adapter.a.D.
             try {
                 val fullSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
+                    NativeSeriesPort.SERIES_ADAPTER,
                     false, classLoader)
                 val baseSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
+                    NativeSeriesPort.BASE_ADAPTER,
                     false, classLoader)
                 val boundaries = listOf(
                     Triple(fullSeriesAdapter, "U1",
@@ -7056,7 +7098,7 @@ object Hooks {
         // intercept it or synthesize a fake next episode.
         try {
             val seriesFragment = Class.forName(
-                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                NativeSeriesPort.SERIES_FRAGMENT,
                 false, classLoader)
             // 7.3.5.32: nh() returns the real adapter.f even before an
             // EOF/selection callback. Capture it for media skip controls.
