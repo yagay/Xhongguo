@@ -912,16 +912,16 @@ internal object FullSeriesMediaInfo {
             activity, engine, stableTotal)
         val exactListEpisode = indexFromList(trustedDetail, videoId, stableTotal)
         val episode = SeriesEpisodeNumberPolicy.label(
-            nativeEpisode ?: exactListEpisode, stableTotal)
+            exactListEpisode ?: nativeEpisode, stableTotal)
             ?: fragment.episode
             ?: episodeFromIndex(playingModel, stableTotal)
             ?: episodeFromPager(pager, stableTotal)
             ?: stableTotal?.let { "全" + it + "集" }
         if (nativeEpisode != null || exactListEpisode != null) {
             FeatureTrace.event("media", "episode_ordinal", "verified",
-                "source=" + (if (nativeEpisode != null)
-                    "native_complete_playlist" else "engine_matched_list") +
-                    ",episode=" + (nativeEpisode ?: exactListEpisode) +
+                "source=" + (if (exactListEpisode != null)
+                    "engine_matched_list" else "native_complete_playlist") +
+                    ",episode=" + (exactListEpisode ?: nativeEpisode) +
                     ",total=" + (stableTotal ?: -1L),
                 minIntervalMs = 1700L)
         }
