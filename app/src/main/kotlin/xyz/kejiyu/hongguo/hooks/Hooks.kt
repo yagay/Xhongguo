@@ -6287,6 +6287,12 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "play" && gMasterOn &&
                                 (gMiniPlayerOn || gSystemMediaOn) &&
+                                // The host may reuse a former FEED engine
+                                // for the next SERIES holder. Never reject
+                                // native play before series ownership is
+                                // confirmed by the source/progress pipeline.
+                                !OfficialSeriesPlayback.isSeriesEngine(
+                                    chain.thisObject) &&
                                 SinglePlaybackOwner.shouldBlockPlay(chain.thisObject)) {
                                 // This is a retired engine from another page.
                                 // No media state or autoplay callback is emitted.
@@ -6310,12 +6316,16 @@ object Hooks {
                             val result = chain.proceed()
                             try {
                                 if (method.name == "play") {
-                                    if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn))
+                                    if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn) &&
+                                        !OfficialSeriesPlayback.isSeriesEngine(
+                                            chain.thisObject))
                                         SinglePlaybackOwner.onEnginePlayed(chain.thisObject)
                                     InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
                                 }
                                 if (method.name == "releaseAsync")
                                     SinglePlaybackOwner.onEngineReleased(chain.thisObject)
+                                OfficialSeriesPlayback.onEngineCommand(
+                                    chain.thisObject, method.name)
                                 InAppMiniPlayer.onNativeEngineAction(
                                     chain.thisObject, method.name)
                                 SystemMediaBridge.onNativeEngineCommand(
@@ -6378,8 +6388,13 @@ object Hooks {
                                                 .intercept(Hooker { callbackChain ->
                                                     val completed = callbackChain.proceed()
                                                     try {
-                                                        SystemMediaBridge.onNativeCompletion(
-                                                            callbackChain.getArg(0))
+                                                        // x05.w.onCompletion is the
+                                                        // SOLE authoritative series EOF.
+                                                        // Keep SDK callback observation
+                                                        // only for other playback routes.
+                                                        if (!OfficialSeriesPlayback.isSeriesRoute())
+                                                            SystemMediaBridge.onNativeCompletion(
+                                                                callbackChain.getArg(0))
                                                     } catch (e: Throwable) {
                                                         LogUtil.warn(
                                                             "系统媒体: completion 观察失败 " +
@@ -6417,331 +6432,236 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
-        // Official 7.3.5.32 full-series playback is NOT driven by the
-        // VideoShop VideoContext completion route. APK DEX confirmed:
-        // x05.w.onCompletion(TTVideoEngine) -> vm4.a.U1(String)
-        // -> v2.view.adapter.a.U1(String) -> G4().
-        // Hook those existing native boundaries rather than simulating HOME.
+        // Official short-series V2. Keep the host's original completion,
+        // selection and playback methods in charge. The previous beta
+        // adapter/engine/pager recovery hooks are deliberately NOT installed
+        // here, so there is a single native lifecycle owner.
         try {
-            val nativeSeries = Class.forName("x05.w", false, classLoader)
-            val nativeListener = Class.forName("vm4.a", false, classLoader)
+            val playerClass = Class.forName("x05.w", false, classLoader)
+            val listenerClass = Class.forName("vm4.a", false, classLoader)
             val engineClass = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
-            var installedSeriesHooks = 0
-
-            // Capture the actual business player as soon as it starts.
-            // x05.w.H() exposes its TTVideoEngine; all ownership checks
-            // require that engine to be the same native instance observed
-            // by the module's existing playback owner.
-            for (name in listOf("resume", "L")) {
-                try {
-                    val method = if (name == "L")
-                        nativeSeries.getDeclaredMethod(name, engineClass)
-                    else nativeSeries.getDeclaredMethod(name)
-                    module.hook(method)
-                        .setId("xhSeriesBusiness_" + name)
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            val result = chain.proceed()
-                            try {
-                                if (gMasterOn && gSystemMediaOn)
-                                    SystemMediaBridge.onSeriesNativeCallback(
-                                        if (name == "L") "engine_bound"
-                                        else "business_resumed",
-                                        chain.thisObject)
-                            } catch (_: Throwable) { }
-                            result
-                        })
-                    installedSeriesHooks++
-                } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: 官方全集播放入口 Hook 失败 " +
-                        name + ":" + e.javaClass.simpleName)
-                }
-            }
-
-            val nativePause = nativeSeries.getDeclaredMethod("pause")
-            module.hook(nativePause)
-                .setId("xhSeriesBusinessPause")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    if (gMasterOn && gSystemMediaOn &&
-                        SystemMediaBridge.shouldHoldSeriesBusinessPause(
-                            chain.thisObject)) return@Hooker null
-                    val result = chain.proceed()
-                    try {
-                        if (gMasterOn && gSystemMediaOn)
-                            SystemMediaBridge.onSeriesNativeCallback(
-                                "business_pause_executed", chain.thisObject)
-                    } catch (_: Throwable) { }
-                    result
-                })
-            installedSeriesHooks++
-
-            // APK x05.w.f(listener) removes a WeakReference;
-            // v(listener) adds it. Preserve ONLY the active short-series
-            // adapter listener while the original Activity is backgrounding.
-            for (name in listOf("f", "v")) {
-                try {
-                    val method = nativeSeries.getDeclaredMethod(name, nativeListener)
-                    module.hook(method)
-                        .setId("xhSeriesListener_" + name)
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            val listener = try { chain.getArg(0) }
-                                catch (_: Throwable) { null }
-                            if (name == "f" && gMasterOn && gSystemMediaOn &&
-                                SystemMediaBridge.shouldHoldSeriesListenerRemoval(
-                                    chain.thisObject, listener)) {
-                                return@Hooker null
-                            }
-                            val result = chain.proceed()
-                            try {
-                                if (gMasterOn && gSystemMediaOn) {
-                                    SystemMediaBridge.onSeriesNativeCallback(
-                                        if (name == "f") "listener_removed"
-                                        else "listener_registered",
-                                        chain.thisObject, listener)
-                                }
-                            } catch (_: Throwable) { }
-                            result
-                        })
-                    installedSeriesHooks++
-                } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: 官方全集监听器 Hook 失败 " +
-                        name + ":" + e.javaClass.simpleName)
-                }
-            }
-
-            val complete = nativeSeries.getDeclaredMethod(
-                "onCompletion", engineClass)
-            module.hook(complete)
-                .setId("xhSeriesNativeCompletion")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    try {
-                        if (gMasterOn && gSystemMediaOn) {
-                            // Mark EOF BEFORE the host starts its next-episode
-                            // handoff. Otherwise the native pause guard may
-                            // swallow pause/release performed *inside* U1/G4.
-                            SystemMediaBridge.onNativeCompletion(
-                                chain.getArg(0))
-                            SystemMediaBridge.onSeriesNativeCallback(
-                                "onCompletion_before", chain.thisObject)
-                        }
-                    } catch (_: Throwable) { }
-                    val result = chain.proceed()
-                    try {
-                        if (gMasterOn && gSystemMediaOn)
-                            SystemMediaBridge.onSeriesNativeCallback(
-                                "onCompletion_after", chain.thisObject)
-                    } catch (_: Throwable) { }
-                    result
-                })
-            installedSeriesHooks++
-
-            val adapter = Class.forName(
+            val baseAdapter = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
                 false, classLoader)
-            for (name in listOf("U1", "G4")) {
+            val seriesAdapter = Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
+                false, classLoader)
+            var nativeCount = 0
+
+            // End-of-video: observe BEFORE calling the original, because
+            // x05.w.onCompletion synchronously enters adapter.f.U1/s4/G4.
+            module.hook(playerClass.getDeclaredMethod("onCompletion", engineClass))
+                .setId("v2SeriesOnCompletion")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn) {
+                        try {
+                            OfficialSeriesPlayback.onCompletion(
+                                chain.thisObject, chain.getArg(0))
+                            SystemMediaBridge.onNativeCompletion(chain.getArg(0))
+                        } catch (t: Throwable) {
+                            LogUtil.warn("V2 EOF observer: " + t.javaClass.simpleName)
+                        }
+                    }
+                    chain.proceed()
+                })
+            nativeCount++
+
+            // Bind the official engine/holder. No independent decoder.
+            module.hook(playerClass.getDeclaredMethod("L", engineClass))
+                .setId("v2SeriesEngineBound")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn)
+                        OfficialSeriesPlayback.onEngineBindingStart(
+                            chain.thisObject, chain.getArg(0))
+                    val result = chain.proceed()
+                    if (gMasterOn && gSystemMediaOn) try {
+                        OfficialSeriesPlayback.onEngineBound(
+                            chain.thisObject, chain.getArg(0))
+                    } catch (_: Throwable) { }
+                    result
+                })
+            nativeCount++
+
+            for (action in listOf("v", "f")) {
                 try {
-                    val method = if (name == "U1")
-                        adapter.getDeclaredMethod(name, String::class.java)
-                    else adapter.getDeclaredMethod(name)
-                    module.hook(method)
-                        .setId("xhSeriesAdapter_" + name)
+                    module.hook(playerClass.getDeclaredMethod(action, listenerClass))
+                        .setId("v2SeriesListener_" + action)
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
-                            try {
-                                if (gMasterOn && gSystemMediaOn) {
-                                    SystemMediaBridge.onSeriesAdapterCallback(
-                                        name, "before", chain.thisObject)
-                                }
-                            } catch (_: Throwable) { }
+                            val listener = chain.getArg(0)
+                            if (action == "f" && gMasterOn && gSystemMediaOn &&
+                                OfficialSeriesPlayback.shouldRetainCompletionListener(
+                                    chain.thisObject, listener)) return@Hooker null
                             val result = chain.proceed()
-                            try {
-                                if (gMasterOn && gSystemMediaOn) {
-                                    SystemMediaBridge.onSeriesAdapterCallback(
-                                        name, "after", chain.thisObject)
-                                }
+                            if (gMasterOn && gSystemMediaOn) try {
+                                OfficialSeriesPlayback.onListener(
+                                    chain.thisObject, listener, action == "v")
                             } catch (_: Throwable) { }
                             result
                         })
-                    installedSeriesHooks++
-                } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: 官方全集适配器 Hook 失败 " +
-                        name + ":" + e.javaClass.simpleName)
+                    nativeCount++
+                } catch (t: Throwable) {
+                    LogUtil.warn("V2 listener " + action + " unavailable: " +
+                        t.javaClass.simpleName)
                 }
-            }
-            // The real Series adapter is adapter.f, which OVERRIDES
-            // U1(String) and r4(int); base adapter.a.U1 logs alone miss
-            // the outer native autoplay policy. The base s4(int) is the
-            // original selection updater that writes adapter.a.D.
-            try {
-                val fullSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
-                    false, classLoader)
-                val baseSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
-                    false, classLoader)
-                val boundaries = listOf(
-                    Triple(fullSeriesAdapter, "U1",
-                        arrayOf<Class<*>>(String::class.java)),
-                    Triple(fullSeriesAdapter, "r4",
-                        arrayOf<Class<*>>(Int::class.javaPrimitiveType!!)),
-                    Triple(fullSeriesAdapter, "g", emptyArray<Class<*>>()),
-                    Triple(baseSeriesAdapter, "s4",
-                        arrayOf<Class<*>>(Int::class.javaPrimitiveType!!))
-                )
-                // APK's j15.d.y4() means isPageInVisible(), NOT
-                // isPageVisible(). Hook the concrete runtime implementation
-                // just once, and override its true result ONLY during the
-                // synchronous host adapter.a.s4(nextIndex) operation that
-                // SystemMediaBridge has validated against real native EOF.
-                val installedInvisibleQueries = java.util.Collections.synchronizedSet(
-                    mutableSetOf<java.lang.reflect.Method>())
-                fun hookNativeInvisibleQuery(controller: Any) {
-                    val query = controller.javaClass.methods.firstOrNull {
-                        it.name == "y4" && it.parameterCount == 0 &&
-                            it.returnType == Boolean::class.javaPrimitiveType &&
-                            !java.lang.reflect.Modifier.isAbstract(it.modifiers)
-                    } ?: return
-                    if (!installedInvisibleQueries.add(query)) return
-                    try {
-                        module.hook(query)
-                            .setId("xhSeriesNativePageInvisible_" +
-                                query.declaringClass.name.hashCode())
-                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                            .intercept(Hooker { queryChain ->
-                                val hostAnswer = queryChain.proceed()
-                                if (hostAnswer == true && gMasterOn && gSystemMediaOn &&
-                                    SystemMediaBridge.shouldMaskNativePageInvisible(
-                                        queryChain.thisObject)) false
-                                else hostAnswer
-                            })
-                        LogUtil.info("  ✓ 全集原生 isPageInVisible 精确查询 Hook " +
-                            query.declaringClass.simpleName)
-                    } catch (e: Throwable) {
-                        installedInvisibleQueries.remove(query)
-                        LogUtil.warn("  原生 isPageInVisible Hook 失败 " +
-                            e.javaClass.simpleName)
-                    }
-                }
-                for ((idx, info) in boundaries.withIndex()) {
-                    try {
-                        val (clazz, methodName, args) = info
-                        val method = clazz.getDeclaredMethod(methodName, *args)
-                        module.hook(method)
-                            .setId("xhSeriesBusinessPage_" + idx)
-                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                            .intercept(Hooker { chain ->
-                                val targetPosition = if (methodName == "r4" ||
-                                    methodName == "s4")
-                                    (chain.getArg(0) as? Number)?.toInt()
-                                else null
-                                val stage = clazz.simpleName + "." + methodName
-                                try {
-                                    if (gMasterOn && gSystemMediaOn)
-                                        SystemMediaBridge.onSeriesPageSelection(
-                                            chain.thisObject, stage, "before",
-                                            targetPosition)
-                                } catch (_: Throwable) { }
-                                var scoped = false
-                                if (methodName == "s4" && gMasterOn &&
-                                    gSystemMediaOn) {
-                                    try {
-                                        SystemMediaBridge.getNativeSeriesPageController(
-                                            chain.thisObject)?.let {
-                                            hookNativeInvisibleQuery(it)
-                                        }
-                                        scoped = SystemMediaBridge
-                                            .beginNativeNextEpisodeSelection(
-                                                chain.thisObject, targetPosition)
-                                    } catch (e: Throwable) {
-                                        LogUtil.warn(
-                                            "系统媒体: 原生 s4 可见性作用域失败 " +
-                                            e.javaClass.simpleName)
-                                    }
-                                }
-                                // The synthetic isPageInVisible answer is
-                                // scoped strictly to ORIGINAL s4 bytecode.
-                                // Clear it BEFORE our own after-proceed
-                                // diagnostics query y4() again.
-                                // Record the accepted native selection before
-                                // releasing the synchronous visibility override.
-                                // After-callback diagnostics run ONLY after the
-                                // override is gone, so y4() shows real state.
-                                val original = try {
-                                    val result = chain.proceed()
-                                    if (scoped && gMasterOn && gSystemMediaOn) {
-                                        try {
-                                            SystemMediaBridge
-                                                .onNativeSeriesSelectionCompleted(
-                                                    chain.thisObject,
-                                                    targetPosition, result)
-                                        } catch (e: Throwable) {
-                                            LogUtil.warn("系统媒体: 下一集选中记录失败 " +
-                                                e.javaClass.simpleName)
-                                        }
-                                    }
-                                    result
-                                } finally {
-                                    if (scoped) SystemMediaBridge
-                                        .endNativeNextEpisodeSelection()
-                                }
-                                try {
-                                    if (gMasterOn && gSystemMediaOn)
-                                        SystemMediaBridge.onSeriesPageSelection(
-                                            chain.thisObject, stage, "after",
-                                            targetPosition, original)
-                                } catch (_: Throwable) { }
-                                original
-                            })
-                        installedSeriesHooks++
-                    } catch (e: Throwable) {
-                        LogUtil.warn("系统媒体: 原生选集阶段 Hook 失败 " +
-                            info.second + ":" + e.javaClass.simpleName)
-                    }
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("系统媒体: 全集原生选集观察不可用 " +
-                    e.javaClass.simpleName)
             }
 
-            // In APK dex, x05.w.onCompletion() first notifies x05.e.h2.
-            // m15.a.h2 forwards to fm4.a.onCompletion() if a live
-            // downstream callback exists. This is separate from U1/G4.
+            module.hook(seriesAdapter.getDeclaredMethod("U1", String::class.java))
+                .setId("v2SeriesHostAutoplay")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn)
+                        OfficialSeriesPlayback.onAutoplay(chain.thisObject, "before")
+                    try { chain.proceed() }
+                    finally {
+                        if (gMasterOn && gSystemMediaOn)
+                            OfficialSeriesPlayback.onAutoplay(
+                                chain.thisObject, "after")
+                    }
+                })
+            nativeCount++
+
+            module.hook(baseAdapter.getDeclaredMethod("G4"))
+                .setId("v2SeriesHostG4")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    if (gMasterOn && gSystemMediaOn)
+                        OfficialSeriesPlayback.onG4(chain.thisObject, "before")
+                    try { chain.proceed() }
+                    finally {
+                        if (gMasterOn && gSystemMediaOn)
+                            OfficialSeriesPlayback.onG4(chain.thisObject, "after")
+                    }
+                })
+            nativeCount++
+
+            // Read the ACTUAL autoplay-block decision made inside G4.
+            // Do not call i9() or I4() from a diagnostic probe: both are
+            // native business-policy methods, not free getters.
             try {
-                val holder = Class.forName("m15.a", false, classLoader)
-                val nativePlayerInterface = Class.forName(
-                    "x05.f", false, classLoader)
-                val h2 = holder.getDeclaredMethod("h2", nativePlayerInterface)
-                module.hook(h2)
-                    .setId("xhSeriesHolderCompletion")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        try {
+                val controllerClass = Class.forName("j15.d", false, classLoader)
+                val gates = controllerClass.declaredMethods.filter {
+                    it.name == "i9" && it.parameterCount == 0 &&
+                        it.returnType == Boolean::class.javaPrimitiveType
+                }
+                for ((index, gate) in gates.withIndex()) {
+                    module.hook(gate)
+                        .setId("v2SeriesNativeAutoplayGate_" + index)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn)
-                                SystemMediaBridge.onSeriesHolderCompletion(
-                                    chain.thisObject, "before")
-                        } catch (_: Throwable) { }
-                        val result = chain.proceed()
-                        try {
-                            if (gMasterOn && gSystemMediaOn)
-                                SystemMediaBridge.onSeriesHolderCompletion(
-                                    chain.thisObject, "after")
-                        } catch (_: Throwable) { }
-                        result
-                    })
-                installedSeriesHooks++
+                                OfficialSeriesPlayback.onNativeAutoplayGate(
+                                    chain.thisObject, result)
+                            else result
+                        })
+                    nativeCount++
+                }
             } catch (e: Throwable) {
-                LogUtil.warn("系统媒体: 官方 holder 完成回调 Hook 不可用 " +
-                    e.javaClass.simpleName)
+                LogUtil.warn("V2 i9 native gate: " + e.javaClass.simpleName)
             }
-            LogUtil.info("  ✓ 官方全集 x05.w/adapter 自动续集观察与保活 Hook 数=" +
-                installedSeriesHooks)
-        } catch (e: Throwable) {
-            LogUtil.warn("  官方全集 x05.w Hook 不可用 " +
-                e.javaClass.simpleName + ":" + e.message)
+
+            // Observe *only* original s4 selections, never synthesize an
+            // extra ViewPager2.setCurrentItem/r4 selection after an EOF.
+            // The host's j15.d.y4 isPageInVisible can be masked only inside
+            // the validated synchronous s4 call.
+            val installedVisibilityQueries =
+                java.util.Collections.synchronizedSet(
+                    mutableSetOf<java.lang.reflect.Method>())
+            fun ensureVisibilityQuery(a: Any) {
+                val controller = SystemMediaBridge.getNativeSeriesPageController(a)
+                    ?: return
+                val query = controller.javaClass.methods.firstOrNull {
+                    it.name == "y4" && it.parameterCount == 0 &&
+                        it.returnType == Boolean::class.javaPrimitiveType &&
+                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                } ?: return
+                if (!installedVisibilityQueries.add(query)) return
+                try {
+                    module.hook(query)
+                        .setId("v2SeriesInvisible_" +
+                            query.declaringClass.name.hashCode())
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { q ->
+                            val answer = q.proceed()
+                            if (answer == true && gMasterOn && gSystemMediaOn &&
+                                OfficialSeriesPlayback.shouldMaskInvisiblePage(
+                                    q.thisObject)) false else answer
+                        })
+                    nativeCount++
+                } catch (t: Throwable) {
+                    installedVisibilityQueries.remove(query)
+                    LogUtil.warn("V2 visibility hook: " + t.javaClass.simpleName)
+                }
+            }
+
+            module.hook(baseAdapter.getDeclaredMethod(
+                "s4", Int::class.javaPrimitiveType))
+                .setId("v2SeriesNativeSelection")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    val enabled = gMasterOn && gSystemMediaOn
+                    val target = (chain.getArg(0) as? Number)?.toInt()
+                    var scoped = false
+                    if (enabled) try {
+                        ensureVisibilityQuery(chain.thisObject)
+                        scoped = OfficialSeriesPlayback.beginVisibilityScope(
+                            chain.thisObject, target)
+                    } catch (t: Throwable) {
+                        LogUtil.warn("V2 s4 before: " + t.javaClass.simpleName)
+                    }
+                    try {
+                        val result = chain.proceed()
+                        if (enabled) try {
+                            OfficialSeriesPlayback.onSelection(
+                                chain.thisObject, target, result)
+                        } catch (t: Throwable) {
+                            LogUtil.warn("V2 s4 after: " + t.javaClass.simpleName)
+                        }
+                        result
+                    } finally {
+                        if (scoped) OfficialSeriesPlayback.endVisibilityScope()
+                    }
+                })
+            nativeCount++
+
+            // Diagnostic only: prepared/error/state belongs to the actual
+            // next x05.w; do not create another playback/transport hook.
+            for (name in listOf("onPrepared", "onPlaybackStateChanged", "onError")) {
+                val methods = playerClass.declaredMethods.filter {
+                    it.name == name && it.parameterCount >= 1 &&
+                        it.parameterTypes[0] == engineClass
+                }
+                for ((idx, callback) in methods.withIndex()) try {
+                    module.hook(callback)
+                        .setId("v2SeriesSource_" + name + "_" + idx)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn) try {
+                                val engine = chain.getArg(0)
+                                if (name == "onError")
+                                    OfficialSeriesPlayback.onError(
+                                        chain.thisObject, engine, "native_onError")
+                                else OfficialSeriesPlayback.onReadiness(
+                                    chain.thisObject, name, engine)
+                            } catch (_: Throwable) { }
+                            result
+                        })
+                    nativeCount++
+                } catch (t: Throwable) {
+                    LogUtil.warn("V2 source callback " + name + " unavailable: " +
+                        t.javaClass.simpleName)
+                }
+            }
+            LogUtil.info("  ✓ 原生播放V2，全集业务 Hook 已替换，安装数=" +
+                nativeCount + "；旧 timer/pager/dual-owner Hook 不安装")
+        } catch (t: Throwable) {
+            LogUtil.warn("V2 官方全集业务 Hook 安装失败: " +
+                t.javaClass.simpleName + ":" + t.message)
         }
 
         // Read stable SaasVideoDetailModel objects rather than guessing an
