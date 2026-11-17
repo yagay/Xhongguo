@@ -1188,6 +1188,40 @@ internal object SystemMediaBridge {
     // NativeSeriesPort owns explicit user navigation; the coordinator
     // tracks host-selected autoplay without synthetic pager movement.
 
+    /** Explicit notification/media-control pause must never be swallowed by
+     * the in-app mini player's short navigation guard. */
+    fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
+
+    /** Both home and full-series: protect ONLY the active native engine after
+     * process importance confirms a genuine background transition. Never
+     * suppress user-requested pause, foreground pause or a preload engine.
+     */
+    fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
+        // The host can issue TTVideoEngine.pause() while advancing an
+        // episode. A blanket ten-minute background guard blocks that native
+        // transition and strands the player at duration == position.
+        if (episodeMonitor.hasNativeCompletion()) return false
+        if (shouldHoldOriginalOnLeave(candidate)) {
+            LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
+            LogUtil.incr("systemMediaEarlyEnginePauseHeld")
+            FeatureTrace.event("background", "engine_pause", "held",
+                "reason=pre-pause", flow = mediaFlow, minIntervalMs = 1000L)
+            return true
+        }
+        if (!enabled || candidate == null || userCommandInProgress ||
+            SinglePlaybackOwner.isOwnershipTransition() ||
+            !requestedBackgroundPlayback ||
+            backgroundPauseGuardEngine.get() !== candidate ||
+            videoEngine.get() !== candidate ||
+            SystemClock.uptimeMillis() > backgroundPauseGuardUntil) return false
+        backgroundPauseSuppressed++
+        if (backgroundPauseSuppressed <= 4 || backgroundPauseSuppressed % 20 == 0) {
+            LogUtil.info("系统媒体: 已保护当前后台播放器 pause #" +
+                backgroundPauseSuppressed)
+        }
+        LogUtil.incr("systemMediaFeedPauseSuppressed")
+        return true
+    }
     private var lastVisibleInfoAt = 0L
     private var lastVisibleInfoIdentity = ""
     private var lastVisibleInfoSource = ""
