@@ -61,7 +61,16 @@ internal class NativePlaybackCoordinator {
         if (pendingIndex == null || engine == null || explicitlyPaused) return
         boundNextHolder = WeakReference(holder)
         boundNextEngine = WeakReference(engine)
-        phase = Phase.BOUND
+        // TTVideoEngine.play() can run from within x05.w.L() BEFORE the
+        // hook's after-callback reports the binding. Confirm that late
+        // binding rather than losing the newly playing episode.
+        if (activeEngine.get() === engine && phase == Phase.PLAYING) {
+            playingIndex = pendingIndex
+            pendingIndex = null
+            finishedEngine.clear()
+            boundNextEngine.clear()
+            boundNextHolder.clear()
+        } else phase = Phase.BOUND
     }
 
     @Synchronized
@@ -94,13 +103,11 @@ internal class NativePlaybackCoordinator {
             boundNextEngine.clear()
             boundNextHolder.clear()
         } else if (distinct) {
-            // A different video started without the selected holder. Keep
-            // metadata unresolved instead of reporting the prior episode.
+            // The bind callback can arrive AFTER play() in the same
+            // synchronous x05.w.L() stack. Keep only the pending target
+            // until its exact holder is verified; never publish it yet.
             playingIndex = null
-            pendingIndex = null
             finishedEngine.clear()
-            boundNextEngine.clear()
-            boundNextHolder.clear()
         }
         explicitlyPaused = false
         phase = Phase.PLAYING
