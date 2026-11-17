@@ -5630,12 +5630,6 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val result = chain.proceed()
-                            if (gMasterOn && gSystemMediaOn) {
-                                try {
-                                    NativeSeriesV3.onSourceModelAssigned(
-                                        chain.thisObject, chain.getArg(0))
-                                } catch (_: Throwable) {}
-                            }
                             if (gMasterOn && gMaxQualityOn) {
                                 try {
                                     rememberAndApplyHighestResolution(
@@ -6453,168 +6447,7 @@ object Hooks {
             val seriesAdapter = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
                 false, classLoader)
-            val feedAdapter = Class.forName(
-                "com.dragon.read.component.shortvideo.impl.v2.view.adapter.e",
-                false, classLoader)
             var nativeCount = 0
-
-            // Verified in official 7.3.5.32 classes4.dex:
-            // e.J2(Z,String,Bundle,Z,Integer,Boolean,Boolean)V.
-            // This is the host's player-sharing + launch handoff. Observe
-            // the original call, without invoking it ourselves or modifying
-            // any activity/task/player/surface state.
-            try {
-                val j2 = feedAdapter.getDeclaredMethod("J2",
-                    Boolean::class.javaPrimitiveType,
-                    String::class.java,
-                    android.os.Bundle::class.java,
-                    Boolean::class.javaPrimitiveType,
-                    Integer::class.java,
-                    java.lang.Boolean::class.java,
-                    java.lang.Boolean::class.java)
-                module.hook(j2)
-                    .setId("nativeFeedPlayerHandoffJ2")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        if (gMasterOn && gSystemMediaOn) {
-                            NativePlayerHandoff.timed(
-                                { chain.proceed() },
-                                chain.getArgs().toTypedArray()
-                            )
-                        } else chain.proceed()
-                    })
-                nativeCount++
-            } catch (e: Throwable) {
-                LogUtil.warn("原生 J2 播放器交接观察 Hook 未安装 " +
-                    e.javaClass.simpleName)
-            }
-
-            // Observe the ORIGINAL host EOF policy, not the eventual Activity.
-            // The APK has distinct e.U1/p5 and f.U1/r5 completion paths.
-            // Neither path is replaced; our hooks have no playback side effects.
-            try {
-                module.hook(feedAdapter.getDeclaredMethod("U1", String::class.java))
-                    .setId("nativeFeedEofPolicy")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        val tracking = gMasterOn && gSystemMediaOn
-                        if (tracking) NativeFeedCompletion.begin(chain.thisObject, "feed_e")
-                        try { chain.proceed() }
-                        finally {
-                            if (tracking)
-                                NativeFeedCompletion.end(chain.thisObject, "feed_e")
-                        }
-                    })
-                nativeCount++
-            } catch (e: Throwable) {
-                LogUtil.warn("官方刷剧 e.U1 Hook 未安装 " + e.javaClass.simpleName)
-            }
-            try {
-                // e.p5(e) is a host static function; it chooses the original
-                // next-episode/enter-inner-feed branch.
-                val p5 = feedAdapter.declaredMethods.firstOrNull {
-                    it.name == "p5" && it.parameterCount == 1 &&
-                        it.parameterTypes[0] == feedAdapter
-                }
-                if (p5 != null) {
-                    module.hook(p5)
-                        .setId("nativeFeedPolicyP5")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            if (gMasterOn && gSystemMediaOn)
-                                NativeFeedCompletion.decision(
-                                    chain.getArg(0), "native_p5_deciding")
-                            chain.proceed()
-                        })
-                    nativeCount++
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("官方刷剧 e.p5 Hook 未安装 " + e.javaClass.simpleName)
-            }
-            try {
-                // a.M0 returns the host's inner-series holder. It is
-                // observed before subsequent official navigation callbacks.
-                val nativeHolder = baseAdapter.getDeclaredMethod("M0")
-                module.hook(nativeHolder)
-                    .setId("nativeFeedInnerSelection")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        if (gMasterOn && gSystemMediaOn)
-                            NativeFeedCompletion.decision(
-                                chain.thisObject, "host_holder_lookup_M0")
-                        chain.proceed()
-                    })
-                nativeCount++
-            } catch (e: Throwable) {
-                LogUtil.warn("官方刷剧 M0 Hook 未安装 " + e.javaClass.simpleName)
-            }
-            try {
-                // m15.l.U4(detail, boolean) is the genuine next-episode
-                // business callback used in e.p5, NOT a synthetic pager move.
-                val nativeSelector = Class.forName("m15.l", false, classLoader)
-                val u4 = nativeSelector.declaredMethods.firstOrNull {
-                    it.name == "U4" && it.parameterCount == 2
-                }
-                if (u4 != null) {
-                    module.hook(u4)
-                        .setId("nativeFeedOfficialNextEpisode")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            if (gMasterOn && gSystemMediaOn)
-                                NativeFeedCompletion.staticNextEpisode()
-                            chain.proceed()
-                        })
-                    nativeCount++
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("官方刷剧 U4 Hook 未安装 " + e.javaClass.simpleName)
-            }
-            try {
-                // f.r5(index, adapter.f) is the official series next-video
-                // action. Observe whether the native listen branch reached it.
-                val nativeNext = seriesAdapter.declaredMethods.firstOrNull {
-                    it.name == "r5" && it.parameterCount == 2 &&
-                        it.parameterTypes[1] == seriesAdapter
-                }
-                if (nativeNext != null) {
-                    module.hook(nativeNext)
-                        .setId("nativeListenModeNextVideo")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            if (gMasterOn && gSystemMediaOn)
-                                NativeFeedCompletion.decision(
-                                    chain.getArg(1), "official_series_next_video")
-                            chain.proceed()
-                        })
-                    nativeCount++
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("官方听模式 r5 Hook 未安装 " + e.javaClass.simpleName)
-            }
-            try {
-                // APK's genuine listen-mode predicate; just observe its
-                // result inside the f.U1 stack, never globally spoof it.
-                val listeningMode = Class.forName("p35.b", false, classLoader)
-                val gate = listeningMode.declaredMethods.firstOrNull {
-                    it.name == "v0" && it.parameterCount == 1 &&
-                        it.returnType == Boolean::class.javaPrimitiveType
-                }
-                if (gate != null) {
-                    module.hook(gate)
-                        .setId("nativeListenModeOriginalGate")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            val native = chain.proceed()
-                            if (gMasterOn && gSystemMediaOn)
-                                NativeFeedCompletion.listeningGate(native,
-                                    chain.getArg(0) as? Activity)
-                            native
-                        })
-                    nativeCount++
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("官方听模式判定 Hook 未安装 " + e.javaClass.simpleName)
-            }
 
             // End-of-video: observe BEFORE calling the original, because
             // x05.w.onCompletion synchronously enters adapter.f.U1/s4/G4.
@@ -6682,17 +6515,13 @@ object Hooks {
                 .setId("v3SeriesHostAutoplay")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
-                    val enabled = gMasterOn && gSystemMediaOn
-                    if (enabled) {
-                        NativeFeedCompletion.begin(chain.thisObject, "series_f")
+                    if (gMasterOn && gSystemMediaOn)
                         NativeSeriesV3.onAutoplay(chain.thisObject, "before")
-                    }
                     try { chain.proceed() }
                     finally {
-                        if (enabled) {
-                            NativeSeriesV3.onAutoplay(chain.thisObject, "after")
-                            NativeFeedCompletion.end(chain.thisObject, "series_f")
-                        }
+                        if (gMasterOn && gSystemMediaOn)
+                            NativeSeriesV3.onAutoplay(
+                                chain.thisObject, "after")
                     }
                 })
             nativeCount++
@@ -7771,7 +7600,6 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onResume")).setId("or").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
-                try { ForegroundLaunchTrace.onResume(a) } catch (_: Throwable) {}
                 gCurrentActivity = a
                 if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn)) {
                     try { SinglePlaybackOwner.onActivityResuming(a) }
@@ -7839,7 +7667,6 @@ object Hooks {
             LogUtil.info("  ✓ onResume")
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
-                try { ForegroundLaunchTrace.onPause(a) } catch (_: Throwable) {}
                 // Probe before native onPause can detach the video engine.
                 try { SystemMediaBridge.onActivityPaused(a) } catch (e: Throwable) {
                     LogUtil.warn("系统媒体: Activity.onPause 诊断失败: " + e.message)
@@ -7906,57 +7733,9 @@ object Hooks {
             } catch (e: Throwable) {
                 LogUtil.warn("应用内小窗生命周期清理 Hook 未命中: " + e.message)
             }
-            // Observe launches and task promotions without changing host behaviour.
-            try {
-                val contextImpl = Class.forName("android.app.ContextImpl", false, classLoader)
-                ham(contextImpl, "startActivity", "foregroundContextStart") { chain ->
-                    try {
-                        ForegroundLaunchTrace.contextStart(chain.getArg(0) as? Intent, "context")
-                    } catch (_: Throwable) {}
-                    chain.proceed()
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("前台诊断 ContextImpl 安装失败: " + e.javaClass.simpleName)
-            }
-            try {
-                val am = Class.forName("android.app.ActivityManager", false, classLoader)
-                ham(am, "moveTaskToFront", "foregroundMoveTask") { chain ->
-                    try {
-                        ForegroundLaunchTrace.moveTask(
-                            chain.getArg(0) as? Int, chain.getArg(1) as? Int)
-                    } catch (_: Throwable) {}
-                    chain.proceed()
-                }
-            } catch (e: Throwable) {
-                LogUtil.warn("前台诊断 moveTaskToFront 安装失败: " +
-                    e.javaClass.simpleName)
-            }
-            try {
-                ham(c, "onWindowFocusChanged", "foregroundWindowFocus") { chain ->
-                    val result = chain.proceed()
-                    try {
-                        ForegroundLaunchTrace.onWindowFocus(
-                            chain.thisObject as? Activity, chain.getArg(0) as? Boolean == true)
-                    } catch (_: Throwable) {}
-                    result
-                }
-            } catch (_: Throwable) {}
-            try {
-                ham(c, "onNewIntent", "foregroundNewIntent") { chain ->
-                    try {
-                        ForegroundLaunchTrace.onNewIntent(chain.thisObject as? Activity)
-                    } catch (_: Throwable) {}
-                    chain.proceed()
-                }
-            } catch (_: Throwable) {}
             // Reject only the dedicated shopping-mall Activity intent.
             // Shopping-related short-drama classes are deliberately not blocked.
             ham(c, "startActivity", "shoppingStartActivity") { chain ->
-                try {
-                    ForegroundLaunchTrace.activityStart(
-                        chain.thisObject as? Activity, chain.getArg(0) as? Intent,
-                        "startActivity")
-                } catch (_: Throwable) {}
                 try {
                     beforeNativeDramaDetailsLaunch(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent)
@@ -7971,14 +7750,6 @@ object Hooks {
                 } else chain.proceed()
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
-                // Do not short-circuit or change the host's ActivityOptions.
-                // Feed-to-inner-series navigation is a native business decision,
-                // not an Activity-layer playback transport command.
-                try {
-                    ForegroundLaunchTrace.activityStart(
-                        chain.thisObject as? Activity, chain.getArg(0) as? Intent,
-                        "startActivityForResult")
-                } catch (_: Throwable) {}
                 try {
                     beforeNativeDramaDetailsLaunch(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent)
