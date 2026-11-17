@@ -6549,6 +6549,38 @@ object Hooks {
                 })
             installedSeriesHooks++
 
+            // Two OFFICIAL player readiness callbacks (APK 7.3.5.32).
+            // They only observe source preparation for the exact pending
+            // x05.w/TTVideoEngine; all features use the same state machine.
+            for (name in listOf("onPrepared", "onPlaybackStateChanged")) {
+                try {
+                    val parameters = if (name == "onPrepared")
+                        arrayOf<Class<*>>(engineClass)
+                    else arrayOf<Class<*>>(
+                        engineClass, Int::class.javaPrimitiveType!!)
+                    val method = nativeSeries.getDeclaredMethod(name, *parameters)
+                    module.hook(method)
+                        .setId("xhSeriesSourceReady_" + name)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            try {
+                                if (gMasterOn && gSystemMediaOn)
+                                    SystemMediaBridge.onSeriesEngineReadiness(
+                                        name, chain.thisObject, chain.getArg(0))
+                            } catch (e: Throwable) {
+                                LogUtil.warn("系统媒体: 原生准备事件检查失败 " +
+                                    name + ":" + e.javaClass.simpleName)
+                            }
+                            result
+                        })
+                    installedSeriesHooks++
+                } catch (e: Throwable) {
+                    LogUtil.warn("系统媒体: 原生准备状态 Hook 不可用 " +
+                        name + ":" + e.javaClass.simpleName)
+                }
+            }
+
             val adapter = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
                 false, classLoader)
