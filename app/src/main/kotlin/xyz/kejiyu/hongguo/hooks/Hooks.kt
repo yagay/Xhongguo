@@ -6555,7 +6555,7 @@ object Hooks {
                             if (gMasterOn && gSystemMediaOn)
                                 OfficialSeriesPlayback.onNativeAutoplayGate(
                                     chain.thisObject, result)
-                            result
+                            else result
                         })
                     nativeCount++
                 }
