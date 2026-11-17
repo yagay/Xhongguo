@@ -33,6 +33,9 @@ internal object OfficialSeriesPlayback {
     private var adapter = WeakReference<Any>(null)
     private var currentHolder = WeakReference<Any>(null)
     private var currentEngine = WeakReference<Any>(null)
+    private var bindingEngine = WeakReference<Any>(null)
+    private var initialProgressBaseline: Long? = null
+    private var initialOwnerConfirmed = WeakReference<Any>(null)
     private var candidateHolder = WeakReference<Any>(null)
     private var candidateAdapter = WeakReference<Any>(null)
     private var lease: NoSurfaceLease? = null
@@ -115,6 +118,7 @@ internal object OfficialSeriesPlayback {
         if (candidate == null) return false
         return timeline.isPendingEngine(candidate) ||
             currentEngine.get() === candidate ||
+            bindingEngine.get() === candidate ||
             (isSeriesRoute() && candidate === engine(currentHolder.get()))
     }
 
@@ -149,6 +153,9 @@ internal object OfficialSeriesPlayback {
             candidateHolder.clear()
             currentHolder.clear()
             currentEngine.clear()
+            bindingEngine.clear()
+            initialProgressBaseline = null
+            initialOwnerConfirmed.clear()
             ownerActivity.clear()
         }
     }
@@ -274,9 +281,18 @@ internal object OfficialSeriesPlayback {
         }
     }
 
+    /** The host may issue play() from WITHIN L() before its after-hook.
+     * Mark this exact engine as an allowed series candidate, not every
+     * FEED engine when the series Activity is visible. */
+    fun onEngineBindingStart(holder: Any?, engine: Any?) {
+        if (holder?.javaClass?.name == SERIES_PLAYER && engine != null)
+            bindingEngine = WeakReference(engine)
+    }
+
     fun onEngineBound(holder: Any?, boundEngine: Any?) {
         if (holder?.javaClass?.name != SERIES_PLAYER ||
             boundEngine == null) return
+        if (bindingEngine.get() === boundEngine) bindingEngine.clear()
         val a = candidateAdapter.get()
         if (a != null && candidateHolder.get() === holder) {
             bindNextHolder(holder, a)
@@ -431,15 +447,37 @@ internal object OfficialSeriesPlayback {
         OfficialSeriesTimeline.Phase.STARTING)
 
     fun onProgress(e: Any?, pos: Long, duration: Long): Boolean {
-        if (e == null || !timeline.onProgress(e, pos, duration)) return false
-        releaseLease(e, "verified_native_progress")
-        currentEngine = WeakReference(e)
-        currentHolder = WeakReference(candidateHolder.get())
-        SystemMediaBridge.rememberOfficialSeriesHolder(
-            currentHolder.get(), e)
-        log("progress", "confirmed", "position=$pos,duration=$duration,index=" +
-            timeline.snapshot().playingIndex)
+        if (e == null) return false
+        if (timeline.onProgress(e, pos, duration)) {
+            releaseLease(e, "verified_native_progress")
+            currentEngine = WeakReference(e)
+            currentHolder = WeakReference(candidateHolder.get())
+            SystemMediaBridge.rememberOfficialSeriesHolder(
+                currentHolder.get(), e)
+            log("progress", "confirmed", "position=$pos,duration=$duration,index=" +
+                timeline.snapshot().playingIndex)
+            SinglePlaybackOwner.onEnginePlayed(e)
+            return true
+        }
+        // The FIRST full-series episode has no preceding EOF/s4 selection.
+        // It must also take engine ownership only after actual progress,
+        // otherwise the prior FEED owner may retain/steal audio.
+        if (currentEngine.get() !== e ||
+            timeline.snapshot().phase != OfficialSeriesTimeline.Phase.IDLE ||
+            initialOwnerConfirmed.get() === e ||
+            duration !in 1000L..86_400_000L ||
+            pos < 0L || pos > duration + 1000L) return false
+        val baseline = initialProgressBaseline
+        if (baseline == null || pos < baseline) {
+            initialProgressBaseline = pos
+            return false
+        }
+        if (pos - baseline < 350L) return false
+        initialOwnerConfirmed = WeakReference(e)
+        initialProgressBaseline = null
+        SystemMediaBridge.rememberOfficialSeriesHolder(currentHolder.get(), e)
         SinglePlaybackOwner.onEnginePlayed(e)
+        log("progress", "confirmed", "initial_series_engine=true,position=$pos")
         return true
     }
 
@@ -469,6 +507,9 @@ internal object OfficialSeriesPlayback {
         candidateHolder.clear()
         candidateAdapter.clear()
         currentEngine.clear()
+        bindingEngine.clear()
+        initialProgressBaseline = null
+        initialOwnerConfirmed.clear()
         currentHolder.clear()
         adapter.clear()
         ownerActivity.clear()
