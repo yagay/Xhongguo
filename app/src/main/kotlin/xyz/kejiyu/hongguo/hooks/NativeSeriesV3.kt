@@ -110,6 +110,22 @@ internal object NativeSeriesV3 {
 
     fun snapshot(): NativeSeriesV3State.Snapshot = state.snapshot()
 
+    /** Authoritative episode ordinal only for a genuinely progressing
+     * engine. D and pager alone cannot prove that the selected video plays. */
+    fun confirmedEpisodeIndex(engine: Any?): Int? {
+        if (engine == null || currentEngine.get() !== engine) return null
+        val s = state.snapshot()
+        if (s.phase == NativeSeriesV3State.Phase.PLAYING)
+            return s.playingIndex
+        if (s.phase == NativeSeriesV3State.Phase.IDLE &&
+            initialOwner.get() === engine) {
+            val a = adapter.get() ?: return null
+            val index = d(a) ?: return null
+            return index.takeIf { page(a) == it }
+        }
+        return null
+    }
+
     fun isSeriesRoute(): Boolean =
         ownerActivity.get()?.javaClass?.name == SERIES_ACTIVITY &&
             SystemMediaBridge.isOfficialSeriesActivityCurrent()
