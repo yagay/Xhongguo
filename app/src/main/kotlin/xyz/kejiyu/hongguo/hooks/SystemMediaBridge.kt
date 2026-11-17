@@ -851,6 +851,18 @@ internal object SystemMediaBridge {
     /** Called AFTER the host's original TTVideoEngine callback proceeds.
      * A completion event is evidence only; never replay the video here.
      */
+    /** Original x05.w EOF means audible playback ended even while the
+     * previous MediaSession still remembers a PLAYING state. Do NOT call
+     * generic pause recovery here — it can resurrect the finished engine. */
+    fun onOfficialSeriesAwaitingNext(engine: Any?) {
+        if (!enabled || engine == null || videoEngine.get() !== engine)
+            return
+        knownPlaying = false
+        updateSessionState(false)
+        if (reportedCard) updateMediaNotification(false)
+        scheduleTimelinePoll(900L)
+    }
+
     fun onNativeCompletion(candidate: Any?) {
         if (!enabled || candidate == null || videoEngine.get() !== candidate ||
             episodeMonitor.hasNativeCompletion()) return
@@ -2474,7 +2486,15 @@ internal object SystemMediaBridge {
             val builder = PlaybackState.Builder()
                 .setActions(actions)
                 .setState(
-                    if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                    if (playing) PlaybackState.STATE_PLAYING
+                    else if (isOfficialSeriesActivityCurrent() &&
+                        NativeSeriesV3.snapshot().phase in setOf(
+                            NativeSeriesV3State.Phase.COMPLETED,
+                            NativeSeriesV3State.Phase.SELECTED,
+                            NativeSeriesV3State.Phase.BOUND,
+                            NativeSeriesV3State.Phase.STARTING))
+                        PlaybackState.STATE_BUFFERING
+                    else PlaybackState.STATE_PAUSED,
                     if (positionMs >= 0L) positionMs
                         else PlaybackState.PLAYBACK_POSITION_UNKNOWN,
                     if (playing) actualPlaybackSpeed else 0f,
