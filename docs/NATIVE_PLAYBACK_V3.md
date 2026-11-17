@@ -87,3 +87,28 @@ A `v3_resume requested` or TTVideoEngine.play is only a request.
 
 Do NOT merge until those on-device tests are verified. This is an isolated
 draft; main, beta, and V2 remain untouched.
+
+## Single-path simplification (2026-11-17)
+
+The standalone `refactor/official-playback-single-path` branch removes two
+competing recovery paths from NativeSeriesV3:
+
+- EOF/U1 no longer schedules a second `adapter.s4(next)` 160 ms later when
+  `ViewPager2` is ahead of business index `D`. That disagreement is reported
+  as diagnostic evidence instead of being treated as permission to navigate.
+- The Android MediaSession skip action calls one official `g()/A1()` command.
+  If the host has not settled its selection yet, return
+  `native_selection_pending`; never follow with synthetic `s4()`.
+- The only remaining background continuation is the existing one-shot,
+  exact-holder official `x05.w.resume()` with a scoped no-Surface lease.
+  Actual playback is confirmed by increasing native engine progress, not
+  by a pager index, command return value, or MediaSession metadata.
+- A scoped visibility exception is limited to the host's EOF flow, not a
+  separate manual-skip retry path. Host-owned navigation is never fabricated.
+
+This removes competing writers; it does **not** prove that the official APK
+will start the next episode after a rejected `s4()`. A failed native handoff
+must remain visible as `v3_handoff pending` / `v3_selection degraded` rather
+than being hidden by a second transition. Validate the regression matrix on
+an actual device, particularly two successive background EOF handoffs,
+before promoting this branch. Only Debug builds should be used.
