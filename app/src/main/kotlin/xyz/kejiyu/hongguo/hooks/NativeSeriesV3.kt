@@ -59,6 +59,18 @@ internal object NativeSeriesV3 {
         val generation: Long, val index: Int, val at: Long
     )
     private var acceptedEofGate: AcceptedEofGate? = null
+
+    /**
+     * MediaSession manual next/previous requests may complete through the
+     * host's asynchronous ViewPager2 callback. Bind a short-lived grant to
+     * the exact adapter, original index, target and EOF generation. Never
+     * issue a second pager move or synthesize a selection.
+     */
+    private data class ManualSkipRequest(
+        val adapter: Any, val fromIndex: Int, val targetIndex: Int,
+        val generation: Long, val startedMs: Long
+    )
+    @Volatile private var manualSkipRequest: ManualSkipRequest? = null
     private val scopedPage = ThreadLocal<PageScope?>()
 
     private val currentG4 = ThreadLocal<Any?>()
@@ -234,23 +246,24 @@ internal object NativeSeriesV3 {
         val native = original as? Boolean ?: return original
         val grant = acceptedEofGate
         val scope = scopedPage.get()
-        val eofScope = scope?.origin ==
-            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
+        val selectionScope = scope?.origin in setOf(
+            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF,
+            NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)
         val sameOriginalG4 = controller != null &&
             controller === currentG4.get()
         val matchingController = sameOriginalG4 &&
-            ((eofScope && controller === scope?.controller) ||
+            ((selectionScope && controller === scope?.controller) ||
                 (grant != null && controller === grant.controller &&
                     adapter.get() === grant.adapter))
-        val sameGeneration = if (eofScope)
+        val sameGeneration = if (selectionScope)
             state.snapshot().generation == scope?.generation
             else grant != null && state.snapshot().generation == grant.generation
-        val accepted = eofScope ||
+        val accepted = selectionScope ||
             (grant != null && state.snapshot().phase in setOf(
                 NativeSeriesV3State.Phase.SELECTED,
                 NativeSeriesV3State.Phase.BOUND,
                 NativeSeriesV3State.Phase.STARTING))
-        val age = if (eofScope) 0L else if (grant != null)
+        val age = if (selectionScope) 0L else if (grant != null)
             SystemClock.uptimeMillis() - grant.at else Long.MAX_VALUE
         val relax = NativeG4GatePolicy.mayRelax(
             hostBlocked = native,
@@ -278,17 +291,43 @@ internal object NativeSeriesV3 {
         val current = d(a) ?: return false
         val p = page(a) ?: return false
         val g = state.snapshot().generation
-        // A visibility exception belongs only to a verified native EOF.
-        // Manual media keys never obtain a second route through s4().
+        // A normal EOF is the original verified auto-next route.
+        val paused = SystemMediaBridge.isExplicitMediaCommandInProgress()
         val eofAllowed = state.mayScopeNext(a, target, current, p, count(a),
-            background = true,
-            explicitlyPaused =
-                SystemMediaBridge.isExplicitMediaCommandInProgress())
-        if (!eofAllowed) return false
+            background = true, explicitlyPaused = paused)
+
+        // The independent manual route exists ONLY for a genuine user
+        // media-button request. It cannot be obtained by autoplay, a random
+        // pager callback, an unrelated adapter or an old generation.
+        val manual = manualSkipRequest
+        val manualAllowed = !eofAllowed && manual != null &&
+            NativeManualEpisodeSkipPolicy.mayScope(
+                sameAdapter = manual.adapter === a && adapter.get() === a,
+                background = true,
+                nativeSelectionIdle = state.canManualSkip(),
+                explicitTransportPause = paused,
+                originalIndex = current,
+                pagerIndex = p,
+                requestedIndex = target,
+                mediaTargetIndex = manual.targetIndex,
+                loadedCount = count(a),
+                sameGeneration = manual.generation == g &&
+                    manual.fromIndex == current,
+                ageMs = SystemClock.uptimeMillis() - manual.startedMs)
+
+        if (!eofAllowed && !manualAllowed) {
+            if (manual != null && manual.adapter === a)
+                trace("manual_scope", "rejected",
+                    "D=$current,pager=$p,target=$target,expected=" +
+                        manual.targetIndex + ",phase=" + state.snapshot().phase)
+            return false
+        }
         val controller = inheritedField(a, "m") ?: return false
-        val origin = NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
-        scopedPage.set(PageScope(controller, a, g, target, current, p,
-            origin))
+        val origin = if (eofAllowed)
+            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
+            else NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP
+        if (manualAllowed) manualSkipRequest = null // single-use
+        scopedPage.set(PageScope(controller, a, g, target, current, p, origin))
         trace("scope", "enabled", "D=$current,pager=$p,target=$target," +
             "g=$g,origin=$origin")
         return true
@@ -318,7 +357,9 @@ internal object NativeSeriesV3 {
             ",eofScope=" + (scope?.target == target))
         if (!accepted) return
         if (scope != null && scope.adapter === a && scope.target == target &&
-            scope.origin == NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF) {
+            scope.origin in setOf(
+                NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF,
+                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)) {
             acceptedEofGate = AcceptedEofGate(a, scope.controller,
                 state.snapshot().generation, target,
                 SystemClock.uptimeMillis())
@@ -560,29 +601,58 @@ internal object NativeSeriesV3 {
         // follow a rejected command with a second synthetic s4(), because
         // doing so races the host's own asynchronous r4/G4 callbacks.
         val entry = if (delta > 0) "g" else "A1"
+        val hostCommand = method(a, entry, 0) ?: return "host_command_missing_$entry"
+        val target = current + delta
+        val scoped = SystemMediaBridge.isOfficialSeriesBackground()
+        // Arm before calling the real adapter: its pager callbacks may run
+        // synchronously or on the next UI event. An invalid/stale request
+        // cannot bypass the native visibility checks.
+        val request = if (scoped) ManualSkipRequest(
+            a, current, target, state.snapshot().generation,
+            SystemClock.uptimeMillis()) else null
+        manualSkipRequest = request
+        if (request != null) handler.postDelayed({
+            if (manualSkipRequest === request) {
+                manualSkipRequest = null
+                trace("manual_skip", "degraded",
+                    "reason=selection_not_observed,target=$target")
+            }
+        }, 2600L)
         val result = try {
-            method(a, entry, 0)?.invoke(a)
+            hostCommand.invoke(a)
         } catch (t: Throwable) {
+            manualSkipRequest = null
             trace("manual_skip", "failed", t.javaClass.simpleName)
             return "host_exception_" + t.javaClass.simpleName
         }
-        val target = current + delta
+        if (result == false) {
+            manualSkipRequest = null
+            trace("manual_skip", "rejected",
+                "reason=host_command_returned_false,target=$target")
+            return "host_command_rejected"
+        }
+        // The original host returns after the pager request; its business
+        // s4 selection can arrive in a later callback. Never report playback
+        // merely from the two indices changing.
         val selected = d(a) == target && page(a) == target
         trace("manual_skip",
             if (selected) "selected" else "pending",
             "command=$entry,result=$result,target=$target,D=" +
-                (d(a) ?: -1) + ",pager=" + (page(a) ?: -1))
+                (d(a) ?: -1) + ",pager=" + (page(a) ?: -1) +
+                ",background=$scoped")
         return if (selected) "selected" else "native_selection_pending"
     }
 
     fun onExplicitPause() {
         acceptedEofGate = null
+        manualSkipRequest = null
         releaseLease(null, "user_pause")
         state.onPause(state.pendingEngine(), true)
     }
 
     fun reset() {
         acceptedEofGate = null
+        manualSkipRequest = null
         releaseLease(null, "reset")
         state.reset()
         adapter.clear()
