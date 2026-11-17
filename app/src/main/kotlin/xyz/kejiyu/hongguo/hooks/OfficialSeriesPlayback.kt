@@ -209,11 +209,24 @@ internal object OfficialSeriesPlayback {
         }
     }
 
-    fun onNativeAutoplayGate(controller: Any?, result: Any?) {
-        if (controller == null || controller !== g4DecisionScope.get()) return
-        val blocked = result as? Boolean
-        g4GateResult.set(blocked)
-        log("i9", "observed", "hostReturn=$blocked")
+    fun onNativeAutoplayGate(controller: Any?, result: Any?): Any? {
+        if (controller == null || controller !== g4DecisionScope.get())
+            return result
+        val blocked = result as? Boolean ?: return result
+        val eligible = NativeAutoplayGatePolicy.shouldAllow(
+            hostBlocked = blocked,
+            genuineBackground = SystemMediaBridge.isOfficialSeriesBackground(),
+            sameController = controller === visibilityScope.get(),
+            verifiedEofSelection =
+                timeline.snapshot().phase == OfficialSeriesTimeline.Phase.COMPLETED,
+            userCommandInProgress =
+                SystemMediaBridge.isExplicitMediaCommandInProgress()
+        )
+        val effective = if (eligible) false else blocked
+        g4GateResult.set(effective)
+        log("i9", if (eligible) "scoped" else "observed",
+            "hostReturn=$blocked,effective=$effective,verifiedEof=$eligible")
+        return effective
     }
 
     fun onSelection(a: Any?, requested: Int?, result: Any?) {
