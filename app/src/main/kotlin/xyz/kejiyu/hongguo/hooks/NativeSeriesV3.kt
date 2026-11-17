@@ -53,6 +53,11 @@ internal object NativeSeriesV3 {
         val engine: Any, val task: Any,
         val flag: Field, val original: Boolean
     )
+    private data class AcceptedEofGate(
+        val adapter: Any, val controller: Any,
+        val generation: Long, val index: Int, val at: Long
+    )
+    private var acceptedEofGate: AcceptedEofGate? = null
     private val scopedPage = ThreadLocal<PageScope?>()
     private val currentG4 = ThreadLocal<Any?>()
     private var lease: SurfaceLease? = null
@@ -159,6 +164,7 @@ internal object NativeSeriesV3 {
             currentEngine = WeakReference(finished)
         }
         releaseLease(null, "completed")
+        acceptedEofGate = null
         val g = state.complete(finished)
         candidateHolder.clear()
         resumeAttemptGeneration = -1L
@@ -180,24 +186,48 @@ internal object NativeSeriesV3 {
         if (phase == "before") currentG4.set(inheritedField(a, "m"))
         trace("g4", "observed", "phase=$phase,D=" + (d(a) ?: -1) +
             ",state=" + state.snapshot().phase)
-        if (phase == "after") currentG4.remove()
+        if (phase == "after") {
+            // The grant is single-use: when the original G4 call returns,
+            // a later manual/foreground G4 is never affected.
+            acceptedEofGate = null
+            currentG4.remove()
+        }
     }
 
     fun onNativeAutoplayGate(controller: Any?, original: Any?): Any? {
         val native = original as? Boolean ?: return original
+        val grant = acceptedEofGate
         val scope = scopedPage.get()
-        val eligible = native && scope != null &&
-            controller === scope.controller &&
-            controller === currentG4.get() &&
-            state.snapshot().generation == scope.generation &&
-            SystemMediaBridge.isOfficialSeriesBackground() &&
-            !SystemMediaBridge.isExplicitMediaCommandInProgress()
-        if (controller === currentG4.get())
-            trace("g4_gate", if (eligible) "scoped" else "observed",
-                "nativeBlock=$native,overridden=$eligible")
-        // Only for the exact original accepted EOF s4/G4 call. All other
-        // policy checks return their unmodified host answer.
-        return if (eligible) false else original
+        val sameOriginalG4 = controller != null &&
+            controller === currentG4.get()
+        val matchingController = sameOriginalG4 &&
+            ((scope != null && controller === scope.controller) ||
+                (grant != null && controller === grant.controller &&
+                    adapter.get() === grant.adapter))
+        val sameGeneration = if (scope != null)
+            state.snapshot().generation == scope.generation
+            else grant != null && state.snapshot().generation == grant.generation
+        val accepted = scope != null ||
+            (grant != null && state.snapshot().phase in setOf(
+                NativeSeriesV3State.Phase.SELECTED,
+                NativeSeriesV3State.Phase.BOUND,
+                NativeSeriesV3State.Phase.STARTING))
+        val age = if (scope != null) 0L else if (grant != null)
+            SystemClock.uptimeMillis() - grant.at else Long.MAX_VALUE
+        val relax = NativeG4GatePolicy.mayRelax(
+            hostBlocked = native,
+            background = SystemMediaBridge.isOfficialSeriesBackground(),
+            explicitCommand =
+                SystemMediaBridge.isExplicitMediaCommandInProgress(),
+            controllerMatches = matchingController,
+            generationMatches = sameGeneration,
+            acceptedEofSelection = accepted,
+            elapsedMs = age
+        )
+        if (sameOriginalG4)
+            trace("g4_gate", if (relax) "scoped" else "observed",
+                "nativeBlock=$native,override=$relax,age=$age")
+        return if (relax) false else original
     }
 
     /** V2 incorrectly demanded pager == D. The original app often advances
@@ -244,6 +274,11 @@ internal object NativeSeriesV3 {
             ",pager=" + (page(a) ?: -1) +
             ",eofScope=" + (scope?.target == target))
         if (!accepted) return
+        if (scope != null && scope.adapter === a && scope.target == target) {
+            acceptedEofGate = AcceptedEofGate(a, scope.controller,
+                state.snapshot().generation, target,
+                SystemClock.uptimeMillis())
+        }
         val holder = candidateHolder.get()
         if (holder != null && candidateAdapter.get() === a)
             bindNext(holder, a)
@@ -486,11 +521,13 @@ internal object NativeSeriesV3 {
     }
 
     fun onExplicitPause() {
+        acceptedEofGate = null
         releaseLease(null, "user_pause")
         state.onPause(state.pendingEngine(), true)
     }
 
     fun reset() {
+        acceptedEofGate = null
         releaseLease(null, "reset")
         state.reset()
         adapter.clear()
