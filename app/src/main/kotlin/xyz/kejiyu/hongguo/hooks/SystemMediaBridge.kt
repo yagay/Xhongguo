@@ -738,13 +738,29 @@ internal object SystemMediaBridge {
         foregroundActivity.get()?.javaClass?.name ==
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
 
+    /**
+     * Android process importance is the authoritative confirmation that the
+     * host has actually left for another app. The old media exit flag can lag
+     * behind Activity.onStop (seen in the 22:17 diagnostic); don't misclassify
+     * a confirmed background Series EOF as a foreground interaction.
+     *
+     * Retain the provisional media guard before Android confirms background.
+     * Never classify a still-focused Activity as background.
+     */
     fun isOfficialSeriesBackground(): Boolean {
         val activity = foregroundActivity.get() ?: return false
-        return enabled && requestedBackgroundPlayback &&
-            !userCommandInProgress &&
-            activity.javaClass.name ==
-                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
-            !activity.isFinishing && !activity.hasWindowFocus()
+        if (!enabled || userCommandInProgress ||
+            activity.javaClass.name !=
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            activity.isFinishing || activity.hasWindowFocus()) return false
+        val importance = try {
+            val state = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(state)
+            state.importance
+        } catch (_: Throwable) { -1 }
+        val systemConfirmed = importance >=
+            android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE
+        return systemConfirmed || requestedBackgroundPlayback
     }
 
     fun rememberOfficialSeriesAdapter(adapter: Any?) {
