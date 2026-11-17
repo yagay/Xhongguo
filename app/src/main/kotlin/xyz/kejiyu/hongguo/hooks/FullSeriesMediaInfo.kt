@@ -518,28 +518,16 @@ internal object FullSeriesMediaInfo {
 
         val listIndex = best?.modelListIndex
         val vidIndex = best?.modelVidIndex
-        val indexFromList = listIndex?.takeIf {
-            it >= 0L && it < (total ?: 5000L)
-        }?.plus(1)
-        val indexFromVid = vidIndex?.takeIf {
-            it in 1..(total ?: 5000L)
-        }
-        // vidIndex is an episode-facing numeric ID in this SaaS model;
-        // indexInList is the local list offset. Prefer agreement, and do not
-        // invent "first episode" when a local recycled list starts at zero.
-        val current = when {
-            ambiguous || best == null || best.score < 4 -> null
-            indexFromVid != null && indexFromList != null &&
-                indexFromVid == indexFromList -> indexFromVid
-            indexFromVid != null && listIndex == vidIndex ->
-                indexFromList
-            indexFromVid != null && listIndex == 0L &&
-                indexFromVid > 1L -> indexFromVid
-            indexFromVid != null && indexFromList == null -> indexFromVid
-            indexFromList != null && vidIndex == null -> indexFromList
-            indexFromList != null && vidIndex == 0L -> indexFromList
-            else -> null
-        }
+        val verifiedTotal = total ?: number(field(best?.video, "episodesCount"))
+            ?.takeIf { it in 1L..5000L }
+        // ShortSeriesSingleFragment can recycle a SHORT local list starting
+        // at zero while the player is actually on episode 20+. Never use
+        // localPosition + 1 unless this list covers the entire series.
+        val current = if (ambiguous || best == null || best.score < 4) null
+            else SeriesEpisodeNumberPolicy.resolve(
+                listIndex, vidIndex, verifiedTotal,
+                fullListVerified = verifiedTotal != null &&
+                    best.listCount.toLong() == verifiedTotal)
         val now = SystemClock.uptimeMillis()
         if (now - lastFragmentDiagnosticAt > 12000L) {
             lastFragmentDiagnosticAt = now
@@ -569,11 +557,8 @@ internal object FullSeriesMediaInfo {
         val fragmentCover: String? = poster?.takeIf {
             it.isNotBlank() && it != frameStill
         }
-        val matchedEpisode = if (current != null && current >= 1 &&
-            (total == null || current <= total)) {
-            "第" + current + "集" +
-                (if (total != null) " · 全" + total + "集" else "")
-        } else null
+        val matchedEpisode =
+            SeriesEpisodeNumberPolicy.label(current, verifiedTotal)
         return FragmentMedia(
             title = modelTitle,
             episode = matchedEpisode,
@@ -703,35 +688,33 @@ internal object FullSeriesMediaInfo {
 
     private fun episodeFromIndex(model: Any?, total: Long?): String? {
         if (model == null || model.javaClass.name != DATA) return null
-        val index = number(field(model, "indexInList"))
-        val vidIndex = number(field(model, "vidIndex"))
-
-        // indexInList is the playlist's zero-based index. vidIndex is
-        // independently supplied by the server and not necessarily 0-based.
-        // Prefer explicit playlist position when plausible.
-        val current: Long? = when {
-            index != null && index >= 0 &&
-                index < 5000 && (total == null || index < total) -> index + 1
-            vidIndex == 0L -> 1L
-            vidIndex != null && vidIndex in 1L..5000L &&
-                total != null && vidIndex <= total -> vidIndex
-            else -> null
-        }
-        if (current == null) return null
-        val result = "第" + current + "集"
-        return if (total != null && total in current..5000L) {
-            result + " · 全" + total + "集"
-        } else result
+        return SeriesEpisodeNumberPolicy.label(
+            SeriesEpisodeNumberPolicy.resolve(
+                number(field(model, "indexInList")),
+                number(field(model, "vidIndex")), total,
+                fullListVerified = false),
+            total)
     }
 
-    private fun indexFromList(detail: Any?, engineId: String?): Long? {
+    private fun indexFromList(
+        detail: Any?, engineId: String?, total: Long?
+    ): Long? {
         if (detail == null || engineId == null) return null
         for (key in listOf("episodesList", "playerSerialVideoList",
             "episodesListWithTrail", "episodesListWithTrailAfterCut")) {
             val list = field(detail, key) as? List<*> ?: continue
-            if (list.isEmpty() || list.size > 500) continue
+            if (list.isEmpty() || list.size > 5000) continue
             for ((index, item) in list.withIndex()) {
-                if (vid(item) == engineId) return index.toLong() + 1
+                val video = call(item, "getVideoData") ?:
+                    field(item, "videoData") ?: item
+                if (vid(video) != engineId && vid(item) != engineId) continue
+                return SeriesEpisodeNumberPolicy.resolve(
+                    number(field(video, "indexInList")),
+                    number(field(video, "vidIndex")), total,
+                    fullListVerified = total != null &&
+                        list.size.toLong() == total
+                ) ?: if (total != null && list.size.toLong() == total)
+                    index.toLong() + 1L else null
             }
         }
         return null
@@ -919,15 +902,25 @@ internal object FullSeriesMediaInfo {
         val pager = if (trustedDetail != null)
             pagerState(presenter, trustedDetail, stableTotal)
             else PagerState()
-        val episode = episodeFromIndex(playingModel, stableTotal)
-            ?: indexFromList(trustedDetail, videoId)?.let { index ->
-                "第" + index + "集" +
-                    (if (stableTotal != null && stableTotal >= index)
-                        " · 全" + stableTotal + "集" else "")
-            }
+        // Prefer the engine-matched fragment or COMPLETE native playlist.
+        // A Presenter model may be one episode behind during autoplay.
+        val nativeEpisode = SystemMediaBridge.verifiedNativeEpisodeNumber(
+            activity, engine, stableTotal)
+        val exactListEpisode = indexFromList(trustedDetail, videoId, stableTotal)
+        val episode = SeriesEpisodeNumberPolicy.label(
+            nativeEpisode ?: exactListEpisode, stableTotal)
             ?: fragment.episode
+            ?: episodeFromIndex(playingModel, stableTotal)
             ?: episodeFromPager(pager, stableTotal)
             ?: stableTotal?.let { "全" + it + "集" }
+        if (nativeEpisode != null || exactListEpisode != null) {
+            FeatureTrace.event("media", "episode_ordinal", "verified",
+                "source=" + (if (nativeEpisode != null)
+                    "native_complete_playlist" else "engine_matched_list") +
+                    ",episode=" + (nativeEpisode ?: exactListEpisode) +
+                    ",total=" + (stableTotal ?: -1L),
+                minIntervalMs = 1700L)
+        }
 
         if (playingModel != null && presenterVideoId != null && engine != null) {
             boundPresenterActivity = WeakReference(activity)
