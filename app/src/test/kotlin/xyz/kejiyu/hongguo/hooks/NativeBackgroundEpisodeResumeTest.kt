@@ -16,7 +16,31 @@ class NativeBackgroundEpisodeResumeTest {
         assertEquals(false, result.surfaceAvailable)
         assertEquals(1, player.playRequests)
         assertEquals(0, player.queuedForSurface)
-        assertFalse(task.i) // Native field restored after synchronous resume.
+        // The host loads its VideoModel asynchronously after resume().
+        // It reads c15.d.i AGAIN in the deferred PlayCommand, so the
+        // flag must survive the synchronous resume call.
+        assertTrue(task.i)
+        assertTrue(NativeSeriesPort.hasActiveNoSurfaceMode(engine))
+        assertTrue(NativeSeriesPort.finishAcceptedBackgroundEpisode(
+            engine, "real_progress"))
+        assertFalse(task.i)
+        assertFalse(NativeSeriesPort.hasActiveNoSurfaceMode(engine))
+    }
+
+    @Test fun nativeFlagPersistsForAsyncModelThenRestoresOnAbort() {
+        val engine = Any()
+        val task = c15.d(engine, c15.FakeSurface(false))
+        val player = x05.w(task)
+        NativeSeriesPort.resumeAcceptedBackgroundEpisode(player, engine)
+        assertTrue(task.i)
+        // Simulate the host's later c15.d.c() reading playWithoutSurface.
+        assertTrue(task.i)
+        assertFalse(NativeSeriesPort.finishAcceptedBackgroundEpisode(
+            Any(), "unrelated_player"))
+        assertTrue(task.i)
+        assertTrue(NativeSeriesPort.finishAcceptedBackgroundEpisode(
+            null, "explicit_pause"))
+        assertFalse(task.i)
     }
 
     @Test fun existingSurfaceUsesNormalNativeResume() {
