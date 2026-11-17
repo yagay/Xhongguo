@@ -363,7 +363,11 @@ internal object SystemMediaBridge {
         if (!enabled) return
         val engine = seriesPlayerEngine(player)
         // One coordinator receives every real x05.w engine bind.
-        if (stage == "engine_bound" && player != null && engine != null) {
+        if (stage == "engine_bound" && player != null && engine != null &&
+            (nativeSelectionScope.get()?.nextPlayer?.get() === player ||
+                pendingNativeNextStart?.player?.get() === player)) {
+            // Do not associate an unrelated preloaded x05.w with the
+            // selected episode merely because it happened to bind an engine.
             val before = nativePlayback.snapshot().playingIndex
             nativePlayback.onNativeHolderBound(player, engine)
             val after = nativePlayback.snapshot().playingIndex
@@ -392,6 +396,21 @@ internal object SystemMediaBridge {
             adapters = null
         }
         val adapterListener = isSeriesAdapter(listener)
+        if (stage == "listener_registered" && adapterListener &&
+            player != null && listener != null && engine != null &&
+            nativeSeriesAdapter.get() === listener &&
+            nativeSeriesAdapterActivity.get() === foregroundActivity.get()) {
+            val selection = NativeSeriesPort.selection(listener)
+            if (selection?.pagerAligned == true &&
+                nativePlayback.snapshot().pendingIndex == selection.index) {
+                // The listener itself proves this x05.w belongs to the
+                // selected adapter. Works for user skip as well as autoplay.
+                nativePlayback.onNativeHolderBound(player, engine)
+                FeatureTrace.event("playback", "native_holder_match",
+                    "verified", "index=" + selection.index +
+                        ",source=official_listener", flow=mediaFlow)
+            }
+        }
         val selectedNextPlayer = player != null &&
             pendingNativeNextStart?.player?.get() === player
         val relevant = sameEngine || adapterListener || selectedNextPlayer
