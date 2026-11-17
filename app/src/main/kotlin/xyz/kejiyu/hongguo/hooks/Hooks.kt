@@ -7806,10 +7806,17 @@ object Hooks {
                 // all already-open Series autoplay stay untouched.
                 val source = chain.thisObject as? Activity
                 val requestedIntent = chain.getArg(0) as? Intent
-                if (ForegroundLaunchTrace.shouldSuppressBackgroundFeedEofLaunch(
+                if (chain.getArgs().size == 3 &&
+                    ForegroundLaunchTrace.shouldKeepBackgroundFeedEofLaunchBehind(
                         source, requestedIntent)) {
-                    LogUtil.warn("系统媒体: 已阻止后台刷剧结束后自动弹出全集页面")
-                    return@ham null
+                    val args = chain.getArgs().toTypedArray()
+                    args[2] = ForegroundLaunchTrace.behindTaskOptions(
+                        args[2] as? android.os.Bundle)
+                    // The host still receives its original Activity launch,
+                    // including result callbacks and native episode setup.
+                    // Only the task placement policy changes.
+                    LogUtil.info("系统媒体: 原生全集启动保留，已请求后台保持任务不置顶")
+                    return@ham chain.proceed(args)
                 }
                 try {
                     ForegroundLaunchTrace.activityStart(
