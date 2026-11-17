@@ -7058,6 +7058,26 @@ object Hooks {
             val seriesFragment = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
                 false, classLoader)
+            // 7.3.5.32: nh() returns the real adapter.f even before an
+            // EOF/selection callback. Capture it for media skip controls.
+            val getAdapter = seriesFragment.declaredMethods.firstOrNull {
+                it.name == "nh" && it.parameterCount == 0
+            }
+            if (getAdapter != null) {
+                module.hook(getAdapter)
+                    .setId("xhSeriesNativeAdapterGetter")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val adapter = chain.proceed()
+                        try {
+                            if (gMasterOn && gSystemMediaOn)
+                                SystemMediaBridge.onSeriesFragmentAdapter(
+                                    chain.thisObject, adapter)
+                        } catch (_: Throwable) { }
+                        adapter
+                    })
+                LogUtil.info("  ✓ Full-series native adapter getter")
+            }
             val stop = seriesFragment.declaredMethods.firstOrNull {
                 it.name == "onStop" && it.parameterCount == 0 &&
                     it.returnType == Void.TYPE
