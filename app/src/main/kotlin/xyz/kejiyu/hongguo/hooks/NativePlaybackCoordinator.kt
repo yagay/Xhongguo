@@ -48,7 +48,7 @@ internal class NativePlaybackCoordinator {
             playingIndex = null
         }
         selectedIndex = index
-        if (index != playingIndex) {
+        if (index != playingIndex && pendingIndex != index) {
             pendingIndex = index
             boundNextEngine.clear()
             boundNextHolder.clear()
