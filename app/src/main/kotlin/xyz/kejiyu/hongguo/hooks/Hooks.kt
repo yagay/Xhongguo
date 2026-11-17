@@ -6452,6 +6452,37 @@ object Hooks {
                 false, classLoader)
             var nativeCount = 0
 
+            // Verified in official 7.3.5.32 classes4.dex:
+            // e.J2(Z,String,Bundle,Z,Integer,Boolean,Boolean)V.
+            // This is the host's player-sharing + launch handoff. Observe
+            // the original call, without invoking it ourselves or modifying
+            // any activity/task/player/surface state.
+            try {
+                val j2 = feedAdapter.getDeclaredMethod("J2",
+                    Boolean::class.javaPrimitiveType,
+                    String::class.java,
+                    android.os.Bundle::class.java,
+                    Boolean::class.javaPrimitiveType,
+                    Integer::class.java,
+                    java.lang.Boolean::class.java,
+                    java.lang.Boolean::class.java)
+                module.hook(j2)
+                    .setId("nativeFeedPlayerHandoffJ2")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (gMasterOn && gSystemMediaOn) {
+                            NativePlayerHandoff.timed(
+                                { chain.proceed() },
+                                chain.getArgs().toTypedArray()
+                            )
+                        } else chain.proceed()
+                    })
+                nativeCount++
+            } catch (e: Throwable) {
+                LogUtil.warn("原生 J2 播放器交接观察 Hook 未安装 " +
+                    e.javaClass.simpleName)
+            }
+
             // Observe the ORIGINAL host EOF policy, not the eventual Activity.
             // The APK has distinct e.U1/p5 and f.U1/r5 completion paths.
             // Neither path is replaced; our hooks have no playback side effects.
