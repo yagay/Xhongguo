@@ -6287,6 +6287,13 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "play" && gMasterOn &&
                                 (gMiniPlayerOn || gSystemMediaOn) &&
+                                // The host may reuse a former FEED engine
+                                // for the next SERIES holder. Never reject
+                                // native play before series ownership is
+                                // confirmed by the source/progress pipeline.
+                                !OfficialSeriesPlayback.isSeriesRoute() &&
+                                !OfficialSeriesPlayback.isSeriesEngine(
+                                    chain.thisObject) &&
                                 SinglePlaybackOwner.shouldBlockPlay(chain.thisObject)) {
                                 // This is a retired engine from another page.
                                 // No media state or autoplay callback is emitted.
@@ -6310,12 +6317,17 @@ object Hooks {
                             val result = chain.proceed()
                             try {
                                 if (method.name == "play") {
-                                    if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn))
+                                    if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn) &&
+                                        !OfficialSeriesPlayback.isSeriesRoute() &&
+                                        !OfficialSeriesPlayback.isSeriesEngine(
+                                            chain.thisObject))
                                         SinglePlaybackOwner.onEnginePlayed(chain.thisObject)
                                     InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
                                 }
                                 if (method.name == "releaseAsync")
                                     SinglePlaybackOwner.onEngineReleased(chain.thisObject)
+                                OfficialSeriesPlayback.onEngineCommand(
+                                    chain.thisObject, method.name)
                                 InAppMiniPlayer.onNativeEngineAction(
                                     chain.thisObject, method.name)
                                 SystemMediaBridge.onNativeEngineCommand(
