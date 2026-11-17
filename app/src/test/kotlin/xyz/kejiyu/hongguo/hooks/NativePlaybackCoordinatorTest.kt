@@ -31,6 +31,21 @@ class NativePlaybackCoordinatorTest {
         assertNull(state.snapshot().pendingIndex)
     }
 
+    @Test fun duplicateS4DoesNotClearAlreadyBoundNextHolder() {
+        val state = NativePlaybackCoordinator()
+        val adapter = Any()
+        val old = Any()
+        val next = Any()
+        state.onNativePlay(old)
+        state.onNativeCompletion(old)
+        state.onNativeSelection(adapter, 4, accepted = true)
+        state.onNativeHolderBound(Any(), next)
+        state.onNativeSelection(adapter, 4, accepted = true)
+        assertEquals(NativePlaybackCoordinator.Phase.BOUND, state.snapshot().phase)
+        state.onNativePlay(next)
+        assertEquals(4, state.verifiedPlayingIndex(next, adapter))
+    }
+
     @Test fun initialNativeHolderCanConfirmAlreadyPlayingEngine() {
         val state = NativePlaybackCoordinator()
         val adapter = Any()
