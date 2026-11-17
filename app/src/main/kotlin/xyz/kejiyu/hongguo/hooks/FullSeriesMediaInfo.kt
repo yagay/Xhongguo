@@ -708,13 +708,17 @@ internal object FullSeriesMediaInfo {
                 val video = call(item, "getVideoData") ?:
                     field(item, "videoData") ?: item
                 if (vid(video) != engineId && vid(item) != engineId) continue
+                // The exact engine video-ID matched an entry in the
+                // COMPLETE official playlist. Its enumeration is stronger
+                // than the model's potentially recycled indexInList field.
+                if (total != null && list.size.toLong() == total)
+                    return index.toLong() + 1L
+                // With an incomplete list, use only a server ordinal.
                 return SeriesEpisodeNumberPolicy.resolve(
                     number(field(video, "indexInList")),
                     number(field(video, "vidIndex")), total,
-                    fullListVerified = total != null &&
-                        list.size.toLong() == total
-                ) ?: if (total != null && list.size.toLong() == total)
-                    index.toLong() + 1L else null
+                    fullListVerified = false
+                )
             }
         }
         return null
