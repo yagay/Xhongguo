@@ -6672,50 +6672,6 @@ object Hooks {
                 t.javaClass.simpleName + ":" + t.message)
         }
 
-        // Separate feed-to-series source boundary from the series V3 player.
-        // This replaces trial-and-error task-front changes with a strictly
-        // read-only proof of whether the official launch actually carries
-        // a verified next-episode SaasVideoData. No player is started here.
-        try {
-            val feedType = Class.forName(
-                "com.dragon.read.component.shortvideo.impl.v2.view.adapter.e",
-                false, classLoader)
-            val apiType = Class.forName(
-                "com.dragon.read.component.shortvideo.api.ShortSeriesApi",
-                false, classLoader)
-            val launchType = Class.forName(
-                "com.dragon.read.component.shortvideo.api.model.ShortSeriesLaunchArgs",
-                false, classLoader)
-
-            module.hook(feedType.getDeclaredMethod("U1", String::class.java))
-                .setId("headlessFeedEofOwner")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    val trace = gMasterOn && gSystemMediaOn
-                    if (trace)
-                        NativeHeadlessPreflight.beginFeedCompletion(chain.thisObject)
-                    try { chain.proceed() }
-                    finally { if (trace) NativeHeadlessPreflight.endFeedCompletion() }
-                })
-            module.hook(apiType.getDeclaredMethod(
-                    "openShortSeriesActivityForResult", launchType))
-                .setId("headlessNativeSourceBoundary")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    if (gMasterOn && gSystemMediaOn) try {
-                        NativeHeadlessPreflight.observeLaunchArgs(chain.getArg(0))
-                    } catch (error: Throwable) {
-                        LogUtil.warn("无界面原生数据预检异常 " +
-                            error.javaClass.simpleName)
-                    }
-                    chain.proceed()
-                })
-            LogUtil.info("  ✓ native feed source boundary observation: 2")
-        } catch (e: Throwable) {
-            LogUtil.warn("无界面原生数据预检 Hook 未安装 " +
-                e.javaClass.simpleName)
-        }
-
         // Read stable SaasVideoDetailModel objects rather than guessing an
         // obfuscated uo4.y0.x Runnable which is absent in Hongguo 7.3.5.32.
         // Constructor observation is a fallback; Gson.fromJson captures the
