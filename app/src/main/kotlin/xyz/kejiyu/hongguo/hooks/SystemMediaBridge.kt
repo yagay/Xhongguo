@@ -1124,36 +1124,31 @@ internal object SystemMediaBridge {
             return
         }
 
-        // Exactly one invocation, and only on the already-selected native
-        // next holder. resume() is the official x05.w business entry point;
-        // it can prepare a holder whose H() engine is not bound yet.
+        // Use the official native task's OWN playWithoutSurface resume
+        // branch. APK 7.3.5.32 defers ordinary resume while the background
+        // episode lacks a Surface, even after the host accepted its s4().
+        // This is one tightly verified handoff, not a fallback pager patch.
         pending.attempted = true
-        try {
-            val resume = nextPlayer?.javaClass?.methods?.firstOrNull {
-                it.name == "resume" && it.parameterCount == 0 &&
-                    it.returnType == Void.TYPE
-            } ?: run {
-                pendingNativeNextStart = null
-                FeatureTrace.event("background", "series_next_start_recovery",
-                    "degraded", "reason=no_native_resume", flow=mediaFlow)
-                return
-            }
-            resume.invoke(nextPlayer)
-            LogUtil.info("系统媒体: 下一集已选中但未启动，恢复新 x05.w" +
-                " index=" + pending.targetIndex +
-                " engineBound=" + (newHolderEngine != null))
-            FeatureTrace.event("background", "series_next_start_recovery",
-                "requested", "route=next_x05_w_resume,index=" +
-                    pending.targetIndex + ",engineBound=" + (newHolderEngine != null),
-                flow=mediaFlow)
-        } catch (e: Throwable) {
+        val resumeResult = NativeSeriesPort.resumeAcceptedBackgroundEpisode(
+            nextPlayer, newHolderEngine)
+        FeatureTrace.event("background", "series_next_start_recovery",
+            if (resumeResult.invoked) "requested" else "fail",
+            "index=" + pending.targetIndex +
+                ",route=" + resumeResult.reason +
+                ",surface=" + (resumeResult.surfaceAvailable?.toString()
+                    ?: "unknown") +
+                ",noSurface=" + resumeResult.withoutSurface,
+            flow=mediaFlow)
+        if (!resumeResult.invoked) {
             pendingNativeNextStart = null
-            LogUtil.warn("系统媒体: 下一集原生播放恢复失败 " +
-                e.javaClass.simpleName)
-            FeatureTrace.event("background", "series_next_start_recovery", "fail",
-                "errorType=" + e.javaClass.simpleName, flow=mediaFlow)
+            LogUtil.warn("系统媒体: 下一集原生恢复未执行 " +
+                resumeResult.reason)
             return
         }
+        LogUtil.info("系统媒体: 官方后台续集恢复已提交" +
+            " index=" + pending.targetIndex +
+            " mode=" + resumeResult.reason +
+            " engineBound=" + (newHolderEngine != null))
         handler.postDelayed({
             if (pendingNativeNextStart === pending &&
                 nativeEofGeneration == pending.generation &&
