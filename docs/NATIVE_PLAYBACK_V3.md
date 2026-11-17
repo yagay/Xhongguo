@@ -40,8 +40,11 @@ invalidate the pending operation.
   `pager == next`. Do not manipulate the pager.
 - Resolve concrete `j15.d.i9()/y4()` via adapter's own controller
   runtime class; reject abstract methods. Observe the original i9 return;
-  only an original G4 call within the verified synchronous EOF selection
-  can temporarily clear a background-specific auto-start block.
+  only the original G4 associated with a genuinely accepted EOF selection
+  may temporarily clear a background-specific auto-start block. The host
+  can call G4 *after* s4 returns, so this grant is bound to the exact
+  adapter/controller/generation, expires after 2.5 seconds, and is consumed
+  by the first original G4. It is never permanent.
 - Match next native x05.w holder, original listener and engine identity.
 - Issue at most one original x05.w.resume() for the accepted holder with
   a verified absent Surface, using the host's c15.d.i flag; restore the
