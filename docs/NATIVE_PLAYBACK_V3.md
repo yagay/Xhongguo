@@ -163,3 +163,34 @@ that case.
 No playback, transition, MediaSession or automatic episode code was changed
 by this diagnostic-only instrumentation. Test build and live host behavior
 remain unverified until CI/device execution.
+
+## Background feed EOF foreground-stealing regression (2026-11-17 21:38)
+
+Confirmed from `Xhongguo-diagnostic-20261117-213855.zip`:
+- 21:38:12.459: MainFragmentActivity paused.
+- 21:38:13.394: importance=300, stopped=true; another app foreground.
+- 21:38:46.692: real `x05.w.onCompletion` and V3 EOF.
+- 21:38:46.747: `ShortSeriesImpl.openShortSeriesActivityForResult`
+  called `Activity.startActivityForResult` for ShortSeriesActivity with
+  importance=300 and no window focus.
+- 21:38:46.897: ShortSeriesActivity resumed; 21:38:48.561 gained focus.
+
+The concrete origin is the host's FEED EOF navigation, not module
+`moveTaskToFront`. The module's post-launch lifecycle owner handoff
+comes *after* the unwanted Activity start.
+
+The guarded Activity launch interception now suppresses only:
+a stopped background MainFragmentActivity, a confirmed native EOF within
+2.5 seconds, an exact ShortSeriesActivity Intent, and a call stack containing
+the official ShortSeriesImpl.openShortSeriesActivityForResult. The original
+user-driven foreground navigation and the already-open series episode
+autoplay route are not changed. Structured log:
+`feature=foreground stage=background_eof_series_launch result=blocked`.
+
+**Trade-off:** On some official feed routes, launching series Activity is
+how the host starts the next item. Suppression can prevent that continuation;
+the next test must check background continuity as well as no foreground
+takeover. Do not attempt to "fix" continuity by scheduling a second Activity
+launch or moving the task to front.
+
+Debug build and device validation are still required.
