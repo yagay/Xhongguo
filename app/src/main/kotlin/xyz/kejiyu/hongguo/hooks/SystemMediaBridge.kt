@@ -757,6 +757,28 @@ internal object SystemMediaBridge {
             !activity.isFinishing && !activity.hasWindowFocus()
     }
 
+    /**
+     * Manual MediaSession skips are allowed after Android confirms this
+     * Series activity is truly behind another app. The existing
+     * isOfficialSeriesBackground() gate is intentionally left unchanged:
+     * that stricter gate is used for AUTOMATIC EOF ownership and must not
+     * be relaxed by a user-initiated media action.
+     */
+    fun isOfficialSeriesManualSkipBackground(): Boolean {
+        val activity = foregroundActivity.get() ?: return false
+        if (!enabled || userCommandInProgress || activity.isFinishing ||
+            activity.hasWindowFocus() ||
+            activity.javaClass.name !=
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            nativeSeriesAdapterActivity.get() !== activity) return false
+        return try {
+            val importance = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(importance)
+            importance.importance >=
+                android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE
+        } catch (_: Throwable) { false }
+    }
+
     fun rememberOfficialSeriesAdapter(adapter: Any?) {
         rememberSeriesAdapter(adapter)
     }
