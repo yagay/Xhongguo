@@ -423,10 +423,13 @@ internal object NativeSeriesV3 {
 
     fun onProgress(e: Any?, pos: Long, duration: Long): Boolean {
         if (e == null) return false
+        // Retain the exact holder selected by the reducer, not the latest
+        // listener from some unrelated preloaded item.
+        val selectedHolder = state.pendingHolder()
         if (state.confirmProgress(e, pos, duration)) {
             releaseLease(e, "progress")
             currentEngine = WeakReference(e)
-            currentHolder = WeakReference(candidateHolder.get())
+            currentHolder = WeakReference(selectedHolder)
             SystemMediaBridge.rememberOfficialSeriesHolder(currentHolder.get(), e)
             trace("progress", "confirmed", "index=" +
                 state.snapshot().playingIndex + ",pos=$pos,dur=$duration")
