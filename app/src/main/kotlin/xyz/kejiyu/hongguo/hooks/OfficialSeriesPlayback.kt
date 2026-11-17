@@ -284,6 +284,7 @@ internal object OfficialSeriesPlayback {
             currentHolder = WeakReference(holder)
             currentEngine = WeakReference(boundEngine)
         }
+        SystemMediaBridge.rememberOfficialSeriesHolder(holder, boundEngine)
     }
 
     fun shouldRetainCompletionListener(holder: Any?, listener: Any?): Boolean =
@@ -434,6 +435,8 @@ internal object OfficialSeriesPlayback {
         releaseLease(e, "verified_native_progress")
         currentEngine = WeakReference(e)
         currentHolder = WeakReference(candidateHolder.get())
+        SystemMediaBridge.rememberOfficialSeriesHolder(
+            currentHolder.get(), e)
         log("progress", "confirmed", "position=$pos,duration=$duration,index=" +
             timeline.snapshot().playingIndex)
         SinglePlaybackOwner.onEnginePlayed(e)
