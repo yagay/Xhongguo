@@ -6447,7 +6447,115 @@ object Hooks {
             val seriesAdapter = Class.forName(
                 "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
                 false, classLoader)
+            val feedAdapter = Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.view.adapter.e",
+                false, classLoader)
             var nativeCount = 0
+
+            // Observe the ORIGINAL host EOF policy, not the eventual Activity.
+            // The APK has distinct e.U1/p5 and f.U1/r5 completion paths.
+            // Neither path is replaced; our hooks have no playback side effects.
+            try {
+                module.hook(feedAdapter.getDeclaredMethod("U1", String::class.java))
+                    .setId("nativeFeedEofPolicy")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val tracking = gMasterOn && gSystemMediaOn
+                        if (tracking) NativeFeedCompletion.begin(chain.thisObject, "feed_e")
+                        try { chain.proceed() }
+                        finally {
+                            if (tracking)
+                                NativeFeedCompletion.end(chain.thisObject, "feed_e")
+                        }
+                    })
+                nativeCount++
+            } catch (e: Throwable) {
+                LogUtil.warn("官方刷剧 e.U1 Hook 未安装 " + e.javaClass.simpleName)
+            }
+            try {
+                // e.p5(e) is a host static function; it chooses the original
+                // next-episode/enter-inner-feed branch.
+                val p5 = feedAdapter.declaredMethods.firstOrNull {
+                    it.name == "p5" && it.parameterCount == 1 &&
+                        it.parameterTypes[0] == feedAdapter
+                }
+                if (p5 != null) {
+                    module.hook(p5)
+                        .setId("nativeFeedPolicyP5")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            if (gMasterOn && gSystemMediaOn)
+                                NativeFeedCompletion.decision(
+                                    chain.getArg(0), "native_p5_deciding")
+                            chain.proceed()
+                        })
+                    nativeCount++
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("官方刷剧 e.p5 Hook 未安装 " + e.javaClass.simpleName)
+            }
+            try {
+                // a.M0 returns the host's inner-series holder. It is
+                // observed before subsequent official navigation callbacks.
+                val nativeHolder = baseAdapter.getDeclaredMethod("M0")
+                module.hook(nativeHolder)
+                    .setId("nativeFeedInnerSelection")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (gMasterOn && gSystemMediaOn)
+                            NativeFeedCompletion.decision(
+                                chain.thisObject, "host_inner_series_selection")
+                        chain.proceed()
+                    })
+                nativeCount++
+            } catch (e: Throwable) {
+                LogUtil.warn("官方刷剧 M0 Hook 未安装 " + e.javaClass.simpleName)
+            }
+            try {
+                // m15.l.U4(detail, boolean) is the genuine next-episode
+                // business callback used in e.p5, NOT a synthetic pager move.
+                val nativeSelector = Class.forName("m15.l", false, classLoader)
+                val u4 = nativeSelector.declaredMethods.firstOrNull {
+                    it.name == "U4" && it.parameterCount == 2
+                }
+                if (u4 != null) {
+                    module.hook(u4)
+                        .setId("nativeFeedOfficialNextEpisode")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            if (gMasterOn && gSystemMediaOn)
+                                NativeFeedCompletion.staticNextEpisode()
+                            chain.proceed()
+                        })
+                    nativeCount++
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("官方刷剧 U4 Hook 未安装 " + e.javaClass.simpleName)
+            }
+            try {
+                // APK's genuine listen-mode predicate; just observe its
+                // result inside the f.U1 stack, never globally spoof it.
+                val listeningMode = Class.forName("p35.b", false, classLoader)
+                val gate = listeningMode.declaredMethods.firstOrNull {
+                    it.name == "v0" && it.parameterCount == 1 &&
+                        it.returnType == Boolean::class.javaPrimitiveType
+                }
+                if (gate != null) {
+                    module.hook(gate)
+                        .setId("nativeListenModeOriginalGate")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val native = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn)
+                                NativeFeedCompletion.listeningGate(native,
+                                    chain.getArg(0) as? Activity)
+                            native
+                        })
+                    nativeCount++
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("官方听模式判定 Hook 未安装 " + e.javaClass.simpleName)
+            }
 
             // End-of-video: observe BEFORE calling the original, because
             // x05.w.onCompletion synchronously enters adapter.f.U1/s4/G4.
@@ -6515,13 +6623,17 @@ object Hooks {
                 .setId("v3SeriesHostAutoplay")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
-                    if (gMasterOn && gSystemMediaOn)
+                    val enabled = gMasterOn && gSystemMediaOn
+                    if (enabled) {
+                        NativeFeedCompletion.begin(chain.thisObject, "series_f")
                         NativeSeriesV3.onAutoplay(chain.thisObject, "before")
+                    }
                     try { chain.proceed() }
                     finally {
-                        if (gMasterOn && gSystemMediaOn)
-                            NativeSeriesV3.onAutoplay(
-                                chain.thisObject, "after")
+                        if (enabled) {
+                            NativeSeriesV3.onAutoplay(chain.thisObject, "after")
+                            NativeFeedCompletion.end(chain.thisObject, "series_f")
+                        }
                     }
                 })
             nativeCount++
@@ -7800,24 +7912,9 @@ object Hooks {
                 } else chain.proceed()
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
-                // Official feed EOF can fire while another application is
-                // foreground. Do not launch a new fullscreen Series Activity
-                // over that application. Foreground/manual navigation and
-                // all already-open Series autoplay stay untouched.
-                val source = chain.thisObject as? Activity
-                val requestedIntent = chain.getArg(0) as? Intent
-                if (chain.getArgs().size == 3 &&
-                    ForegroundLaunchTrace.shouldKeepBackgroundFeedEofLaunchBehind(
-                        source, requestedIntent)) {
-                    val args = chain.getArgs().toTypedArray()
-                    args[2] = ForegroundLaunchTrace.behindTaskOptions(
-                        args[2] as? android.os.Bundle)
-                    // The host still receives its original Activity launch,
-                    // including result callbacks and native episode setup.
-                    // Only the task placement policy changes.
-                    LogUtil.info("系统媒体: 原生全集启动保留，已请求后台保持任务不置顶")
-                    return@ham chain.proceed(args)
-                }
+                // Do not short-circuit or change the host's ActivityOptions.
+                // Feed-to-inner-series navigation is a native business decision,
+                // not an Activity-layer playback transport command.
                 try {
                     ForegroundLaunchTrace.activityStart(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent,
