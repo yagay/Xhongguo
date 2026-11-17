@@ -6417,6 +6417,16 @@ object Hooks {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
         }
 
+        val nativeContract = NativeSeriesPort.verify(classLoader)
+        LogUtil.info("原生播放核心: APK 7.3.5.32 签名自检 " +
+            nativeContract.present + "/" + nativeContract.expected +
+            " missing=" + nativeContract.missing.joinToString(";"))
+        FeatureTrace.event("playback", "native_hook_contract",
+            if (nativeContract.compatible) "ok" else "degraded",
+            "verified=" + nativeContract.present + "/" +
+                nativeContract.expected +
+                ",missing=" + nativeContract.missing.joinToString(";").take(350))
+
         // Official 7.3.5.32 full-series playback is NOT driven by the
         // VideoShop VideoContext completion route. APK DEX confirmed:
         // x05.w.onCompletion(TTVideoEngine) -> vm4.a.U1(String)
