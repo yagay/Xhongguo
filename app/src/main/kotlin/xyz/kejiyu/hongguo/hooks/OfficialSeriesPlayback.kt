@@ -277,8 +277,17 @@ internal object OfficialSeriesPlayback {
         holder != null && listener != null &&
             holder === currentHolder.get() &&
             listener === adapter.get() &&
-            SystemMediaBridge.isOfficialSeriesBackground() &&
-            timeline.snapshot().phase == OfficialSeriesTimeline.Phase.COMPLETED
+            // Keep the original U1 observer at the one verified Activity
+            // exit boundary. A removal at onStop happens before the
+            // completion event and often before background is confirmed.
+            (SystemMediaBridge.isOfficialSeriesBackground() ||
+                SystemMediaBridge.isOfficialSeriesPrePauseHandoff(
+                    engine(holder))) &&
+            timeline.snapshot().phase !in setOf(
+                OfficialSeriesTimeline.Phase.FAILED,
+                OfficialSeriesTimeline.Phase.SELECTED,
+                OfficialSeriesTimeline.Phase.BOUND,
+                OfficialSeriesTimeline.Phase.STARTING)
 
     /** One business resume, posted to run AFTER the original G4/s4 stack.
      * The native task's no-surface flag persists through async VideoModel load.
