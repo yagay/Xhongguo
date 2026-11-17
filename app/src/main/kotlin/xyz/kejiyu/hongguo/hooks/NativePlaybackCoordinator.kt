@@ -64,7 +64,12 @@ internal class NativePlaybackCoordinator {
         // TTVideoEngine.play() can run from within x05.w.L() BEFORE the
         // hook's after-callback reports the binding. Confirm that late
         // binding rather than losing the newly playing episode.
-        if (activeEngine.get() === engine && phase == Phase.PLAYING) {
+        if (activeEngine.get() === engine &&
+            (phase == Phase.PLAYING ||
+                // Initial playback may be observed before its native
+                // adapter has reported the current position. This is NOT
+                // valid after an EOF from a reused engine.
+                (playingIndex == null && finishedEngine.get() == null))) {
             playingIndex = pendingIndex
             pendingIndex = null
             finishedEngine.clear()
