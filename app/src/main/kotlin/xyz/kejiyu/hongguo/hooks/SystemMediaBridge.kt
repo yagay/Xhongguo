@@ -375,7 +375,9 @@ internal object SystemMediaBridge {
             adapters = null
         }
         val adapterListener = isSeriesAdapter(listener)
-        val relevant = sameEngine || adapterListener
+        val selectedNextPlayer = player != null &&
+            pendingNativeNextStart?.player?.get() === player
+        val relevant = sameEngine || adapterListener || selectedNextPlayer
         if (!relevant) return
         // The accepted native s4() creates the next x05.w inside G4().
         // Capture only the listener registered on the exact adapter whose
@@ -446,12 +448,14 @@ internal object SystemMediaBridge {
             " holderCallback=" + (callbackOwner?.javaClass?.simpleName ?: "null") +
             " downstreamReady=$downstream" +
             " adapterListener=$adapterListener" +
+            " selectedNext=$selectedNextPlayer" +
             " background=$requestedBackgroundPlayback")
         FeatureTrace.event("background", "series_native_callback", "observed",
             "stage=" + stage + ",nativeOwner=" + sameEngine +
                 ",listeners=" + (count ?: -1) +
                 ",adapters=" + (adapters ?: -1) +
                 ",adapterListener=" + adapterListener +
+                ",selectedNext=" + selectedNextPlayer +
                 ",background=" + requestedBackgroundPlayback,
             flow = mediaFlow, minIntervalMs = 100L)
     }
@@ -837,11 +841,15 @@ internal object SystemMediaBridge {
             completionAgeMs = SystemClock.uptimeMillis() - nativeEofAt,
             alreadyAttempted = pending.attempted
         )
+        val recoveryRejection =
+            SeriesNextPlayerRecoveryPolicy.rejectionReason(evidence)
         if (pending.generation != nativeEofGeneration ||
-            !SeriesNextPlayerRecoveryPolicy.shouldResume(evidence)) {
+            recoveryRejection != null) {
             pendingNativeNextStart = null
             FeatureTrace.event("background", "series_next_start_recovery", "skipped",
-                "reason=guard,generation=" +
+                "reason=" + (if (pending.generation != nativeEofGeneration)
+                    "stale_generation" else recoveryRejection) +
+                ",generation=" +
                     (pending.generation == nativeEofGeneration) +
                     ",selection=" + current + ",pager=" + pagerIndex +
                     ",target=" + pending.targetIndex +
