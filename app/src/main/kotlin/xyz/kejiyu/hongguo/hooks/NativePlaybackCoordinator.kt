@@ -163,6 +163,23 @@ internal class NativePlaybackCoordinator {
 
     /** Only the already accepted host selection can have a one-shot
      * continuation. Never permit a second transition after new play(). */
+    /**
+     * Durable identity-based EOF evidence for a native handoff.
+     *
+     * BackgroundEpisodeMonitor is a timeline stall detector whose onSample()
+     * deliberately clears its transient sawCompletion flag when duration
+     * metadata becomes invalid. That must NEVER erase the actual
+     * x05.w.onCompletion(engine) event needed by an already selected holder.
+     * The completed owner remains valid only until a different play/route
+     * takes over or the coordinator resets.
+     */
+    @Synchronized
+    fun hasPendingNativeCompletion(engine: Any?): Boolean =
+        engine != null && activeEngine.get() === engine &&
+            finishedEngine.get() === engine &&
+            (phase == Phase.COMPLETED || phase == Phase.SELECTED ||
+                phase == Phase.BOUND)
+
     @Synchronized
     fun canContinueAcceptedSelection(
         adapter: Any?, targetIndex: Int, completedEngine: Any?
