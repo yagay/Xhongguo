@@ -122,8 +122,8 @@ internal class NativePlaybackCoordinator {
     fun onNativePause(engine: Any, userInitiated: Boolean) {
         if (activeEngine.get() !== engine) return
         if (userInitiated) {
+            if (!explicitlyPaused) pauseEpoch++
             explicitlyPaused = true
-            pauseEpoch++
             pendingIndex = null
             boundNextHolder.clear()
             boundNextEngine.clear()
