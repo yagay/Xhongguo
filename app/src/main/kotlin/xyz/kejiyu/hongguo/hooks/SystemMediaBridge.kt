@@ -362,6 +362,9 @@ internal object SystemMediaBridge {
     fun onSeriesNativeCallback(stage: String, player: Any?, listener: Any? = null) {
         if (!enabled) return
         val engine = seriesPlayerEngine(player)
+        // One coordinator receives every real x05.w engine bind.
+        if (stage == "engine_bound" && player != null && engine != null)
+            nativePlayback.onNativeHolderBound(player, engine)
         val sameEngine = engine != null && engine === videoEngine.get()
         val count: Int?
         val adapters: Int?
@@ -1104,6 +1107,17 @@ internal object SystemMediaBridge {
                 "ShortSeriesActivity") return
         val target = adapter ?: return
         rememberSeriesAdapter(target)
+        if (phase == "after" && method == "a.s4" && selected != null) {
+            val native = NativeSeriesPort.selection(target)
+            nativePlayback.onNativeSelection(target, selected,
+                accepted = result == true && native?.index == selected &&
+                    native.pagerAligned)
+            FeatureTrace.event("playback", "native_episode_selected",
+                if (result == true && native?.index == selected) "accepted"
+                else "degraded",
+                "index=$selected,phase=" + nativePlayback.snapshot().phase,
+                flow=mediaFlow, minIntervalMs=100L)
+        }
         val selectedIndex = (inheritedFieldValue(target, "D") as? Number)
             ?.toInt() ?: -1
         val pager = inheritedFieldValue(target, "k")
@@ -1480,6 +1494,10 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null || videoEngine.get() !== candidate ||
             episodeMonitor.hasNativeCompletion()) return
         episodeMonitor.onNativeCompletion()
+        nativePlayback.onNativeCompletion(candidate)
+        FeatureTrace.event("playback", "native_episode_completed",
+            "observed", "generation=" + nativePlayback.snapshot().generation,
+            flow=mediaFlow)
         nativeEofEngine = WeakReference(candidate)
         nativeEofAt = SystemClock.uptimeMillis()
         nativeEofPauseEpoch = explicitPauseEpoch
@@ -2056,6 +2074,11 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null) return
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
         if (action == "play") {
+            nativePlayback.onNativePlay(candidate)
+            FeatureTrace.event("playback", "native_playback_state",
+                "playing", "generation=" + nativePlayback.snapshot().generation +
+                    ",episode=" + (nativePlayback.snapshot().playingIndex ?: -1),
+                flow=mediaFlow, minIntervalMs=100L)
             pendingNativeNextStart?.takeIf {
                 it.generation == nativeEofGeneration &&
                     it.activity.get() === foregroundActivity.get() &&
@@ -2103,6 +2126,9 @@ internal object SystemMediaBridge {
             LogUtil.info("系统媒体: 忽略非当前 TTVideoEngine." + action)
             return
         }
+        if (action == "pause" || action == "stop")
+            nativePlayback.onNativePause(candidate,
+                userInitiated = userCommandInProgress)
         val playbackState = try {
             candidate.javaClass.getMethod("getPlaybackState").invoke(candidate)
         } catch (_: Throwable) { null }
@@ -3021,6 +3047,7 @@ internal object SystemMediaBridge {
         if (!play && reason.startsWith("system") ||
             !play && reason == "notification-action") {
             explicitPauseEpoch++
+            nativePlayback.onExplicitPause()
             pendingExit = null
             backgroundTransition.cancel()
             backgroundPauseGuardEngine.clear()
@@ -3177,6 +3204,7 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
+        nativePlayback.reset()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }
