@@ -1,6 +1,8 @@
 package xyz.kejiyu.hongguo.hooks
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -55,6 +57,23 @@ class SeriesNextPlayerRecoveryPolicyTest {
         val policy = SeriesNextPlayerRecoveryPolicy
         assertFalse(policy.shouldResume(valid().copy(alreadyAttempted = true)))
         assertFalse(policy.shouldResume(valid().copy(completionAgeMs = 1400L)))
-        assertFalse(policy.shouldResume(valid().copy(completionAgeMs = 9100L)))
+        assertTrue(policy.shouldResume(valid().copy(completionAgeMs = 9100L)))
+        assertTrue(policy.shouldResume(valid().copy(completionAgeMs = 14000L)))
+        assertFalse(policy.shouldResume(valid().copy(completionAgeMs = 15001L)))
+    }
+
+    @Test fun reportsSpecificReasonForSafeRejection() {
+        val policy = SeriesNextPlayerRecoveryPolicy
+        assertNull(policy.rejectionReason(valid()))
+        assertEquals("selection_not_committed",
+            policy.rejectionReason(valid().copy(selectionIndex = 0)))
+        assertEquals("pager_not_aligned",
+            policy.rejectionReason(valid().copy(pagerIndex = 2)))
+        assertEquals("next_holder_listener_missing",
+            policy.rejectionReason(valid().copy(listenerAttached = false)))
+        assertEquals("explicit_pause_or_owner_transition",
+            policy.rejectionReason(valid().copy(explicitPauseUnchanged = false)))
+        assertEquals("new_engine_already_started",
+            policy.rejectionReason(valid().copy(noNewEnginePlay = false)))
     }
 }
