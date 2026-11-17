@@ -60,15 +60,15 @@ internal object NativeFeedCompletion {
     }
 
     fun decision(owner: Any?, action: String) {
-        val active = scope.get()
+        val active = scope.get() ?: return
         // The same adapter invokes e.p5, a.M0 and f.r5 on this call chain.
         // No state is adopted from a preloaded or unrelated adapter.
-        if (active?.owner !== owner) return
+        if (active.owner !== owner) return
         active.decision = action
         FeatureTrace.event("feed_native", "original_decision", "observed",
             "route=" + active.route + ",action=$action" +
                 ",background=" + isBackground() +
-                ",businessIndex=" + (readIndex(owner!!) ?: -1))
+                ",businessIndex=" + (owner?.let(::readIndex) ?: -1))
     }
 
     fun staticNextEpisode() {
