@@ -363,8 +363,17 @@ internal object SystemMediaBridge {
         if (!enabled) return
         val engine = seriesPlayerEngine(player)
         // One coordinator receives every real x05.w engine bind.
-        if (stage == "engine_bound" && player != null && engine != null)
+        if (stage == "engine_bound" && player != null && engine != null) {
+            val before = nativePlayback.snapshot().playingIndex
             nativePlayback.onNativeHolderBound(player, engine)
+            val after = nativePlayback.snapshot().playingIndex
+            if (after != null && after != before) {
+                FeatureTrace.event("playback", "native_episode_verified",
+                    "playing", "index=$after,source=holder_bound_after_play",
+                    flow=mediaFlow)
+                handler.post { mediaRefresh.onNativeDataChanged() }
+            }
+        }
         val sameEngine = engine != null && engine === videoEngine.get()
         val count: Int?
         val adapters: Int?
@@ -936,6 +945,9 @@ internal object SystemMediaBridge {
             val pending = pendingNativeNextStart
             if (pending?.generation == handoff.eofGeneration &&
                 pending.targetIndex == handoff.targetIndex) return@post
+            seriesPlayerEngine(player)?.let { bound ->
+                nativePlayback.onNativeHolderBound(player, bound)
+            }
             FeatureTrace.event("background", "series_next_player",
                 "observed", "stage=selected_holder_registered,index=" +
                     handoff.targetIndex, flow=mediaFlow)
