@@ -96,7 +96,7 @@ internal object SinglePlaybackOwner {
             // Permit only the exact native holder verified at s4(); all
             // other stale-page engines stay blocked.
             if (route == Route.SERIES &&
-                SystemMediaBridge.isVerifiedNextSeriesEngine(engine)) {
+                NativeSeriesV3.isSeriesEngine(engine)) {
                 LogUtil.info("单播放器: 放行官方已选中下一集的新引擎" +
                     " from=$recorded")
                 FeatureTrace.event("playback", "next_series_owner",
