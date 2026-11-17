@@ -98,24 +98,22 @@ internal object NativeHeadlessPreflight {
         val currentIndex = intField(current, "indexInList")
         val nextIndex = intField(candidate, "indexInList")
 
-        val seriesMatch = currentSeries != null &&
-            currentSeries == targetSeries
-        val differentVideo = currentVid != null && targetVid != null &&
-            currentVid != targetVid
-        val adjacent = currentIndex != null && nextIndex != null &&
-            nextIndex == currentIndex + 1
+        val sourceIdentity = NativeNextEpisodePolicy.check(
+            currentSeries, currentVid, currentIndex,
+            targetSeries, targetVid, nextIndex)
 
         // Even a matching preflight is NOT permission to call c0(): the
         // existing J2 cleanup and source lifecycle must first be separated.
-        val nextSourceProven = seriesMatch && differentVideo && adjacent
+        val nextSourceProven =
+            sourceIdentity == NativeNextEpisodePolicy.Result.VERIFIED_NEXT
         FeatureTrace.event("headless", "native_source_preflight",
             if (nextSourceProven) "observed" else "degraded",
             "background=" + background() +
                 ",owner=true,holder=" + (currentHolder != null) +
                 ",currentVideo=" + (current != null) +
                 ",insertSource=" + (candidate != null) +
-                ",sameSeries=$seriesMatch,differentVideo=$differentVideo" +
-                ",nextIndex=$adjacent,verified=$nextSourceProven" +
+                ",identity=" + sourceIdentity.name +
+                ",verified=$nextSourceProven" +
                 ",isAutoEnter=" + (inheritedField(args, "isAutoEnter") == true) +
                 ",listenMode=" + (inheritedField(args, "isListenMode") == true) +
                 ",shareWhenExit=" +
