@@ -7600,6 +7600,7 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onResume")).setId("or").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
+                try { ForegroundLaunchTrace.onResume(a) } catch (_: Throwable) {}
                 gCurrentActivity = a
                 if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn)) {
                     try { SinglePlaybackOwner.onActivityResuming(a) }
@@ -7667,6 +7668,7 @@ object Hooks {
             LogUtil.info("  ✓ onResume")
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
+                try { ForegroundLaunchTrace.onPause(a) } catch (_: Throwable) {}
                 // Probe before native onPause can detach the video engine.
                 try { SystemMediaBridge.onActivityPaused(a) } catch (e: Throwable) {
                     LogUtil.warn("系统媒体: Activity.onPause 诊断失败: " + e.message)
@@ -7733,9 +7735,47 @@ object Hooks {
             } catch (e: Throwable) {
                 LogUtil.warn("应用内小窗生命周期清理 Hook 未命中: " + e.message)
             }
+            // Observe launches and task promotions without changing host behaviour.
+            try {
+                val contextImpl = Class.forName("android.app.ContextImpl", false, classLoader)
+                ham(contextImpl, "startActivity", "foregroundContextStart") { chain ->
+                    try {
+                        ForegroundLaunchTrace.contextStart(chain.getArg(0) as? Intent, "context")
+                    } catch (_: Throwable) {}
+                    chain.proceed()
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("前台诊断 ContextImpl 安装失败: " + e.javaClass.simpleName)
+            }
+            try {
+                val am = Class.forName("android.app.ActivityManager", false, classLoader)
+                ham(am, "moveTaskToFront", "foregroundMoveTask") { chain ->
+                    try {
+                        ForegroundLaunchTrace.moveTask(
+                            chain.getArg(0) as? Int, chain.getArg(1) as? Int)
+                    } catch (_: Throwable) {}
+                    chain.proceed()
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("前台诊断 moveTaskToFront 安装失败: " +
+                    e.javaClass.simpleName)
+            }
+            try {
+                ham(c, "onNewIntent", "foregroundNewIntent") { chain ->
+                    try {
+                        ForegroundLaunchTrace.onNewIntent(chain.thisObject as? Activity)
+                    } catch (_: Throwable) {}
+                    chain.proceed()
+                }
+            } catch (_: Throwable) {}
             // Reject only the dedicated shopping-mall Activity intent.
             // Shopping-related short-drama classes are deliberately not blocked.
             ham(c, "startActivity", "shoppingStartActivity") { chain ->
+                try {
+                    ForegroundLaunchTrace.activityStart(
+                        chain.thisObject as? Activity, chain.getArg(0) as? Intent,
+                        "startActivity")
+                } catch (_: Throwable) {}
                 try {
                     beforeNativeDramaDetailsLaunch(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent)
@@ -7750,6 +7790,11 @@ object Hooks {
                 } else chain.proceed()
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
+                try {
+                    ForegroundLaunchTrace.activityStart(
+                        chain.thisObject as? Activity, chain.getArg(0) as? Intent,
+                        "startActivityForResult")
+                } catch (_: Throwable) {}
                 try {
                     beforeNativeDramaDetailsLaunch(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent)
