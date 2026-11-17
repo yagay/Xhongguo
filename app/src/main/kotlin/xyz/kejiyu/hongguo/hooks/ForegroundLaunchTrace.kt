@@ -3,7 +3,6 @@ package xyz.kejiyu.hongguo.hooks
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Intent
-import android.os.Process
 import android.os.SystemClock
 import xyz.kejiyu.hongguo.FeatureTrace
 
@@ -20,7 +19,6 @@ internal object ForegroundLaunchTrace {
     private const val SERIES = "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
     private const val HOST_PREFIX = "com.dragon.read."
     private var lastPauseMs = 0L
-    private var lastResumeMs = 0L
 
     private fun importance(): Int = try {
         val state = ActivityManager.RunningAppProcessInfo()
@@ -68,7 +66,7 @@ internal object ForegroundLaunchTrace {
         // Distinguish context-based NEW_TASK launches from Activity navigation.
         FeatureTrace.event("foreground", "context_launch", "observed",
             "api=$entry,target=" + intentType(intent) +
-            ",newTask=" + (intent?.flags?.and(Intent.FLAG_ACTIVITY_NEW_TASK) != 0) +
+            ",newTask=" + ((intent?.flags ?: 0).and(Intent.FLAG_ACTIVITY_NEW_TASK) != 0) +
             ",importance=" + importance() +
             ",caller=" + recentStack())
     }
@@ -109,10 +107,19 @@ internal object ForegroundLaunchTrace {
             ",focused=" + (activity?.hasWindowFocus() == true))
     }
 
+    fun onWindowFocus(activity: Activity?, focused: Boolean) {
+        if (!focused) return
+        // Focus is stronger evidence of an actual foreground takeover than
+        // onResume() alone, which can run before a window becomes visible.
+        FeatureTrace.event("foreground", "window_focus", "observed",
+            "page=" + pageType(activity) +
+            ",importance=" + importance() +
+            ",task=" + (activity?.taskId ?: -1))
+    }
+
     fun onResume(activity: Activity?) {
         val now = SystemClock.elapsedRealtime()
         val pauseAge = if (lastPauseMs > 0L) now - lastPauseMs else -1L
-        lastResumeMs = now
         if (activity != null) lastTaskId = activity.taskId
         FeatureTrace.event("foreground", "activity_resume", "observed",
             "page=" + pageType(activity) +
