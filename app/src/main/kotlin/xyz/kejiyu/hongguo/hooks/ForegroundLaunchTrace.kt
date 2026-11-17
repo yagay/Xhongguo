@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.content.Intent
 import android.os.SystemClock
+import android.os.Bundle
 import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
@@ -66,7 +67,7 @@ internal object ForegroundLaunchTrace {
      * This is NOT the user's foreground tap nor the series ViewPager's
      * ordinary next episode. Never block an unknown caller or new task.
      */
-    fun shouldSuppressBackgroundFeedEofLaunch(
+    fun shouldKeepBackgroundFeedEofLaunchBehind(
         source: Activity?, intent: Intent?
     ): Boolean {
         if (source?.javaClass?.name !=
@@ -87,12 +88,24 @@ internal object ForegroundLaunchTrace {
             }
         } catch (_: Throwable) { false }
         if (!officialEofLaunch) return false
-        // One EOF can cause only one suppression. No global Activity block.
+        // Do not consume here: the framework's 2-argument overload
+        // forwards to the 3-argument overload with an ActivityOptions bundle.
+        return true
+    }
+
+    /**
+     * Preserve the HOST's original startActivityForResult (and its native
+     * episode setup), but ask ActivityTaskManager not to foreground the task.
+     * This is AOSP ActivityOptions.KEY_AVOID_MOVE_TO_FRONT and is applied
+     * only to the 3-argument Activity.startActivityForResult overload.
+     */
+    fun behindTaskOptions(original: Bundle?): Bundle {
+        val options = if (original == null) Bundle() else Bundle(original)
+        options.putBoolean("android.activity.avoidMoveToFront", true)
         lastFeedEofMs = 0L
         FeatureTrace.event("foreground", "background_eof_series_launch",
-            "blocked", "origin=official_feed_eof,background=true," +
-                "pauseAgeMs=$elapsedSincePause,eofAgeMs=$elapsedSinceEof")
-        return true
+            "requested", "route=host_start_with_avoidMoveToFront")
+        return options
     }
 
     fun activityStart(source: Activity?, intent: Intent?, entry: String) {
