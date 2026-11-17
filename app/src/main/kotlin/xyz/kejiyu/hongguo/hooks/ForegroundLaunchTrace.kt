@@ -3,12 +3,10 @@ package xyz.kejiyu.hongguo.hooks
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Intent
-import android.os.SystemClock
-import android.os.Bundle
 import xyz.kejiyu.hongguo.FeatureTrace
 
 /**
- * Investigation and narrowly scoped prevention of host task foregrounding.
+ * Read-only investigation of unexpected host task foregrounding.
  *
  * Observes host-side requests. Only a confirmed feed EOF, followed by an
  * official background ShortSeriesImpl launch, is blocked. All other launch
@@ -20,7 +18,6 @@ internal object ForegroundLaunchTrace {
     private const val SERIES = "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
     private const val HOST_PREFIX = "com.dragon.read."
     @Volatile private var lastPauseMs = 0L
-    @Volatile private var lastFeedEofMs = 0L
 
     private fun importance(): Int = try {
         val state = ActivityManager.RunningAppProcessInfo()
@@ -52,60 +49,6 @@ internal object ForegroundLaunchTrace {
             clazz.startsWith(HOST_PREFIX) -> "host_other"
             else -> "external"
         }
-    }
-
-    /** Native completion is evidence, not a request to navigate. */
-    fun onNativeCompletion() {
-        if (importance() >= ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE)
-            lastFeedEofMs = SystemClock.elapsedRealtime()
-    }
-
-    /**
-     * 21:38:46 diagnostic: native EOF while MainFragmentActivity is stopped,
-     * followed 55 ms later by ShortSeriesImpl.openShortSeriesActivityForResult.
-     *
-     * This is NOT the user's foreground tap nor the series ViewPager's
-     * ordinary next episode. Never block an unknown caller or new task.
-     */
-    fun shouldKeepBackgroundFeedEofLaunchBehind(
-        source: Activity?, intent: Intent?
-    ): Boolean {
-        if (source?.javaClass?.name !=
-            "com.dragon.read.pages.main.MainFragmentActivity" ||
-            intentType(intent) != "series") return false
-        val now = SystemClock.elapsedRealtime()
-        val elapsedSincePause = now - lastPauseMs
-        val elapsedSinceEof = now - lastFeedEofMs
-        if (lastPauseMs <= 0 || lastFeedEofMs <= 0 ||
-            elapsedSincePause < 1000L ||
-            elapsedSinceEof !in 0L..2500L ||
-            importance() < ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE ||
-            source.hasWindowFocus()) return false
-        val officialEofLaunch = try {
-            Throwable().stackTrace.any {
-                it.className.contains("ShortSeriesImpl") &&
-                    it.methodName == "openShortSeriesActivityForResult"
-            }
-        } catch (_: Throwable) { false }
-        if (!officialEofLaunch) return false
-        // Do not consume here: the framework's 2-argument overload
-        // forwards to the 3-argument overload with an ActivityOptions bundle.
-        return true
-    }
-
-    /**
-     * Preserve the HOST's original startActivityForResult (and its native
-     * episode setup), but ask ActivityTaskManager not to foreground the task.
-     * This is AOSP ActivityOptions.KEY_AVOID_MOVE_TO_FRONT and is applied
-     * only to the 3-argument Activity.startActivityForResult overload.
-     */
-    fun behindTaskOptions(original: Bundle?): Bundle {
-        val options = if (original == null) Bundle() else Bundle(original)
-        options.putBoolean("android.activity.avoidMoveToFront", true)
-        lastFeedEofMs = 0L
-        FeatureTrace.event("foreground", "background_eof_series_launch",
-            "requested", "route=host_start_with_avoidMoveToFront")
-        return options
     }
 
     fun activityStart(source: Activity?, intent: Intent?, entry: String) {
@@ -155,7 +98,7 @@ internal object ForegroundLaunchTrace {
     }
 
     fun onPause(activity: Activity?) {
-        lastPauseMs = SystemClock.elapsedRealtime()
+        lastPauseMs = android.os.SystemClock.elapsedRealtime()
         if (activity != null) lastTaskId = activity.taskId
         FeatureTrace.event("foreground", "activity_pause", "observed",
             "page=" + pageType(activity) +
@@ -174,7 +117,7 @@ internal object ForegroundLaunchTrace {
     }
 
     fun onResume(activity: Activity?) {
-        val now = SystemClock.elapsedRealtime()
+        val now = android.os.SystemClock.elapsedRealtime()
         val pauseAge = if (lastPauseMs > 0L) now - lastPauseMs else -1L
         if (activity != null) lastTaskId = activity.taskId
         FeatureTrace.event("foreground", "activity_resume", "observed",
