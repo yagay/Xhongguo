@@ -272,19 +272,33 @@ internal object NativeSeriesV3 {
      * ViewPager2 to target BEFORE it calls s4(target). Permit both orders,
      * without moving the pager ourselves. */
     fun beginVisibilityScope(a: Any?, target: Int?): Boolean {
-        if (a == null || target == null || !SystemMediaBridge.isOfficialSeriesBackground())
+        if (a == null || target == null) return false
+        val background = SystemMediaBridge.isOfficialSeriesBackground()
+        // A V3 EOF can arrive while the legacy media exit flag is still
+        // false; trace *why* the host selection scope is declined.
+        val before = state.snapshot()
+        if (!background) {
+            if (before.phase == NativeSeriesV3State.Phase.COMPLETED)
+                trace("scope", "observed",
+                    "reason=not_background,target=$target,phase=" + before.phase)
             return false
+        }
         onAdapter(a)
         val current = d(a) ?: return false
         val p = page(a) ?: return false
         val g = state.snapshot().generation
         // A visibility exception belongs only to a verified native EOF.
         // Manual media keys never obtain a second route through s4().
-        val eofAllowed = state.mayScopeNext(a, target, current, p, count(a),
-            background = true,
-            explicitlyPaused =
-                SystemMediaBridge.isExplicitMediaCommandInProgress())
-        if (!eofAllowed) return false
+        val paused = SystemMediaBridge.isExplicitMediaCommandInProgress()
+        val total = count(a)
+        val eofAllowed = state.mayScopeNext(a, target, current, p, total,
+            background = true, explicitlyPaused = paused)
+        if (!eofAllowed) {
+            trace("scope", "observed",
+                "reason=state_gate,target=$target,D=$current,pager=$p," +
+                    "count=$total,paused=$paused,phase=" + state.snapshot().phase)
+            return false
+        }
         val controller = inheritedField(a, "m") ?: return false
         val origin = NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
         scopedPage.set(PageScope(controller, a, g, target, current, p,
