@@ -184,10 +184,6 @@ internal object NativeSeriesV3 {
         releaseLease(null, "completed")
         acceptedEofGate = null
         val g = state.complete(finished)
-        // Feed EOF must not reopen ShortSeriesActivity over another app.
-        // This only records a potential trigger; the exact official launch
-        // is checked at Activity.startActivityForResult.
-        ForegroundLaunchTrace.onNativeCompletion()
         candidateHolder.clear()
         resumeAttemptGeneration = -1L
         trace("eof", "observed", "generation=$g,background=" +
