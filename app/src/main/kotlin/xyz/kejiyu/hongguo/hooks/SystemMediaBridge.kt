@@ -60,6 +60,7 @@ internal object SystemMediaBridge {
     // x05.w is the official full-series business player. Its completion
     // can be received without the background ViewPager2 advancing.
     private var nativeSeriesPlayer = WeakReference<Any>(null)
+    private val nativePlayback = NativePlaybackCoordinator()
     private var nativeSeriesAdapter = WeakReference<Any>(null)
     private var nativeSeriesAdapterActivity = WeakReference<Activity>(null)
     // A business-layer pause cannot be treated as "fully preserved"
@@ -631,9 +632,7 @@ internal object SystemMediaBridge {
     private data class SeriesNavigation(
         val adapter: Any,
         val activity: Activity,
-        val pager: Any,
-        val index: Int,
-        val count: Int
+        val selection: NativeSeriesPort.Selection
     )
 
     private fun seriesNavigation(): SeriesNavigation? {
@@ -644,26 +643,9 @@ internal object SystemMediaBridge {
             activity.isFinishing ||
             nativeSeriesAdapterActivity.get() !== activity) return null
         val adapter = nativeSeriesAdapter.get() ?: return null
-        val index = (inheritedFieldValue(adapter, "D") as? Number)
-            ?.toInt() ?: return null
-        val pager = inheritedFieldValue(adapter, "k") ?: return null
-        val page = try {
-            (pager.javaClass.getMethod("getCurrentItem").invoke(pager)
-                as? Number)?.toInt()
-        } catch (_: Throwable) { null }
-        if (page != index) return null
-        val loaded = (inheritedFieldValue(adapter, "h") as? List<*>)
-            ?.size ?: return null
-        val pageCount = try {
-            val adapterObject = pager.javaClass.getMethod("getAdapter")
-                .invoke(pager)
-            (adapterObject?.javaClass?.getMethod("getItemCount")
-                ?.invoke(adapterObject) as? Number)?.toInt()
-        } catch (_: Throwable) { null }
-        val count = if (pageCount != null) minOf(loaded, pageCount)
-            else loaded
-        if (count !in 2..5000 || index !in 0 until count) return null
-        return SeriesNavigation(adapter, activity, pager, index, count)
+        val selection = NativeSeriesPort.selection(adapter) ?: return null
+        if (!selection.pagerAligned) return null
+        return SeriesNavigation(adapter, activity, selection)
     }
 
     private fun hasSeriesEpisodeNavigation(): Boolean {
@@ -675,91 +657,56 @@ internal object SystemMediaBridge {
             nativeSeriesAdapter.get() != null
     }
 
-    /** D is a local position unless the native list covers the COMPLETE
-     * series. Publish D+1 only for a selected full playlist and active engine. */
+    /** An episode is confirmed only by a bound native holder's play(). */
     fun verifiedNativeEpisodeNumber(
         activity: Activity?, engine: Any?, total: Long?
     ): Long? {
         if (activity == null || engine == null || total == null ||
-            total !in 1L..5000L || episodeMonitor.hasNativeCompletion() ||
-            videoEngine.get() !== engine ||
-            seriesPlayerEngine(nativeSeriesPlayer.get()) !== engine)
-            return null
+            total !in 1L..5000L) return null
         val nav = seriesNavigation() ?: return null
-        if (nav.activity !== activity || nav.count.toLong() != total)
-            return null
-        return nav.index.toLong() + 1L
+        if (nav.activity !== activity ||
+            nav.selection.loadedCount.toLong() != total) return null
+        val confirmed = nativePlayback.verifiedPlayingIndex(engine, nav.adapter)
+        return confirmed?.takeIf { it == nav.selection.index }
+            ?.toLong()?.plus(1L)
     }
 
+    /** Only a real native holder/engine whose current index was confirmed
+     * by play() can supply a current SaasVideoData to media metadata. */
+    fun verifiedSelectedNativeModel(activity: Activity?, engine: Any?): Any? {
+        if (activity == null || engine == null) return null
+        val nav = seriesNavigation() ?: return null
+        if (nav.activity !== activity) return null
+        if (nativePlayback.verifiedPlayingIndex(engine, nav.adapter) !=
+            nav.selection.index) return null
+        return NativeSeriesPort.selectedModel(nav.adapter)
+    }
+
+    /** MediaSession and notifications use ONE official adapter command.
+     * Never write ViewPager2 or call r4 in a delayed repair callback. */
     private fun requestEpisodeSkip(delta: Int, reason: String) {
-        if (delta != -1 && delta != 1) return
         val nav = seriesNavigation()
-        if (nav == null || userCommandInProgress) {
+        if (nav == null || userCommandInProgress ||
+            !nativePlayback.canDispatchEpisodeCommand()) {
             FeatureTrace.event("media", "episode_skip", "degraded",
-                "reason=native_adapter_unavailable,source=$reason", flow=mediaFlow)
+                "reason=unavailable_or_transitioning,source=$reason", flow=mediaFlow)
             return
         }
-        val target = nav.index + delta
-        if (target !in 0 until nav.count) {
-            FeatureTrace.event("media", "episode_skip", "degraded",
-                "reason=episode_boundary,index=" + nav.index, flow=mediaFlow)
-            return
-        }
-        try {
-            // A user request goes through the host's own ViewPager2, never a
-            // synthetic URL, guessed episode or detached TTVideoEngine.
-            nav.pager.javaClass.getMethod("setCurrentItem",
-                Int::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType).invoke(nav.pager, target, false)
-            FeatureTrace.event("media", "episode_skip", "requested",
-                "source=$reason,from=" + nav.index + ",to=$target",
-                flow=mediaFlow)
-            LogUtil.info("系统媒体: 原生选集已请求 from=" +
-                nav.index + " to=$target source=$reason")
-            handler.postDelayed({
-                if (nativeSeriesAdapter.get() !== nav.adapter ||
-                    foregroundActivity.get() !== nav.activity) return@postDelayed
-                var selected = (inheritedFieldValue(nav.adapter, "D")
-                    as? Number)?.toInt()
-                val pagerAt = try {
-                    (nav.pager.javaClass.getMethod("getCurrentItem")
-                        .invoke(nav.pager) as? Number)?.toInt()
-                } catch (_: Throwable) { null }
-                // Only for an explicit user skip: if the ViewPager has
-                // selected the target but the host business index lagged,
-                // reconcile that SAME page through the official r4 once.
-                // Never advance by another page or loop at EOF.
-                if (selected != target && pagerAt == target) {
-                    try {
-                        val r4 = nav.adapter.javaClass.methods.firstOrNull {
-                            it.name == "r4" && it.parameterCount == 1 &&
-                                it.parameterTypes[0] == Int::class.javaPrimitiveType
-                        }
-                        val accepted = r4?.invoke(nav.adapter, target)
-                        selected = (inheritedFieldValue(nav.adapter, "D")
-                            as? Number)?.toInt()
-                        FeatureTrace.event("media", "episode_skip_reconcile",
-                            if (selected == target) "ok" else "degraded",
-                            "target=$target,accepted=$accepted", flow=mediaFlow)
-                    } catch (e: Throwable) {
-                        FeatureTrace.event("media", "episode_skip_reconcile",
-                            "fail", "type=" + e.javaClass.simpleName,
-                            flow=mediaFlow)
-                    }
-                }
-                FeatureTrace.event("media", "episode_skip",
-                    if (selected == target) "selected" else "degraded",
-                    "source=$reason,target=$target,selected=" +
-                        (selected ?: -1), flow=mediaFlow)
-                mediaRefresh.onNativeDataChanged()
-                updateSessionState(knownPlaying)
-                if (reportedCard) updateMediaNotification(knownPlaying)
-            }, 450L)
-        } catch (e: Throwable) {
-            LogUtil.warn("系统媒体: 原生选集跳转失败 " +
-                e.javaClass.simpleName)
-            FeatureTrace.event("media", "episode_skip", "fail",
-                "type=" + e.javaClass.simpleName, flow=mediaFlow)
+        val result = NativeSeriesPort.skip(nav.adapter, delta)
+        FeatureTrace.event("media", "episode_skip",
+            when {
+                result.accepted -> "selected"
+                result.invoked -> "pending"
+                else -> "degraded"
+            },
+            "source=$reason,target=" + (result.target ?: -1) +
+                ",reason=" + result.reason, flow=mediaFlow)
+        LogUtil.info("系统媒体: 原生业务选集 source=$reason " +
+            "result=" + result.reason + " target=" + result.target)
+        if (result.invoked) {
+            mediaRefresh.onNativeDataChanged()
+            updateSessionState(knownPlaying)
+            if (reportedCard) updateMediaNotification(knownPlaying)
         }
     }
 
