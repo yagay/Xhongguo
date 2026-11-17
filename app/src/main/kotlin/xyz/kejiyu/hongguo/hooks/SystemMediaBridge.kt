@@ -545,6 +545,132 @@ internal object SystemMediaBridge {
         }
     }
 
+    /** The official adapter can be learned before the first episode EOF,
+     * from the fragment's nh() getter and the native selection callbacks. */
+    private fun rememberSeriesAdapter(candidate: Any?) {
+        if (!enabled || !isSeriesAdapter(candidate)) return
+        val activity = foregroundActivity.get() ?: return
+        if (activity.javaClass.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            activity.isFinishing) return
+        nativeSeriesAdapter = WeakReference(candidate)
+        nativeSeriesAdapterActivity = WeakReference(activity)
+    }
+
+    fun onSeriesFragmentAdapter(fragment: Any?, adapter: Any?) {
+        if (!enabled || !isSeriesAdapter(adapter)) return
+        val host = try {
+            fragment?.javaClass?.methods?.firstOrNull {
+                it.name == "getActivity" && it.parameterCount == 0
+            }?.invoke(fragment)
+        } catch (_: Throwable) { null }
+        if (host != null && host === foregroundActivity.get())
+            rememberSeriesAdapter(adapter)
+    }
+
+    private data class SeriesNavigation(
+        val adapter: Any,
+        val activity: Activity,
+        val pager: Any,
+        val index: Int,
+        val count: Int
+    )
+
+    private fun seriesNavigation(): SeriesNavigation? {
+        if (!enabled) return null
+        val activity = foregroundActivity.get() ?: return null
+        if (activity.javaClass.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            activity.isFinishing ||
+            nativeSeriesAdapterActivity.get() !== activity) return null
+        val adapter = nativeSeriesAdapter.get() ?: return null
+        val index = (inheritedFieldValue(adapter, "D") as? Number)
+            ?.toInt() ?: return null
+        val pager = inheritedFieldValue(adapter, "k") ?: return null
+        val page = try {
+            (pager.javaClass.getMethod("getCurrentItem").invoke(pager)
+                as? Number)?.toInt()
+        } catch (_: Throwable) { null }
+        if (page != index) return null
+        val loaded = (inheritedFieldValue(adapter, "h") as? List<*>)
+            ?.size ?: return null
+        val pageCount = try {
+            val adapterObject = pager.javaClass.getMethod("getAdapter")
+                .invoke(pager)
+            (adapterObject?.javaClass?.getMethod("getItemCount")
+                ?.invoke(adapterObject) as? Number)?.toInt()
+        } catch (_: Throwable) { null }
+        val count = if (pageCount != null) minOf(loaded, pageCount)
+            else loaded
+        if (count !in 2..5000 || index !in 0 until count) return null
+        return SeriesNavigation(adapter, activity, pager, index, count)
+    }
+
+    private fun hasSeriesEpisodeNavigation(): Boolean =
+        seriesNavigation() != null
+
+    /** D is a local position unless the native list covers the COMPLETE
+     * series. Publish D+1 only for a selected full playlist and active engine. */
+    fun verifiedNativeEpisodeNumber(
+        activity: Activity?, engine: Any?, total: Long?
+    ): Long? {
+        if (activity == null || engine == null || total == null ||
+            total !in 1L..5000L || episodeMonitor.hasNativeCompletion() ||
+            videoEngine.get() !== engine ||
+            seriesPlayerEngine(nativeSeriesPlayer.get()) !== engine)
+            return null
+        val nav = seriesNavigation() ?: return null
+        if (nav.activity !== activity || nav.count.toLong() != total)
+            return null
+        return nav.index.toLong() + 1L
+    }
+
+    private fun requestEpisodeSkip(delta: Int, reason: String) {
+        if (delta != -1 && delta != 1) return
+        val nav = seriesNavigation()
+        if (nav == null || userCommandInProgress) {
+            FeatureTrace.event("media", "episode_skip", "degraded",
+                "reason=native_adapter_unavailable,source=$reason", flow=mediaFlow)
+            return
+        }
+        val target = nav.index + delta
+        if (target !in 0 until nav.count) {
+            FeatureTrace.event("media", "episode_skip", "degraded",
+                "reason=episode_boundary,index=" + nav.index, flow=mediaFlow)
+            return
+        }
+        try {
+            // A user request goes through the host's own ViewPager2, never a
+            // synthetic URL, guessed episode or detached TTVideoEngine.
+            nav.pager.javaClass.getMethod("setCurrentItem",
+                Int::class.javaPrimitiveType,
+                Boolean::class.javaPrimitiveType).invoke(nav.pager, target, false)
+            FeatureTrace.event("media", "episode_skip", "requested",
+                "source=$reason,from=" + nav.index + ",to=$target",
+                flow=mediaFlow)
+            LogUtil.info("系统媒体: 原生选集已请求 from=" +
+                nav.index + " to=$target source=$reason")
+            handler.postDelayed({
+                if (nativeSeriesAdapter.get() !== nav.adapter ||
+                    foregroundActivity.get() !== nav.activity) return@postDelayed
+                val selected = (inheritedFieldValue(nav.adapter, "D")
+                    as? Number)?.toInt()
+                FeatureTrace.event("media", "episode_skip",
+                    if (selected == target) "selected" else "degraded",
+                    "source=$reason,target=$target,selected=" +
+                        (selected ?: -1), flow=mediaFlow)
+                mediaRefresh.onNativeDataChanged()
+                updateSessionState(knownPlaying)
+                if (reportedCard) updateMediaNotification(knownPlaying)
+            }, 450L)
+        } catch (e: Throwable) {
+            LogUtil.warn("系统媒体: 原生选集跳转失败 " +
+                e.javaClass.simpleName)
+            FeatureTrace.event("media", "episode_skip", "fail",
+                "type=" + e.javaClass.simpleName, flow=mediaFlow)
+        }
+    }
+
     /** APK's live adapter is a subclass (adapter.f); D/k/U2 fields live
      * in superclass adapter.a, while the data h field lives in gp4.f.
      * getDeclaredField() on the runtime class alone always misses these.
