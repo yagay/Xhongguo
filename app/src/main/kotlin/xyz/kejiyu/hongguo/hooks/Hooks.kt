@@ -6460,6 +6460,8 @@ object Hooks {
                             NativeSeriesV3.onCompletion(
                                 chain.thisObject, chain.getArg(0))
                             SystemMediaBridge.onNativeCompletion(chain.getArg(0))
+                            SystemMediaBridge.onOfficialSeriesAwaitingNext(
+                                chain.getArg(0))
                         } catch (t: Throwable) {
                             LogUtil.warn("V3 EOF observer: " + t.javaClass.simpleName)
                         }
