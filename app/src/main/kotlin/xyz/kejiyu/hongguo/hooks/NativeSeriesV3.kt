@@ -56,7 +56,8 @@ internal object NativeSeriesV3 {
     )
     private data class AcceptedEofGate(
         val adapter: Any, val controller: Any,
-        val generation: Long, val index: Int, val at: Long
+        val generation: Long, val index: Int, val at: Long,
+        val origin: NativeSeriesSelectionRecoveryPolicy.Origin
     )
     private var acceptedEofGate: AcceptedEofGate? = null
 
@@ -71,6 +72,8 @@ internal object NativeSeriesV3 {
         val generation: Long, val startedMs: Long
     )
     @Volatile private var manualSkipRequest: ManualSkipRequest? = null
+    private var manualSelectedGeneration = -1L
+    private var manualSelectedIndex: Int? = null
     private val scopedPage = ThreadLocal<PageScope?>()
 
     private val currentG4 = ThreadLocal<Any?>()
@@ -195,6 +198,9 @@ internal object NativeSeriesV3 {
         }
         releaseLease(null, "completed")
         acceptedEofGate = null
+        manualSkipRequest = null
+        manualSelectedIndex = null
+        manualSelectedGeneration = -1L
         val g = state.complete(finished)
         candidateHolder.clear()
         resumeAttemptGeneration = -1L
@@ -265,9 +271,15 @@ internal object NativeSeriesV3 {
                 NativeSeriesV3State.Phase.STARTING))
         val age = if (selectionScope) 0L else if (grant != null)
             SystemClock.uptimeMillis() - grant.at else Long.MAX_VALUE
+        val manualSelection =
+            scope?.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP ||
+                (scope == null &&
+                    grant?.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)
         val relax = NativeG4GatePolicy.mayRelax(
             hostBlocked = native,
-            background = SystemMediaBridge.isOfficialSeriesBackground(),
+            background = if (manualSelection)
+                SystemMediaBridge.isOfficialSeriesManualSkipBackground()
+                else SystemMediaBridge.isOfficialSeriesBackground(),
             explicitCommand =
                 SystemMediaBridge.isExplicitMediaCommandInProgress(),
             controllerMatches = matchingController,
@@ -285,15 +297,19 @@ internal object NativeSeriesV3 {
      * ViewPager2 to target BEFORE it calls s4(target). Permit both orders,
      * without moving the pager ourselves. */
     fun beginVisibilityScope(a: Any?, target: Int?): Boolean {
-        if (a == null || target == null || !SystemMediaBridge.isOfficialSeriesBackground())
-            return false
+        if (a == null || target == null) return false
+        val autoBackground = SystemMediaBridge.isOfficialSeriesBackground()
+        val manualBackground =
+            SystemMediaBridge.isOfficialSeriesManualSkipBackground()
+        if (!autoBackground && !manualBackground) return false
         onAdapter(a)
         val current = d(a) ?: return false
         val p = page(a) ?: return false
         val g = state.snapshot().generation
         // A normal EOF is the original verified auto-next route.
         val paused = SystemMediaBridge.isExplicitMediaCommandInProgress()
-        val eofAllowed = state.mayScopeNext(a, target, current, p, count(a),
+        val eofAllowed = autoBackground && state.mayScopeNext(
+            a, target, current, p, count(a),
             background = true, explicitlyPaused = paused)
 
         // The independent manual route exists ONLY for a genuine user
@@ -303,7 +319,7 @@ internal object NativeSeriesV3 {
         val manualAllowed = !eofAllowed && manual != null &&
             NativeManualEpisodeSkipPolicy.mayScope(
                 sameAdapter = manual.adapter === a && adapter.get() === a,
-                background = true,
+                background = manualBackground,
                 nativeSelectionIdle = state.canManualSkip(),
                 explicitTransportPause = paused,
                 originalIndex = current,
@@ -337,7 +353,9 @@ internal object NativeSeriesV3 {
         val s = scopedPage.get() ?: return false
         val permitted = controller != null && controller === s.controller &&
             state.snapshot().generation == s.generation &&
-            SystemMediaBridge.isOfficialSeriesBackground()
+            (if (s.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)
+                SystemMediaBridge.isOfficialSeriesManualSkipBackground()
+            else SystemMediaBridge.isOfficialSeriesBackground())
         if (permitted) trace("visibility", "scoped",
             "target=" + s.target + ",beforePager=" + s.originalPage)
         return permitted
@@ -362,7 +380,15 @@ internal object NativeSeriesV3 {
                 NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)) {
             acceptedEofGate = AcceptedEofGate(a, scope.controller,
                 state.snapshot().generation, target,
-                SystemClock.uptimeMillis())
+                SystemClock.uptimeMillis(), scope.origin)
+            if (scope.origin ==
+                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP) {
+                // A user skip isn't an EOF, so its generation is unchanged.
+                // Reset the one-shot resume budget for this new target only.
+                resumeAttemptGeneration = -1L
+                manualSelectedGeneration = state.snapshot().generation
+                manualSelectedIndex = target
+            }
         }
         val holder = candidateHolder.get()
         if (holder != null && candidateAdapter.get() === a)
@@ -471,11 +497,20 @@ internal object NativeSeriesV3 {
         }
     }
 
+    private fun isPendingStartBackground(
+        selected: NativeSeriesV3State.Snapshot
+    ): Boolean =
+        SystemMediaBridge.isOfficialSeriesBackground() ||
+            (selected.generation == manualSelectedGeneration &&
+                selected.pendingIndex != null &&
+                selected.pendingIndex == manualSelectedIndex &&
+                SystemMediaBridge.isOfficialSeriesManualSkipBackground())
+
     private fun scheduleStart() {
         val s = state.snapshot()
         if (s.phase != NativeSeriesV3State.Phase.BOUND ||
             s.generation == resumeAttemptGeneration ||
-            !SystemMediaBridge.isOfficialSeriesBackground()) return
+            !isPendingStartBackground(s)) return
         resumeAttemptGeneration = s.generation
         handler.post {
             val current = state.snapshot()
@@ -484,7 +519,7 @@ internal object NativeSeriesV3 {
             if (current.generation != s.generation ||
                 current.phase != NativeSeriesV3State.Phase.BOUND ||
                 holder == null || e == null ||
-                !SystemMediaBridge.isOfficialSeriesBackground()) return@post
+                !isPendingStartBackground(current)) return@post
             val mode = enableNoSurface(holder, e)
             if (mode !in setOf("enabled", "already")) {
                 trace("resume", "degraded", "reason=$mode")
@@ -563,6 +598,8 @@ internal object NativeSeriesV3 {
         // listener from some unrelated preloaded item.
         val selectedHolder = state.pendingHolder()
         if (state.confirmProgress(e, pos, duration)) {
+            manualSelectedGeneration = -1L
+            manualSelectedIndex = null
             releaseLease(e, "progress")
             currentEngine = WeakReference(e)
             currentHolder = WeakReference(selectedHolder)
@@ -603,7 +640,7 @@ internal object NativeSeriesV3 {
         val entry = if (delta > 0) "g" else "A1"
         val hostCommand = method(a, entry, 0) ?: return "host_command_missing_$entry"
         val target = current + delta
-        val scoped = SystemMediaBridge.isOfficialSeriesBackground()
+        val scoped = SystemMediaBridge.isOfficialSeriesManualSkipBackground()
         // Arm before calling the real adapter: its pager callbacks may run
         // synchronously or on the next UI event. An invalid/stale request
         // cannot bypass the native visibility checks.
@@ -646,6 +683,8 @@ internal object NativeSeriesV3 {
     fun onExplicitPause() {
         acceptedEofGate = null
         manualSkipRequest = null
+        manualSelectedGeneration = -1L
+        manualSelectedIndex = null
         releaseLease(null, "user_pause")
         state.onPause(state.pendingEngine(), true)
     }
@@ -653,6 +692,8 @@ internal object NativeSeriesV3 {
     fun reset() {
         acceptedEofGate = null
         manualSkipRequest = null
+        manualSelectedGeneration = -1L
+        manualSelectedIndex = null
         releaseLease(null, "reset")
         state.reset()
         adapter.clear()
