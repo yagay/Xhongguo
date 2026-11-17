@@ -194,3 +194,31 @@ takeover. Do not attempt to "fix" continuity by scheduling a second Activity
 launch or moving the task to front.
 
 Debug build and device validation are still required.
+
+## Regression after direct Activity suppression (2026-11-17 21:45)
+
+The 21:45:17 diagnostic proves that the earlier direct suppression
+reached `foreground/background_eof_series_launch blocked` at 21:45:09.205,
+then `v3_selection degraded host_did_not_accept_next_after_eof` about
+4.2 seconds later. The original official Activity launch is part of the
+host's feed-to-series playback handoff. Dropping it prevents continuation.
+
+The direct short-circuit was **removed**. In its place, the exact verified
+background feed EOF launch passes the original
+`Activity.startActivityForResult(Intent, requestCode, Bundle)` call
+through with AOSP ActivityOptions `android.activity.avoidMoveToFront=true`
+while preserving the host's Intent and original options. The normal
+2-argument overload still delegates to Android's 3-argument overload.
+The single-use event log is now
+`feature=foreground stage=background_eof_series_launch result=requested`.
+
+This is an **experimental task-placement approach**: the option is a
+hidden system behavior and must be verified on OxygenOS 16. Depending on
+task lifecycle, the host may not initialize a new engine until its
+Activity actually resumes, even if Activity creation succeeds. To test,
+verify 1) no `window_focus` for the series during another app's use,
+2) an accepted host selection, 3) a distinct engine and increasing
+native position. Never treat `result=requested` alone as proof of
+continuation or non-foreground launch. If step 2/3 fail, the actual
+next task is to implement a host-authoritative feed player transition,
+not to reintroduce background Activity force-start.
