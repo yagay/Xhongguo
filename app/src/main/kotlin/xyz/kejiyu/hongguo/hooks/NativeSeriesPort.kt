@@ -129,6 +129,34 @@ internal object NativeSeriesPort {
         val reason: String
     )
 
+    // The native c15.d.c(videoId, videoModel, localFile) PlayCommand
+    // reads c15.d.i AFTER its asynchronous source request completes.
+    // Restoring the flag in resume()'s finally block therefore cancels
+    // a later prepared PlayCommand when the screen is backgrounded.
+    private data class NoSurfaceLease(
+        val engine: Any,
+        val task: Any,
+        val flag: java.lang.reflect.Field,
+        val original: Boolean
+    )
+    private var noSurfaceLease: NoSurfaceLease? = null
+
+    @Synchronized
+    fun hasActiveNoSurfaceMode(engine: Any?): Boolean =
+        engine != null && noSurfaceLease?.engine === engine
+
+    /** Restore only our own native task flag, never an unrelated player. */
+    @Synchronized
+    fun finishAcceptedBackgroundEpisode(engine: Any?, reason: String): Boolean {
+        val lease = noSurfaceLease ?: return false
+        if (engine != null && lease.engine !== engine) return false
+        noSurfaceLease = null
+        return try {
+            lease.flag.setBoolean(lease.task, lease.original)
+            true
+        } catch (_: Throwable) { false }
+    }
+
     fun resumeAcceptedBackgroundEpisode(
         player: Any?, expectedEngine: Any?
     ): NativeResumeResult {
@@ -165,18 +193,33 @@ internal object NativeSeriesPort {
 
         return try {
             if (flag != null && task != null) {
-                synchronized(task) {
-                    val original = flag.getBoolean(task)
-                    try {
+                synchronized(this) {
+                    // There is at most ONE active native no-Surface lease,
+                    // tied to the exact official engine chosen by s4().
+                    val existing = noSurfaceLease
+                    if (existing != null &&
+                        (existing.engine !== expectedEngine ||
+                            existing.task !== task)) {
+                        finishAcceptedBackgroundEpisode(null, "new_handoff")
+                    }
+                    if (noSurfaceLease == null) {
+                        val original = flag.getBoolean(task)
                         if (!original) flag.setBoolean(task, true)
-                        resume.invoke(player)
-                    } finally {
-                        if (!original && flag.getBoolean(task))
-                            flag.setBoolean(task, false)
+                        noSurfaceLease = NoSurfaceLease(
+                            expectedEngine, task, flag, original)
                     }
                 }
+                try {
+                    resume.invoke(player)
+                } catch (failure: Throwable) {
+                    finishAcceptedBackgroundEpisode(
+                        expectedEngine, "resume_exception")
+                    throw failure
+                }
+                // Do NOT restore here. c15.d.c() may receive VideoModel
+                // asynchronously and tests c15.d.i after resume returns.
                 NativeResumeResult(true, true, surface,
-                    "official_resume_without_surface")
+                    "official_resume_without_surface_lease")
             } else {
                 resume.invoke(player)
                 NativeResumeResult(true, false, surface,
