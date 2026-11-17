@@ -11,6 +11,9 @@ import java.lang.reflect.Method
  */
 internal object NativeSeriesPort {
     const val SERIES_ADAPTER = "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f"
+    const val BASE_ADAPTER = "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
+    const val SERIES_FRAGMENT =
+        "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment"
     const val SERIES_PLAYER = "x05.w"
     const val EPISODE_MODEL =
         "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData"
