@@ -6666,23 +6666,35 @@ object Hooks {
                                 // scoped strictly to ORIGINAL s4 bytecode.
                                 // Clear it BEFORE our own after-proceed
                                 // diagnostics query y4() again.
-                                // Keep the verified s4() scope until AFTER
-                                // its accepted return has been recorded. A
-                                // holder registered later will then match the
-                                // durable accepted-selection state.
-                                try {
-                                    val original = chain.proceed()
-                                    try {
-                                        if (gMasterOn && gSystemMediaOn)
-                                            SystemMediaBridge.onSeriesPageSelection(
-                                                chain.thisObject, stage, "after",
-                                                targetPosition, original)
-                                    } catch (_: Throwable) { }
-                                    original
+                                // Record the accepted native selection before
+                                // releasing the synchronous visibility override.
+                                // After-callback diagnostics run ONLY after the
+                                // override is gone, so y4() shows real state.
+                                val original = try {
+                                    val result = chain.proceed()
+                                    if (scoped && gMasterOn && gSystemMediaOn) {
+                                        try {
+                                            SystemMediaBridge
+                                                .onNativeSeriesSelectionCompleted(
+                                                    chain.thisObject,
+                                                    targetPosition, result)
+                                        } catch (e: Throwable) {
+                                            LogUtil.warn("系统媒体: 下一集选中记录失败 " +
+                                                e.javaClass.simpleName)
+                                        }
+                                    }
+                                    result
                                 } finally {
                                     if (scoped) SystemMediaBridge
                                         .endNativeNextEpisodeSelection()
                                 }
+                                try {
+                                    if (gMasterOn && gSystemMediaOn)
+                                        SystemMediaBridge.onSeriesPageSelection(
+                                            chain.thisObject, stage, "after",
+                                            targetPosition, original)
+                                } catch (_: Throwable) { }
+                                original
                             })
                         installedSeriesHooks++
                     } catch (e: Throwable) {
