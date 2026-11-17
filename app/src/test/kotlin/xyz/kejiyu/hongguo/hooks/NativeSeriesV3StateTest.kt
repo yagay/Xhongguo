@@ -18,6 +18,36 @@ class NativeSeriesV3StateTest {
         assertFalse(state.mayScopeNext(adapter, 2, 1, 2, 60, true, true))
     }
 
+    @Test fun consecutiveNativeEofsKeepAdvancingAfterFirstConfirmedVideo() {
+        val state = NativeSeriesV3State()
+        val adapter = Any()
+        val first = Any()
+        val second = Any()
+        val third = Any()
+        state.rememberAdapter(adapter)
+        state.complete(first)
+        assertTrue(state.mayScopeNext(adapter, 2, 1, 2, 88, true, false))
+        assertTrue(state.select(adapter, 2, true, 2, 2))
+        assertTrue(state.bind(adapter, Any(), second))
+        assertTrue(state.playCommand(second))
+        assertFalse(state.confirmProgress(second, 0, 130000))
+        assertTrue(state.confirmProgress(second, 500, 130000))
+        assertEquals(2, state.snapshot().playingIndex)
+        assertEquals(NativeSeriesV3State.Phase.PLAYING, state.snapshot().phase)
+
+        // The second real onCompletion must start a new handoff rather
+        // than staying bound to the first accepted next holder/engine.
+        state.complete(second)
+        assertEquals(NativeSeriesV3State.Phase.COMPLETED, state.snapshot().phase)
+        assertTrue(state.mayScopeNext(adapter, 3, 2, 3, 88, true, false))
+        assertTrue(state.select(adapter, 3, true, 3, 3))
+        assertTrue(state.bind(adapter, Any(), third))
+        assertFalse(state.confirmProgress(third, 0, 126000))
+        assertTrue(state.confirmProgress(third, 650, 126000))
+        assertEquals(3, state.snapshot().playingIndex)
+        assertEquals(NativeSeriesV3State.Phase.PLAYING, state.snapshot().phase)
+    }
+
     @Test fun noTrueCompletionDoesNotAuthorizePageSpoof() {
         val state = NativeSeriesV3State()
         val adapter = Any()
