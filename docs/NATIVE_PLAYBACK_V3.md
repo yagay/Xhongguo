@@ -134,3 +134,32 @@ Validate real-device title, poster and total on episodes 1 through 4 and on
 the first episode of a different drama; verify the last drama never leaks into
 the new MediaSession. The index-to-ordinal conversion remains conservative:
 when the complete playlist is not verified, do not guess the current episode.
+
+## Unexpected foreground task investigation
+
+The 21:02:15 diagnostic ZIP shows the original FEED -> SERIES navigation,
+followed by confirmed app background and multiple SERIES engine handoffs.
+It does NOT contain a system-level ActivityTaskManager attribution of the
+reported foreground takeover. Do not suppress all launches based on this
+correlation.
+
+`ForegroundLaunchTrace` now observes, without modifying return values:
+- Activity.startActivity/startActivityForResult and ContextImpl.startActivity;
+- ActivityManager.moveTaskToFront requests in the host process;
+- Activity.onNewIntent, onPause, onResume and focus-gained callbacks.
+
+All observations use `XH_TRACE feature=foreground` and should appear
+in existing hook logs and feature/TRACE_EVENTS.log exported to diagnostic
+ZIP. No intent extras, raw URLs or entire stacks are exported; only the
+destination category, numeric flags, process importance and up to three
+host/module method names. Reproduce with a different app in front, then
+collect logs immediately after the actual takeover. Correlate
+`task_to_front` / `context_launch` / `activity_launch` with
+`activity_resume` and `window_focus`. A focus event without a host-side
+launch indicates that the request may originate from the framework or
+another process; use privileged ActivityTaskManager system logs to attribute
+that case.
+
+No playback, transition, MediaSession or automatic episode code was changed
+by this diagnostic-only instrumentation. Test build and live host behavior
+remain unverified until CI/device execution.
