@@ -460,13 +460,16 @@ internal object SystemMediaBridge {
         return SeriesNavigation(adapter, activity, pager, index, count)
     }
 
-    private fun hasSeriesEpisodeNavigation(): Boolean {
-        val activity = foregroundActivity.get() ?: return false
-        return enabled && !activity.isFinishing &&
-            activity.javaClass.name ==
-                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
-            nativeSeriesAdapterActivity.get() === activity &&
-            nativeSeriesAdapter.get() != null
+    /** Never advertise a no-op transport action at the first/last
+     * episode or while the native pager is between two selections. */
+    private fun episodeSkipAvailability(): Pair<Boolean, Boolean> {
+        val nav = seriesNavigation() ?: return false to false
+        if (!NativeSeriesV3.snapshot().phase.let {
+                it == NativeSeriesV3State.Phase.IDLE ||
+                    it == NativeSeriesV3State.Phase.PLAYING ||
+                    it == NativeSeriesV3State.Phase.PAUSED
+            }) return false to false
+        return (nav.index > 0) to (nav.index + 1 < nav.count)
     }
 
     /** D is a local position unless the native list covers the COMPLETE
@@ -486,18 +489,25 @@ internal object SystemMediaBridge {
     }
 
     private fun requestEpisodeSkip(delta: Int, reason: String) {
-        if (delta !in listOf(-1, 1) || userCommandInProgress) return
-        // User controls enter the SAME host business command as foreground
-        // navigation. No ViewPager2 move followed by a delayed r4 patch.
+        FeatureTrace.event("media", "episode_skip_input", "observed",
+            "source=$reason,indexDelta=$delta", flow=mediaFlow)
+        if (delta != -1 && delta != 1) return
+        // User controls enter the SAME original host business command as
+        // foreground navigation, never a synthetic pager/r4 retry.
         handler.post {
-            if (!enabled || userCommandInProgress) return@post
-            val result = NativeSeriesV3.skipNative(delta)
+            val result = when {
+                !enabled -> "media_disabled"
+                userCommandInProgress -> "transport_command_in_progress"
+                else -> NativeSeriesV3.skipNative(delta)
+            }
+            val submitted = result in setOf(
+                "selected", "native_selection_pending")
             FeatureTrace.event("media", "episode_skip",
-                if (result == "selected") "requested" else "degraded",
+                if (submitted) "requested" else "degraded",
                 "source=$reason,route=host_business,indexDelta=$delta,result=$result",
                 flow=mediaFlow)
             LogUtil.info("系统媒体V3: 官方业务切集 delta=$delta result=$result")
-            mediaRefresh.onNativeDataChanged()
+            if (submitted) mediaRefresh.onNativeDataChanged()
             updateSessionState(knownPlaying)
         }
     }
@@ -2479,10 +2489,11 @@ internal object SystemMediaBridge {
             var actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
                 PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP
             if (canSeek) actions = actions or PlaybackState.ACTION_SEEK_TO
-            if (hasSeriesEpisodeNavigation()) {
-                actions = actions or PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                    PlaybackState.ACTION_SKIP_TO_NEXT
-            }
+            val (canPrevious, canNext) = episodeSkipAvailability()
+            if (canPrevious)
+                actions = actions or PlaybackState.ACTION_SKIP_TO_PREVIOUS
+            if (canNext)
+                actions = actions or PlaybackState.ACTION_SKIP_TO_NEXT
             val builder = PlaybackState.Builder()
                 .setActions(actions)
                 .setState(
@@ -2519,7 +2530,8 @@ internal object SystemMediaBridge {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val icon = if (playing) android.R.drawable.ic_media_pause
                 else android.R.drawable.ic_media_play
-            val showEpisodeControls = hasSeriesEpisodeNavigation()
+            val (showPrevious, showNext) = episodeSkipAvailability()
+            val showEpisodeControls = showPrevious || showNext
             val prevIntent = PendingIntent.getBroadcast(ctx, 790116,
                 Intent(PREVIOUS_ACTION).setPackage(ctx.packageName),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -2542,7 +2554,7 @@ internal object SystemMediaBridge {
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 )
                 .apply {
-                    if (showEpisodeControls) {
+                    if (showPrevious) {
                         addAction(Notification.Action.Builder(
                             android.R.drawable.ic_media_previous,
                             "上一集", prevIntent).build())
@@ -2550,7 +2562,7 @@ internal object SystemMediaBridge {
                     addAction(Notification.Action.Builder(
                         icon, if (playing) "暂停" else "播放",
                         toggleIntent).build())
-                    if (showEpisodeControls) {
+                    if (showNext) {
                         addAction(Notification.Action.Builder(
                             android.R.drawable.ic_media_next,
                             "下一集", nextIntent).build())
@@ -2558,8 +2570,9 @@ internal object SystemMediaBridge {
                 }
                 .setStyle(Notification.MediaStyle()
                     .setMediaSession(media.sessionToken)
-                    .setShowActionsInCompactView(*(if (showEpisodeControls)
-                        intArrayOf(0, 1, 2) else intArrayOf(0))))
+                    .setShowActionsInCompactView(*(if (showPrevious && showNext)
+                        intArrayOf(0, 1, 2) else if (showEpisodeControls)
+                        intArrayOf(0, 1) else intArrayOf(0))))
                 .apply {
                     // Fallback for older/expanded notifications; Android 13+
                     // media cards use ART/DISPLAY_ICON in MediaMetadata.
