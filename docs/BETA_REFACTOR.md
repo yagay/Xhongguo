@@ -570,3 +570,33 @@ reproduce in the official 7.3.5.32 host using Home, Recents,
 in-app navigation, explicit media pause and first/middle/final episode.
 Collect the diagnostic ZIP to distinguish missing selection, late
 holder registration, blocked engine play, and resume-without-play.
+
+## 2026-11-17: system media skip controls and accurate episode labels
+
+The Android media session previously exposed only play, pause, stop and seek;
+the MediaStyle notification only contained a play/pause action. This meant
+Android 13+ system media controls could not show previous/next actions.
+
+The beta now publishes ACTION_SKIP_TO_PREVIOUS / ACTION_SKIP_TO_NEXT while
+an actual full-series native adapter is bound to the active activity, registers
+matching MediaSession callbacks and explicit notification actions, and adds
+previous / play-pause / next compact notification controls. The adapter is
+discovered from native fragment nh(), existing selection hooks, or a bounded
+post-resume fragment lookup. Navigation changes only the existing native
+ViewPager2 by one loaded item, and checks the official business D selection.
+If ViewPager2 advanced but D did not, one explicit user-command r4(target)
+reconciliation is allowed. No speculative autoplay retries, URLs or bare
+engine play are introduced. Failures have episode_skip events.
+
+For the episode subtitle, the old model indexInList + 1 can be false because
+a recycled local list may start at zero for an episode far into the drama.
+SeriesEpisodeNumberPolicy differentiates the server's vidIndex and a proven
+complete playlist position. A complete official list with a matching playing
+video ID wins over model index fields, followed by a verified native adapter
+index, followed by the exact active fragment and a safe model fallback.
+Unknown ordinals remain unknown rather than being reported as "第1集".
+
+Scope: full-series player. Feed-next/previous is not advertised until a
+separate, independently verified native feed navigation mapping exists.
+A pure Kotlin ordinal smoke test passed locally. Android Debug and on-device
+behavior remain to be verified using the beta push workflow and diagnostic ZIP.
