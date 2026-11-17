@@ -6533,6 +6533,28 @@ object Hooks {
                 LogUtil.warn("官方刷剧 U4 Hook 未安装 " + e.javaClass.simpleName)
             }
             try {
+                // f.r5(index, adapter.f) is the official series next-video
+                // action. Observe whether the native listen branch reached it.
+                val nativeNext = seriesAdapter.declaredMethods.firstOrNull {
+                    it.name == "r5" && it.parameterCount == 2 &&
+                        it.parameterTypes[1] == seriesAdapter
+                }
+                if (nativeNext != null) {
+                    module.hook(nativeNext)
+                        .setId("nativeListenModeNextVideo")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            if (gMasterOn && gSystemMediaOn)
+                                NativeFeedCompletion.decision(
+                                    chain.getArg(1), "official_series_next_video")
+                            chain.proceed()
+                        })
+                    nativeCount++
+                }
+            } catch (e: Throwable) {
+                LogUtil.warn("官方听模式 r5 Hook 未安装 " + e.javaClass.simpleName)
+            }
+            try {
                 // APK's genuine listen-mode predicate; just observe its
                 // result inside the f.U1 stack, never globally spoof it.
                 val listeningMode = Class.forName("p35.b", false, classLoader)
