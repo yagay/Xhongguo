@@ -5630,6 +5630,12 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn) {
+                                try {
+                                    NativeSeriesV3.onSourceModelAssigned(
+                                        chain.thisObject, chain.getArg(0))
+                                } catch (_: Throwable) {}
+                            }
                             if (gMasterOn && gMaxQualityOn) {
                                 try {
                                     rememberAndApplyHighestResolution(
@@ -6535,7 +6541,7 @@ object Hooks {
                     .intercept(Hooker { chain ->
                         if (gMasterOn && gSystemMediaOn)
                             NativeFeedCompletion.decision(
-                                chain.thisObject, "host_inner_series_selection")
+                                chain.thisObject, "host_holder_lookup_M0")
                         chain.proceed()
                     })
                 nativeCount++
