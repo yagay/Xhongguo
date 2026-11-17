@@ -46,6 +46,23 @@ class NativePlaybackCoordinatorTest {
         assertEquals(4, state.verifiedPlayingIndex(next, adapter))
     }
 
+    @Test fun pendingAutoplayCannotBeSkippedAgainBeforePlaybackBegins() {
+        val state = NativePlaybackCoordinator()
+        val old = Any()
+        val next = Any()
+        val adapter = Any()
+        state.onNativePlay(old)
+        assertTrue(state.canDispatchEpisodeCommand())
+        state.onNativeCompletion(old)
+        assertFalse(state.canDispatchEpisodeCommand())
+        state.onNativeSelection(adapter, 2, accepted = true)
+        assertFalse(state.canDispatchEpisodeCommand())
+        state.onNativeHolderBound(Any(), next)
+        assertFalse(state.canDispatchEpisodeCommand())
+        state.onNativePlay(next)
+        assertTrue(state.canDispatchEpisodeCommand())
+    }
+
     @Test fun initialNativeHolderCanConfirmAlreadyPlayingEngine() {
         val state = NativePlaybackCoordinator()
         val adapter = Any()
