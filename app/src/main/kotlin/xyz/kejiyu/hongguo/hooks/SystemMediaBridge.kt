@@ -553,8 +553,18 @@ internal object SystemMediaBridge {
         if (activity.javaClass.name !=
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
             activity.isFinishing) return
+        val changed = nativeSeriesAdapter.get() !== candidate ||
+            nativeSeriesAdapterActivity.get() !== activity
         nativeSeriesAdapter = WeakReference(candidate)
         nativeSeriesAdapterActivity = WeakReference(activity)
+        if (changed) handler.post {
+            if (!enabled || nativeSeriesAdapter.get() !== candidate ||
+                nativeSeriesAdapterActivity.get() !== activity) return@post
+            FeatureTrace.event("media", "series_navigation", "available",
+                "source=native_adapter", flow=mediaFlow)
+            updateSessionState(knownPlaying)
+            if (reportedCard) updateMediaNotification(knownPlaying)
+        }
     }
 
     fun onSeriesFragmentAdapter(fragment: Any?, adapter: Any?) {
@@ -606,8 +616,14 @@ internal object SystemMediaBridge {
         return SeriesNavigation(adapter, activity, pager, index, count)
     }
 
-    private fun hasSeriesEpisodeNavigation(): Boolean =
-        seriesNavigation() != null
+    private fun hasSeriesEpisodeNavigation(): Boolean {
+        val activity = foregroundActivity.get() ?: return false
+        return enabled && !activity.isFinishing &&
+            activity.javaClass.name ==
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
+            nativeSeriesAdapterActivity.get() === activity &&
+            nativeSeriesAdapter.get() != null
+    }
 
     /** D is a local position unless the native list covers the COMPLETE
      * series. Publish D+1 only for a selected full playlist and active engine. */
@@ -3101,8 +3117,8 @@ internal object SystemMediaBridge {
                 }
                 .setStyle(Notification.MediaStyle()
                     .setMediaSession(media.sessionToken)
-                    .setShowActionsInCompactView(
-                        if (showEpisodeControls) 0, 1, 2 else 0))
+                    .setShowActionsInCompactView(*(if (showEpisodeControls)
+                        intArrayOf(0, 1, 2) else intArrayOf(0))))
                 .apply {
                     // Fallback for older/expanded notifications; Android 13+
                     // media cards use ART/DISPLAY_ICON in MediaMetadata.
