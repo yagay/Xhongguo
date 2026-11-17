@@ -41,6 +41,8 @@ internal object OfficialSeriesPlayback {
     private var ownerActivity = WeakReference<Activity>(null)
     private val visibilityScope = ThreadLocal<Any?>()
     private val inAutoplay = ThreadLocal<Boolean>()
+    private val g4DecisionScope = ThreadLocal<Any?>()
+    private val g4GateResult = ThreadLocal<Boolean?>()
 
     private data class NoSurfaceLease(
         val task: Any,
@@ -184,18 +186,34 @@ internal object OfficialSeriesPlayback {
         if (phase == "after") inAutoplay.remove()
     }
 
+    /**
+     * Observe the host's ORIGINAL G4 -> j15.d.i9 call, not by invoking i9
+     * an extra time. Policy methods can have side effects; duplicate probes
+     * may itself change playback behavior.
+     */
     fun onG4(a: Any?, phase: String) {
         onAdapter(a)
-        val controller = field(a, "m")
-        val block = invoke(controller, "i9") as? Boolean
-        val autoplayPolicy = invoke(a, "I4")
+        if (phase == "before") {
+            g4DecisionScope.set(field(a, "m"))
+            g4GateResult.remove()
+        }
         val s = timeline.snapshot()
         log("g4", "observed",
-            "phase=$phase,invisible=" + (invoke(controller, "y4") ?: "?") +
-            ",i9Block=" + (block?.toString() ?: "unknown") +
-            ",I4=" + (autoplayPolicy?.toString()?.take(32) ?: "unknown") +
-            ",state=" + s.phase + ",background=" +
-            SystemMediaBridge.isOfficialSeriesBackground())
+            "phase=$phase,hostI9=" +
+                (g4GateResult.get()?.toString() ?: "not_observed") +
+                ",state=" + s.phase +
+                ",background=" + SystemMediaBridge.isOfficialSeriesBackground())
+        if (phase == "after") {
+            g4DecisionScope.remove()
+            g4GateResult.remove()
+        }
+    }
+
+    fun onNativeAutoplayGate(controller: Any?, result: Any?) {
+        if (controller == null || controller !== g4DecisionScope.get()) return
+        val blocked = result as? Boolean
+        g4GateResult.set(blocked)
+        log("i9", "observed", "hostReturn=$blocked")
     }
 
     fun onSelection(a: Any?, requested: Int?, result: Any?) {
@@ -431,5 +449,7 @@ internal object OfficialSeriesPlayback {
         ownerActivity.clear()
         visibilityScope.remove()
         inAutoplay.remove()
+        g4DecisionScope.remove()
+        g4GateResult.remove()
     }
 }
