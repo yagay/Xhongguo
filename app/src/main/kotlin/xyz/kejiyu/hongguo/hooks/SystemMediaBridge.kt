@@ -1020,7 +1020,9 @@ internal object SystemMediaBridge {
                     "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
                 !activity.isFinishing && !activity.hasWindowFocus(),
             explicitPauseUnchanged = explicitPauseEpoch == pending.pauseEpoch &&
-                !userCommandInProgress && !SinglePlaybackOwner.isOwnershipTransition(),
+                !userCommandInProgress && !SinglePlaybackOwner.isOwnershipTransition() &&
+                nativePlayback.canContinueAcceptedSelection(
+                    adapter, pending.targetIndex, completedEngine),
             noNewEnginePlay = lastNativeEngineAt <= nativeEofAt,
             newHolder = nextPlayer != null && nextPlayer !== nativeSeriesPlayer.get() &&
                 newHolderEngine !== completedEngine,
@@ -1182,151 +1184,10 @@ internal object SystemMediaBridge {
         }
     }
 
-    /** A conservative last resort after native EOF, not an automatic loop.
-     * Only advance the existing APK ViewPager2 when the current item/index,
-     * engine identity, native EOF, explicit pause epoch and actual loaded
-     * next-item count all agree. Last episode is never advanced.
-     */
-    private fun maybeRecoverSeriesNativePager(
-        adapter: Any, completedEngine: Any, activity: Activity?,
-        pauseEpoch: Long, generation: Long
-    ) {
-        if (!enabled || nativeEofRecoveryAttempted ||
-            generation != nativeEofGeneration ||
-            nativeEofEngine.get() !== completedEngine ||
-            videoEngine.get() !== completedEngine ||
-            !episodeMonitor.hasNativeCompletion() ||
-            lastNativeEngineAt > nativeEofAt ||
-            activity == null || foregroundActivity.get() !== activity ||
-            activity.isFinishing || userCommandInProgress ||
-            explicitPauseEpoch != pauseEpoch || !requestedBackgroundPlayback)
-            return
+    // Retired: the old ViewPager2/r4 replay recovery has been removed.
+    // NativeSeriesPort owns explicit user navigation; the coordinator
+    // tracks host-selected autoplay without synthetic pager movement.
 
-        try {
-            readCurrentTimeline()
-            val current = (inheritedFieldValue(adapter, "D") as? Number)
-                ?.toInt() ?: return
-            val pager = inheritedFieldValue(adapter, "k") ?: return
-            val pagerPosition = (pager.javaClass.getMethod("getCurrentItem")
-                .invoke(pager) as? Number)?.toInt() ?: return
-            val pagerAdapter = pager.javaClass.getMethod("getAdapter")
-                .invoke(pager) ?: return
-            val pagerCount = (pagerAdapter.javaClass.getMethod("getItemCount")
-                .invoke(pagerAdapter) as? Number)?.toInt() ?: return
-            // gp4.f is the official RecyclerView adapter base; h contains
-            // the actual available SaasVideoDetailModel items.
-            val dataCount =
-                (inheritedFieldValue(adapter, "h") as? List<*>)?.size ?: -1
-            val count = if (dataCount > 0) minOf(dataCount, pagerCount) else -1
-            val evidence = SeriesAutoplayRecoveryPolicy.Evidence(
-                background = requestedBackgroundPlayback,
-                eofObserved = episodeMonitor.hasNativeCompletion(),
-                sameNativeEngine = videoEngine.get() === completedEngine,
-                sameSeriesActivity = activity.javaClass.name ==
-                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
-                explicitPauseUnchanged = explicitPauseEpoch == pauseEpoch,
-                noNewVideoStarted = lastNativeEngineAt <= nativeEofAt,
-                completionAgeMs = SystemClock.uptimeMillis() - nativeEofAt,
-                currentIndex = current, pagerIndex = pagerPosition,
-                itemCount = count,
-                nearRealNativeEnd = durationMs > 5000L &&
-                    positionMs >= durationMs - 350L,
-                alreadyAttempted = nativeEofRecoveryAttempted
-            )
-            val decision = SeriesAutoplayRecoveryPolicy.decision(evidence)
-            if (decision == null) {
-                LogUtil.info("系统媒体: 后台自然连播未恢复；原生选集校验未通过" +
-                    " current=$current pager=$pagerPosition" +
-                    " available=$count eofNear=" + evidence.nearRealNativeEnd)
-                FeatureTrace.event("background", "series_pager_recovery",
-                    "degraded", "reason=safety_guard,indexAligned=" +
-                        (current == pagerPosition) +
-                        ",hasNext=" + (count > current + 1),
-                    flow = mediaFlow)
-                return
-            }
-            nativeEofRecoveryAttempted = true
-            if (decision.action ==
-                SeriesAutoplayRecoveryPolicy.Action.RECONCILE_SELECTION) {
-                // Log 08:00:58 showed D=1 yet ViewPager2.currentItem=2.
-                // The UI page is ALREADY on the next episode. Moving the
-                // pager again would silently skip an episode. Instead run
-                // the official adapter.f.r4(position), which calls
-                // adapter.a.r4/s4 to update D and select the existing page.
-                val nativeSelection = adapter.javaClass.getMethod(
-                    "r4", Int::class.javaPrimitiveType)
-                val accepted = nativeSelection.invoke(
-                    adapter, decision.targetIndex) as? Boolean
-                val updated = (inheritedFieldValue(adapter, "D") as? Number)
-                    ?.toInt()
-                LogUtil.info("系统媒体: 后台选集页面已前进，补齐官方业务选中回调" +
-                    " old=$current pager=$pagerPosition" +
-                    " new=$updated accepted=$accepted")
-                FeatureTrace.event("background", "series_pager_recovery",
-                    if (updated == decision.targetIndex) "requested"
-                    else "degraded",
-                    "route=adapter_r4,indexUpdated=" +
-                        (updated == decision.targetIndex) +
-                        ",accepted=" + accepted,
-                    flow = mediaFlow)
-            } else {
-                // The pager itself remains on D: request only the ONE
-                // loaded next item through the host's native ViewPager2.
-                pager.javaClass.getMethod("setCurrentItem",
-                    Int::class.javaPrimitiveType,
-                    Boolean::class.javaPrimitiveType).invoke(
-                    pager, decision.targetIndex, false)
-                LogUtil.info("系统媒体: 后台结尾停滞，已请求官方选集切换" +
-                    " current=$current next=" + decision.targetIndex +
-                    " total=$count")
-                FeatureTrace.event("background", "series_pager_recovery",
-                    "requested", "route=native_viewpager2,hasNext=true",
-                    flow = mediaFlow)
-            }
-            LogUtil.incr("systemMediaSeriesPagerRecovery")
-        } catch (e: Throwable) {
-            nativeEofRecoveryAttempted = true
-            LogUtil.warn("系统媒体: 原生选集补救失败 " +
-                e.javaClass.simpleName + ":" + (e.message ?: "unknown"))
-            FeatureTrace.event("background", "series_pager_recovery", "fail",
-                "errorType=" + e.javaClass.simpleName, flow = mediaFlow)
-        }
-    }
-
-    /** Explicit notification/media-control pause must never be swallowed by
-     * the in-app mini player's short navigation guard. */
-    fun isExplicitMediaCommandInProgress(): Boolean = userCommandInProgress
-
-    /** Both home and full-series: protect ONLY the active native engine after
-     * process importance confirms a genuine background transition. Never
-     * suppress user-requested pause, foreground pause or a preload engine.
-     */
-    fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
-        // The host can issue TTVideoEngine.pause() while advancing an
-        // episode. A blanket ten-minute background guard blocks that native
-        // transition and strands the player at duration == position.
-        if (episodeMonitor.hasNativeCompletion()) return false
-        if (shouldHoldOriginalOnLeave(candidate)) {
-            LogUtil.info("系统媒体: 在 Activity.onPause 前保留原生播放引擎")
-            LogUtil.incr("systemMediaEarlyEnginePauseHeld")
-            FeatureTrace.event("background", "engine_pause", "held",
-                "reason=pre-pause", flow = mediaFlow, minIntervalMs = 1000L)
-            return true
-        }
-        if (!enabled || candidate == null || userCommandInProgress ||
-            SinglePlaybackOwner.isOwnershipTransition() ||
-            !requestedBackgroundPlayback ||
-            backgroundPauseGuardEngine.get() !== candidate ||
-            videoEngine.get() !== candidate ||
-            SystemClock.uptimeMillis() > backgroundPauseGuardUntil) return false
-        backgroundPauseSuppressed++
-        if (backgroundPauseSuppressed <= 4 || backgroundPauseSuppressed % 20 == 0) {
-            LogUtil.info("系统媒体: 已保护当前后台播放器 pause #" +
-                backgroundPauseSuppressed)
-        }
-        LogUtil.incr("systemMediaFeedPauseSuppressed")
-        return true
-    }
     private var lastVisibleInfoAt = 0L
     private var lastVisibleInfoIdentity = ""
     private var lastVisibleInfoSource = ""
