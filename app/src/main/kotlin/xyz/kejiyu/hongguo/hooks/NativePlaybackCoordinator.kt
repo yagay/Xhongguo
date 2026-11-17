@@ -75,6 +75,10 @@ internal class NativePlaybackCoordinator {
             finishedEngine.clear()
             boundNextEngine.clear()
             boundNextHolder.clear()
+            // A verified holder can arrive after TTVideoEngine.play() has
+            // already fired. The engine is running; do not strand this
+            // episode in SELECTED or BOUND and hide the media ordinal.
+            phase = Phase.PLAYING
         } else phase = Phase.BOUND
     }
 
