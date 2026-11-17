@@ -692,74 +692,19 @@ internal object SystemMediaBridge {
     }
 
     private fun requestEpisodeSkip(delta: Int, reason: String) {
-        if (delta != -1 && delta != 1) return
-        val nav = seriesNavigation()
-        if (nav == null || userCommandInProgress) {
-            FeatureTrace.event("media", "episode_skip", "degraded",
-                "reason=native_adapter_unavailable,source=$reason", flow=mediaFlow)
-            return
-        }
-        val target = nav.index + delta
-        if (target !in 0 until nav.count) {
-            FeatureTrace.event("media", "episode_skip", "degraded",
-                "reason=episode_boundary,index=" + nav.index, flow=mediaFlow)
-            return
-        }
-        try {
-            // A user request goes through the host's own ViewPager2, never a
-            // synthetic URL, guessed episode or detached TTVideoEngine.
-            nav.pager.javaClass.getMethod("setCurrentItem",
-                Int::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType).invoke(nav.pager, target, false)
-            FeatureTrace.event("media", "episode_skip", "requested",
-                "source=$reason,from=" + nav.index + ",to=$target",
+        if (delta !in listOf(-1, 1) || userCommandInProgress) return
+        // User controls enter the SAME host business command as foreground
+        // navigation. No ViewPager2 move followed by a delayed r4 patch.
+        handler.post {
+            if (!enabled || userCommandInProgress) return@post
+            val result = OfficialSeriesPlayback.skipNative(delta)
+            FeatureTrace.event("media", "episode_skip",
+                if (result == "selected") "requested" else "degraded",
+                "source=$reason,route=host_business,indexDelta=$delta,result=$result",
                 flow=mediaFlow)
-            LogUtil.info("系统媒体: 原生选集已请求 from=" +
-                nav.index + " to=$target source=$reason")
-            handler.postDelayed({
-                if (nativeSeriesAdapter.get() !== nav.adapter ||
-                    foregroundActivity.get() !== nav.activity) return@postDelayed
-                var selected = (inheritedFieldValue(nav.adapter, "D")
-                    as? Number)?.toInt()
-                val pagerAt = try {
-                    (nav.pager.javaClass.getMethod("getCurrentItem")
-                        .invoke(nav.pager) as? Number)?.toInt()
-                } catch (_: Throwable) { null }
-                // Only for an explicit user skip: if the ViewPager has
-                // selected the target but the host business index lagged,
-                // reconcile that SAME page through the official r4 once.
-                // Never advance by another page or loop at EOF.
-                if (selected != target && pagerAt == target) {
-                    try {
-                        val r4 = nav.adapter.javaClass.methods.firstOrNull {
-                            it.name == "r4" && it.parameterCount == 1 &&
-                                it.parameterTypes[0] == Int::class.javaPrimitiveType
-                        }
-                        val accepted = r4?.invoke(nav.adapter, target)
-                        selected = (inheritedFieldValue(nav.adapter, "D")
-                            as? Number)?.toInt()
-                        FeatureTrace.event("media", "episode_skip_reconcile",
-                            if (selected == target) "ok" else "degraded",
-                            "target=$target,accepted=$accepted", flow=mediaFlow)
-                    } catch (e: Throwable) {
-                        FeatureTrace.event("media", "episode_skip_reconcile",
-                            "fail", "type=" + e.javaClass.simpleName,
-                            flow=mediaFlow)
-                    }
-                }
-                FeatureTrace.event("media", "episode_skip",
-                    if (selected == target) "selected" else "degraded",
-                    "source=$reason,target=$target,selected=" +
-                        (selected ?: -1), flow=mediaFlow)
-                mediaRefresh.onNativeDataChanged()
-                updateSessionState(knownPlaying)
-                if (reportedCard) updateMediaNotification(knownPlaying)
-            }, 450L)
-        } catch (e: Throwable) {
-            LogUtil.warn("系统媒体: 原生选集跳转失败 " +
-                e.javaClass.simpleName)
-            FeatureTrace.event("media", "episode_skip", "fail",
-                "type=" + e.javaClass.simpleName, flow=mediaFlow)
+            LogUtil.info("系统媒体V2: 官方业务切集 delta=$delta result=$result")
+            mediaRefresh.onNativeDataChanged()
+            updateSessionState(knownPlaying)
         }
     }
 
@@ -1341,6 +1286,14 @@ internal object SystemMediaBridge {
      * suppress user-requested pause, foreground pause or a preload engine.
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
+        // A completed series episode MUST be allowed to pause/release its
+        // own decoder while the host binds the next holder.
+        if (OfficialSeriesPlayback.isSeriesEngine(candidate) &&
+            OfficialSeriesPlayback.snapshot().phase in setOf(
+                OfficialSeriesTimeline.Phase.COMPLETED,
+                OfficialSeriesTimeline.Phase.SELECTED,
+                OfficialSeriesTimeline.Phase.BOUND,
+                OfficialSeriesTimeline.Phase.STARTING)) return false
         // The host can issue TTVideoEngine.pause() while advancing an
         // episode. A blanket ten-minute background guard blocks that native
         // transition and strands the player at duration == position.
@@ -1458,6 +1411,26 @@ internal object SystemMediaBridge {
     private var lastProgressDiagnosticAt = 0L
     private val episodeMonitor = BackgroundEpisodeMonitor()
 
+    /** Native-series V2 owns only the full-series lifecycle; Home VideoShop
+     * and all unrelated overlay/media features remain unchanged. */
+    fun isOfficialSeriesActivityCurrent(): Boolean =
+        foregroundActivity.get()?.javaClass?.name ==
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+
+    fun isOfficialSeriesBackground(): Boolean {
+        val activity = foregroundActivity.get() ?: return false
+        return enabled && requestedBackgroundPlayback &&
+            !userCommandInProgress &&
+            activity.javaClass.name ==
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" &&
+            !activity.isFinishing && !activity.hasWindowFocus()
+    }
+
+    fun rememberOfficialSeriesAdapter(adapter: Any?) {
+        rememberSeriesAdapter(adapter)
+    }
+
+
     /**
      * APK-verified completion stages:
      * VideoController.onCompletion(engine) ->
@@ -1570,7 +1543,8 @@ internal object SystemMediaBridge {
                 lastVisibleInfoAt = now
                 captureVisibleMediaInfo(activeActivity)
             }
-            if (knownPlaying) scheduleTimelinePoll(1400L)
+            if (knownPlaying || OfficialSeriesPlayback.needsProgressPolling())
+                scheduleTimelinePoll(900L)
         }
     }
 
@@ -1616,6 +1590,17 @@ internal object SystemMediaBridge {
                 bufferedMs = durationMs * loaded / 100L
             if (speed != null && speed.isFinite() && speed in 0.25f..4f)
                 actualPlaybackSpeed = speed
+
+            // Only this raw engine's OWN time progression can confirm
+            // background auto-start. A UI page, play() call or stale
+            // metadata duration alone is not evidence.
+            if (nativeDuration != null && nativePosition != null &&
+                OfficialSeriesPlayback.onProgress(
+                    engine, nativePosition, nativeDuration)) {
+                onNativePlayback(true, "v2_official_series_progress", engine)
+                updateSessionMetadata()
+                updateSessionState(true)
+            }
 
             val now = SystemClock.uptimeMillis()
             if (now - lastProgressDiagnosticAt > 15000L) {
@@ -2109,15 +2094,8 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null) return
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
         if (action == "play") {
-            pendingNativeNextStart?.takeIf {
-                it.generation == nativeEofGeneration &&
-                    it.activity.get() === foregroundActivity.get() &&
-                    it.completedEngine.get() !== candidate
-            }?.let {
-                FeatureTrace.event("background", "series_next_start", "ok",
-                    "route=native_engine_play,index=" + it.targetIndex,
-                    flow=mediaFlow)
-            }
+            // V2 confirms playback only from increasing native progress.
+            // No 'success' event from a TTVideoEngine.play() request.
             if (videoEngine.get() !== candidate) {
                 // Switching episodes can replace TTVideoEngine even within
                 // the SAME drama. Preserve its official poster and title
@@ -2179,11 +2157,18 @@ internal object SystemMediaBridge {
         }
         if (action == "play") {
             lastLifecyclePauseWasPlaying = false
-            onNativePlayback(true, "TTVideoEngine#play", candidate)
+            val seriesStarting =
+                OfficialSeriesPlayback.awaitingProgress(candidate)
+            if (seriesStarting) {
+                knownPlaying = false
+                updateSessionState(false)
+                FeatureTrace.event("playback", "v2_start",
+                    "requested", "await=video_model_and_progress", flow=mediaFlow)
+            } else onNativePlayback(true, "TTVideoEngine#play", candidate)
             captureNativePlayEntity("engine-play")
             readCurrentTimeline()
             updateSessionMetadata()
-            updateSessionState(true)
+            updateSessionState(knownPlaying)
             scheduleTimelinePoll(600L)
             // The native Activity can still be drawing its title/episode overlay.
             val act = foregroundActivity.get()
@@ -2854,6 +2839,7 @@ internal object SystemMediaBridge {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
+        OfficialSeriesPlayback.onActivityResumed(activity)
         pendingExit = null
         lastPlayerActivityPauseAt = 0L
         lastUserLeaveAt = 0L
@@ -3074,6 +3060,7 @@ internal object SystemMediaBridge {
         if (!play && reason.startsWith("system") ||
             !play && reason == "notification-action") {
             explicitPauseEpoch++
+            OfficialSeriesPlayback.onExplicitPause()
             pendingExit = null
             backgroundTransition.cancel()
             backgroundPauseGuardEngine.clear()
@@ -3230,6 +3217,7 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
+        OfficialSeriesPlayback.reset()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }
