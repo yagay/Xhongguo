@@ -59,12 +59,7 @@ internal object NativeSeriesV3 {
         val generation: Long, val index: Int, val at: Long
     )
     private var acceptedEofGate: AcceptedEofGate? = null
-    private data class ManualSkipScope(
-        val adapter: Any, val target: Int, val generation: Long
-    )
-    private val manualSkipScope = ThreadLocal<ManualSkipScope?>()
     private val scopedPage = ThreadLocal<PageScope?>()
-    private var eofReconcileAttemptGeneration = -1L
 
     private val currentG4 = ThreadLocal<Any?>()
     private var lease: SurfaceLease? = null
@@ -173,7 +168,6 @@ internal object NativeSeriesV3 {
         releaseLease(null, "completed")
         acceptedEofGate = null
         val g = state.complete(finished)
-        eofReconcileAttemptGeneration = -1L
         candidateHolder.clear()
         resumeAttemptGeneration = -1L
         trace("eof", "observed", "generation=$g,background=" +
@@ -189,55 +183,19 @@ internal object NativeSeriesV3 {
 
     fun onAutoplay(a: Any?, phase: String) {
         onAdapter(a)
-        trace("autoplay", "observed", "phase=$phase,D=" + (d(a) ?: -1) +
+        // Observe the host's original U1 -> s4 -> G4 handoff. Never
+        // manufacture another s4 from a delayed callback: it competes
+        // with the native adapter and can leave D one page behind.
+        trace("autoplay", "observed",
+            "phase=$phase,D=" + (d(a) ?: -1) +
             ",pager=" + (page(a) ?: -1) +
             ",state=" + state.snapshot().phase)
-        // The original f.U1 sometimes returns without calling s4, after a
-        // rejected g()/r4 had ALREADY advanced the page. Give the host one
-        // event-loop beat to finish its own callbacks; if it is still at
-        // D=N, pager=N+1, reconcile exactly that page via original a.s4.
-        // Never advance ViewPager2 and never attempt this without real EOF.
-        if (phase != "after" || a == null ||
-            !SystemMediaBridge.isOfficialSeriesBackground() ||
-            state.snapshot().phase != NativeSeriesV3State.Phase.COMPLETED)
-            return
-        val generation = state.snapshot().generation
-        if (eofReconcileAttemptGeneration == generation) return
-        handler.postDelayed({
-            if (state.snapshot().generation != generation ||
-                state.snapshot().phase != NativeSeriesV3State.Phase.COMPLETED ||
-                adapter.get() !== a ||
-                !SystemMediaBridge.isOfficialSeriesBackground()) return@postDelayed
-            val current = d(a) ?: return@postDelayed
-            val target = current + 1
-            if (!NativeSeriesSelectionRecoveryPolicy.mayReconcile(
-                    NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF,
-                    sameAdapter = adapter.get() === a,
-                    genuineBackground = true,
-                    nativeEofConfirmed = true,
-                    userPaused =
-                        SystemMediaBridge.isExplicitMediaCommandInProgress(),
-                    businessIndex = current, pagerIndex = page(a) ?: -1,
-                    requestedIndex = target, loadedCount = count(a),
-                    hostAlreadySelected = false)) {
-                trace("eof_reconcile", "observed",
-                    "not_eligible,D=$current,pager=" + (page(a) ?: -1))
-                return@postDelayed
-            }
-            eofReconcileAttemptGeneration = generation
-            val attempt = try {
-                method(a, "s4", 1)?.invoke(a, target) as? Boolean
-            } catch (t: Throwable) {
-                trace("eof_reconcile", "failed",
-                    "type=" + t.javaClass.simpleName)
-                false
-            }
-            trace("eof_reconcile",
-                if (attempt == true && d(a) == target) "selected"
-                else "degraded",
-                "host_s4_once,target=$target,D=" + (d(a) ?: -1) +
-                    ",pager=" + (page(a) ?: -1))
-        }, 160L)
+        if (phase == "after" &&
+            state.snapshot().phase == NativeSeriesV3State.Phase.COMPLETED) {
+            trace("handoff", "pending",
+                "native_selection_not_confirmed,D=" + (d(a) ?: -1) +
+                ",pager=" + (page(a) ?: -1))
+        }
     }
 
     /** The public j15.d interface cannot be hooked: its i9() is ABSTRACT.
@@ -304,25 +262,15 @@ internal object NativeSeriesV3 {
         val current = d(a) ?: return false
         val p = page(a) ?: return false
         val g = state.snapshot().generation
-        val manual = manualSkipScope.get()
-        val manualAllowed = manual != null && manual.adapter === a &&
-            manual.target == target && manual.generation == g &&
-            NativeSeriesSelectionRecoveryPolicy.mayReconcile(
-                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP,
-                sameAdapter = true, genuineBackground = true,
-                nativeEofConfirmed = false, userPaused = false,
-                businessIndex = current, pagerIndex = p,
-                requestedIndex = target, loadedCount = count(a),
-                hostAlreadySelected = false)
+        // A visibility exception belongs only to a verified native EOF.
+        // Manual media keys never obtain a second route through s4().
         val eofAllowed = state.mayScopeNext(a, target, current, p, count(a),
             background = true,
             explicitlyPaused =
                 SystemMediaBridge.isExplicitMediaCommandInProgress())
-        if (!manualAllowed && !eofAllowed) return false
+        if (!eofAllowed) return false
         val controller = inheritedField(a, "m") ?: return false
-        val origin = if (eofAllowed)
-            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
-            else NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP
+        val origin = NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
         scopedPage.set(PageScope(controller, a, g, target, current, p,
             origin))
         trace("scope", "enabled", "D=$current,pager=$p,target=$target," +
@@ -592,43 +540,23 @@ internal object NativeSeriesV3 {
         val current = d(a) ?: return "current_index_missing"
         if (page(a) != current || current + delta !in 0 until count(a))
             return "page_misaligned_or_boundary"
-        val methodName = if (delta > 0) "g" else "A1"
-        val result = try { method(a, methodName, 0)?.invoke(a) }
-            catch (t: Throwable) { return "host_exception_" + t.javaClass.simpleName }
-        val target = current + delta
-        if (d(a) == target && page(a) == target) return "selected"
-        // The host's f.g() calls ViewPager2.setCurrentItem() BEFORE r4(),
-        // so a rejected r4() can strand page=N+1, D=N. Reconcile this
-        // exact already-displayed page through one original s4(target);
-        // no second UI page movement, no retry loop and no unrelated index.
-        if (delta != 1 ||
-            !NativeSeriesSelectionRecoveryPolicy.mayReconcile(
-                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP,
-                sameAdapter = adapter.get() === a,
-                genuineBackground =
-                    SystemMediaBridge.isOfficialSeriesBackground(),
-                nativeEofConfirmed = false,
-                userPaused = false,
-                businessIndex = d(a) ?: -1, pagerIndex = page(a) ?: -1,
-                requestedIndex = target, loadedCount = count(a),
-                hostAlreadySelected = false)) return "not_accepted"
-        manualSkipScope.set(ManualSkipScope(a, target,
-            state.snapshot().generation))
-        return try {
-            val accepted = method(a, "s4", 1)?.invoke(a, target) as? Boolean
-            val success = accepted == true && d(a) == target &&
-                page(a) == target
-            trace("manual_reconcile", if (success) "selected" else "degraded",
-                "target=$target,D=" + (d(a) ?: -1) +
-                    ",pager=" + (page(a) ?: -1))
-            if (success) "selected" else "not_accepted"
+        // One user request -> one original host business command. Never
+        // follow a rejected command with a second synthetic s4(), because
+        // doing so races the host's own asynchronous r4/G4 callbacks.
+        val entry = if (delta > 0) "g" else "A1"
+        val result = try {
+            method(a, entry, 0)?.invoke(a)
         } catch (t: Throwable) {
-            trace("manual_reconcile", "failed",
-                "type=" + t.javaClass.simpleName)
-            "host_exception_" + t.javaClass.simpleName
-        } finally {
-            manualSkipScope.remove()
+            trace("manual_skip", "failed", t.javaClass.simpleName)
+            return "host_exception_" + t.javaClass.simpleName
         }
+        val target = current + delta
+        val selected = d(a) == target && page(a) == target
+        trace("manual_skip",
+            if (selected) "selected" else "pending",
+            "command=$entry,result=$result,target=$target,D=" +
+                (d(a) ?: -1) + ",pager=" + (page(a) ?: -1))
+        return if (selected) "selected" else "native_selection_pending"
     }
 
     fun onExplicitPause() {
@@ -652,8 +580,6 @@ internal object NativeSeriesV3 {
         initialOwner.clear()
         resumeAttemptGeneration = -1L
         scopedPage.remove()
-        manualSkipScope.remove()
-        eofReconcileAttemptGeneration = -1L
         currentG4.remove()
     }
 }
