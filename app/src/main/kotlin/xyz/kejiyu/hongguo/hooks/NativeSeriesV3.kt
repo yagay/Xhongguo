@@ -133,6 +133,22 @@ internal object NativeSeriesV3 {
         return null
     }
 
+    /**
+     * Metadata is read from the exact host business selection associated
+     * with a progressing engine. The publisher never guesses from a pager,
+     * an old Presenter, or a preloaded neighbour.
+     */
+    fun confirmedSelectedSeriesModel(engine: Any?): Any? {
+        val verified = confirmedEpisodeIndex(engine) ?: return null
+        val a = adapter.get() ?: return null
+        if (d(a) != verified || page(a) != verified) return null
+        val selected = call(a, "l0") ?: return null
+        if (selected.javaClass.name !=
+            "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData")
+            return null
+        return selected
+    }
+
     fun isSeriesRoute(): Boolean =
         ownerActivity.get()?.javaClass?.name == SERIES_ACTIVITY &&
             SystemMediaBridge.isOfficialSeriesActivityCurrent()
