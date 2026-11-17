@@ -531,3 +531,42 @@ a failure signal if the native host still does not start.
 This is a code-level mitigation, **not yet a real-device pass**.
 Test Home, Recents, explicit media pause, foreground next episode,
 the last episode, in-app mini-player and switching series.
+
+## 2026-11-17: preserve verified native episode handoff across delayed registration
+
+The Nov 13 device trace showed an accepted `adapter.a.s4(nextIndex)`
+without a corresponding next `TTVideoEngine.play()`. The previous beta
+captured the next `x05.w` only while a synchronous, thread-local
+`s4()` scope was open and scheduled one recovery after `G4()`.
+That can miss a host listener registration which finishes after `s4()`
+or on another thread.
+
+The current beta:
+- Records a real, accepted host `s4(nextIndex)` while the original
+  selection scope is still valid. It retains a weak-reference handoff
+  keyed by the official Activity, adapter, completed engine, native EOF
+  generation, pause epoch, and target index for a bounded period.
+- Supports both a holder registered within `s4/G4` and a later
+  `x05.w.v(adapter)` registration. Later registration is verified on
+  the main thread against the same accepted selection; no URL, holder,
+  or episode index is manufactured.
+- Schedules a one-shot native `x05.w.resume()` check only after the
+  selected holder has been observed. The policy supports bounded late
+  registration (maximum 15 seconds after EOF). No blind ViewPager2
+  movement, old-holder replay, or bare decoder play is permitted.
+- Allows `SinglePlaybackOwner` to accept a known cross-route engine
+  only when it belongs to the exact verified selected next holder;
+  all other stale players remain blocked.
+- Emits `series_next_selection`, `series_next_player`,
+  `series_next_start`, and `series_next_start_recovery` events with
+  specific skip reasons. Native `y4()` diagnostics run **after** the
+  temporary visibility scope is cleared.
+
+The existing `SeriesNextPlayerRecoveryPolicyTest` now exercises the
+longer bounded window and named rejection reasons. CI is configured to
+assemble Debug and run Debug unit tests on `beta` pushes. Passing unit
+tests would not by itself establish actual device autoplay success:
+reproduce in the official 7.3.5.32 host using Home, Recents,
+in-app navigation, explicit media pause and first/middle/final episode.
+Collect the diagnostic ZIP to distinguish missing selection, late
+holder registration, blocked engine play, and resume-without-play.
