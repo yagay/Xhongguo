@@ -81,6 +81,25 @@ internal object NativeSeriesPort {
         val reason: String
     )
 
+    data class EngineReadiness(
+        val prepared: Boolean?,
+        val hasModel: Boolean?,
+        val playbackState: Int?
+    )
+
+    /** Read-only state of the exact official engine; no new decoder. */
+    fun engineReadiness(engine: Any?): EngineReadiness {
+        if (engine == null) return EngineReadiness(null, null, null)
+        fun invoke(name: String): Any? = try {
+            method(engine, name, 0)?.invoke(engine)
+        } catch (_: Throwable) { null }
+        return EngineReadiness(
+            prepared = invoke("isPrepared") as? Boolean,
+            hasModel = invoke("getVideoModel")?.let { true } ?: false,
+            playbackState = (invoke("getPlaybackState") as? Number)?.toInt()
+        )
+    }
+
     private fun field(obj: Any?, name: String): Any? {
         var type = obj?.javaClass
         while (type != null && type != Any::class.java) {
