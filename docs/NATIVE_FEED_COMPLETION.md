@@ -64,3 +64,34 @@ decoder would be unsafe and reintroduce the previously observed
 playback regression.
 
 No Release build or release publication should be triggered.
+
+## Direct J2 evidence and handoff observation
+
+The user-supplied official APK `classes4.dex` method table resolves:
+
+`adapter.e.J2(Z, String, Bundle, Z, Integer, Boolean, Boolean): void`
+
+The existing `p5` method has an `auto_next_episode` branch
+(`m15.l.U4 -> adapter.a.P0/G4`) and `auto_to_single` branch
+(`adapter.a.M0 -> ... -> ThreadUtils.postInForeground`). The
+second path correlates with the reported screen takeover. A business
+handoff is not equivalent to a completed new engine playback.
+
+`NativePlayerHandoff` hooks the precise *original* J2 instance method,
+records `feature=native_handoff stage=j2_enter/j2_exit` with monotonic
+call IDs, Boolean argument flags, presence of an options Bundle,
+background importance and original call duration. It calls
+`chain.proceed()` exactly once and never exposes raw strings,
+Bundle contents, identifiers or titles. The Activity launch is neither
+blocked nor modified.
+
+Correlate `feed_native original_decision`, `native_handoff j2_enter`,
+`foreground activity_launch`, `native_handoff j2_exit`, and
+`playback v3_progress confirmed`. `J2` does not prove shared-engine
+reuse by itself: after collecting one complete trace, inspect the
+actual tryShareCurrentPlayer callback and owner handoff before
+replacing the host UI-dependent transition.
+
+This is a diagnostic refactor milestone, not yet a background playback
+fix: the host can still foreground its Activity when it chooses
+`auto_to_single`. Do not merge this branch as the non-foreground fix.
