@@ -849,6 +849,17 @@ internal object SystemMediaBridge {
             (pager.javaClass.getMethod("getCurrentItem").invoke(pager)
                 as? Number)?.toInt() ?: -1
         } catch (_: Throwable) { -1 }
+        if (selectedIndex == requestedIndex && pagerIndex == requestedIndex) {
+            // A new x05.w can bind during original s4() BEFORE the after
+            // callback observes its selection. Reconcile exactly that
+            // already-captured holder, not a guessed/preloaded player.
+            nativePlayback.onNativeSelection(adapter, requestedIndex, true)
+            nativeSelectionScope.get()?.nextPlayer?.get()?.let { holder ->
+                seriesPlayerEngine(holder)?.let { bound ->
+                    nativePlayback.onNativeHolderBound(holder, bound)
+                }
+            }
+        }
         rememberAcceptedNativeNextEpisode(
             adapter, requestedIndex, selectedIndex, pagerIndex)
     }
