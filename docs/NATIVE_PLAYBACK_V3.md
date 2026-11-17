@@ -112,3 +112,25 @@ must remain visible as `v3_handoff pending` / `v3_selection degraded` rather
 than being hidden by a second transition. Validate the regression matrix on
 an actual device, particularly two successive background EOF handoffs,
 before promoting this branch. Only Debug builds should be used.
+
+## Metadata binding from the confirmed host selection
+
+The 2026-11-17 21:02 diagnostic shows confirmed native video progress
+(`v3_progress index=2,3`) while media resolution repeatedly reports
+`series-video-unverified`, even after official series detail was observed
+(`title=true, poster=true, total=true`). The engine video-ID namespace
+cannot always be joined to the Presenter SaasVideoData `vid`.
+
+`NativeSeriesV3.confirmedSelectedSeriesModel(engine)` now exposes a
+read-only host `adapter.l0()` model only when the engine is independently
+confirmed progressing and both native selection `D` and ViewPager2 index
+agree. `FullSeriesMediaInfo` uses that model only if its series ID has a
+matching official detail snapshot. This is an additional **identity source**
+inside the existing unified metadata resolver, not a new playback controller,
+timer, UI scrape or unconditional cached-title fallback. The old/new drama
+guard remains in place.
+
+Validate real-device title, poster and total on episodes 1 through 4 and on
+the first episode of a different drama; verify the last drama never leaks into
+the new MediaSession. The index-to-ordinal conversion remains conservative:
+when the complete playlist is not verified, do not guess the current episode.
