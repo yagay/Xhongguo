@@ -910,18 +910,28 @@ internal object FullSeriesMediaInfo {
         // A Presenter model may be one episode behind during autoplay.
         val nativeEpisode = SystemMediaBridge.verifiedNativeEpisodeNumber(
             activity, engine, stableTotal)
+        val selectedModel = SystemMediaBridge.verifiedSelectedNativeModel(
+            activity, engine)
+        val selectedOrdinal = SeriesEpisodeNumberPolicy.resolve(
+            number(field(selectedModel, "indexInList")),
+            number(field(selectedModel, "vidIndex")),
+            stableTotal, fullListVerified = false)
         val exactListEpisode = indexFromList(trustedDetail, videoId, stableTotal)
-        val episode = SeriesEpisodeNumberPolicy.label(
-            exactListEpisode ?: nativeEpisode, stableTotal)
+        // All these are tied to the PLAYING engine; a previously selected
+        // next episode cannot replace metadata before its native play().
+        val proven = exactListEpisode ?: selectedOrdinal ?: nativeEpisode
+        val episode = SeriesEpisodeNumberPolicy.label(proven, stableTotal)
             ?: fragment.episode
             ?: episodeFromIndex(playingModel, stableTotal)
             ?: episodeFromPager(pager, stableTotal)
             ?: stableTotal?.let { "全" + it + "集" }
-        if (nativeEpisode != null || exactListEpisode != null) {
+        if (proven != null) {
             FeatureTrace.event("media", "episode_ordinal", "verified",
-                "source=" + (if (exactListEpisode != null)
-                    "engine_matched_list" else "native_complete_playlist") +
-                    ",episode=" + (exactListEpisode ?: nativeEpisode) +
+                "source=" + when {
+                    exactListEpisode != null -> "engine_matched_complete_list"
+                    selectedOrdinal != null -> "confirmed_holder_selected_model"
+                    else -> "confirmed_native_complete_playlist"
+                } + ",episode=" + proven +
                     ",total=" + (stableTotal ?: -1L),
                 minIntervalMs = 1700L)
         }
