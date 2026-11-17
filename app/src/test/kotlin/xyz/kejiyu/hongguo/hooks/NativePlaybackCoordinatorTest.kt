@@ -44,6 +44,43 @@ class NativePlaybackCoordinatorTest {
         assertFalse(state.canContinueAcceptedSelection(adapter, 1, oldEngine))
     }
 
+    @Test fun earlyPlayCommandDoesNotClaimBackgroundEpisodeIsAudible() {
+        val state = NativePlaybackCoordinator()
+        val old = Any()
+        val next = Any()
+        val adapter = Any()
+        state.onNativePlay(old)
+        state.onNativeCompletion(old)
+        state.onNativeSelection(adapter, 3, accepted = true)
+        state.onNativeHolderBound(Any(), next)
+        state.onNativePlay(next, awaitingProgress = true)
+        assertEquals(NativePlaybackCoordinator.Phase.STARTING,
+            state.snapshot().phase)
+        assertNull(state.verifiedPlayingIndex(next, adapter))
+        assertFalse(state.canDispatchEpisodeCommand())
+        assertFalse(state.onNativeProgress(next, 0L, -1L))
+        assertFalse(state.onNativeProgress(next, 0L, 90000L))
+        assertFalse(state.onNativeProgress(next, 100L, 90000L))
+        assertTrue(state.onNativeProgress(next, 650L, 90000L))
+        assertEquals(NativePlaybackCoordinator.Phase.PLAYING,
+            state.snapshot().phase)
+        assertEquals(3, state.verifiedPlayingIndex(next, adapter))
+        assertTrue(state.canDispatchEpisodeCommand())
+    }
+
+    @Test fun cannotConfirmProgressForWrongEngineOrStalledPosition() {
+        val state = NativePlaybackCoordinator()
+        val engine = Any()
+        state.onNativePlay(engine, awaitingProgress = true)
+        assertFalse(state.onNativeProgress(Any(), 900L, 8000L))
+        assertFalse(state.onNativeProgress(engine, -1L, 8000L))
+        assertFalse(state.onNativeProgress(engine, 1200L, 8000L))
+        assertFalse(state.onNativeProgress(engine, 1200L, 8000L))
+        assertEquals(NativePlaybackCoordinator.Phase.STARTING,
+            state.snapshot().phase)
+        assertTrue(state.onNativeProgress(engine, 1650L, 8000L))
+    }
+
     @Test fun confirmsNextEpisodeOnlyAfterActualBoundEnginePlays() {
         val state = NativePlaybackCoordinator()
         val old = Any()
