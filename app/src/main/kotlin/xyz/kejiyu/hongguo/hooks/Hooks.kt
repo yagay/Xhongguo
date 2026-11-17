@@ -6423,7 +6423,7 @@ object Hooks {
         // -> v2.view.adapter.a.U1(String) -> G4().
         // Hook those existing native boundaries rather than simulating HOME.
         try {
-            val nativeSeries = Class.forName("x05.w", false, classLoader)
+            val nativeSeries = Class.forName(NativeSeriesPort.SERIES_PLAYER, false, classLoader)
             val nativeListener = Class.forName("vm4.a", false, classLoader)
             val engineClass = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
@@ -6578,10 +6578,10 @@ object Hooks {
             // original selection updater that writes adapter.a.D.
             try {
                 val fullSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.f",
+                    NativeSeriesPort.SERIES_ADAPTER,
                     false, classLoader)
                 val baseSeriesAdapter = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
+                    NativeSeriesPort.BASE_ADAPTER,
                     false, classLoader)
                 val boundaries = listOf(
                     Triple(fullSeriesAdapter, "U1",
@@ -7056,7 +7056,7 @@ object Hooks {
         // intercept it or synthesize a fake next episode.
         try {
             val seriesFragment = Class.forName(
-                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                NativeSeriesPort.SERIES_FRAGMENT,
                 false, classLoader)
             // 7.3.5.32: nh() returns the real adapter.f even before an
             // EOF/selection callback. Capture it for media skip controls.
