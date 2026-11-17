@@ -9,7 +9,7 @@ import java.lang.ref.WeakReference
  * the SAME confirmed episode and playing state.
  */
 internal class NativePlaybackCoordinator {
-    enum class Phase { IDLE, PLAYING, PAUSED, COMPLETED, SELECTED, BOUND }
+    enum class Phase { IDLE, STARTING, PLAYING, PAUSED, COMPLETED, SELECTED, BOUND }
 
     data class Snapshot(
         val generation: Long,
@@ -27,6 +27,7 @@ internal class NativePlaybackCoordinator {
     private var pendingIndex: Int? = null
     private var explicitlyPaused = false
     private var pauseEpoch = 0L
+    private var startupPositionMs: Long? = null
     private var activeEngine = WeakReference<Any>(null)
     private var finishedEngine = WeakReference<Any>(null)
     private var selectedAdapter = WeakReference<Any>(null)
@@ -64,7 +65,7 @@ internal class NativePlaybackCoordinator {
         // TTVideoEngine.play() can run from within x05.w.L() BEFORE the
         // hook's after-callback reports the binding. Confirm that late
         // binding rather than losing the newly playing episode.
-        if (activeEngine.get() === engine &&
+        if (activeEngine.get() === engine && phase != Phase.STARTING &&
             (phase == Phase.PLAYING ||
                 // Initial playback may be observed before its native
                 // adapter has reported the current position. This is NOT
@@ -95,7 +96,9 @@ internal class NativePlaybackCoordinator {
     }
 
     @Synchronized
-    fun onNativePlay(engine: Any) {
+    fun onNativePlay(engine: Any, awaitingProgress: Boolean = false) {
+        if (awaitingProgress && activeEngine.get() === engine &&
+            phase == Phase.STARTING) return
         val previous = activeEngine.get()
         val distinct = previous !== engine
         val pending = pendingIndex
@@ -119,7 +122,33 @@ internal class NativePlaybackCoordinator {
             finishedEngine.clear()
         }
         explicitlyPaused = false
+        startupPositionMs = null
+        phase = if (awaitingProgress) Phase.STARTING else Phase.PLAYING
+    }
+
+    /**
+     * TTVideoEngine.play() is only a COMMAND, not audible playback.
+     * Confirm a background handoff after a real prepared engine reports
+     * monotonic progress from its own timeline, never from stale pager UI.
+     */
+    @Synchronized
+    fun onNativeProgress(
+        engine: Any?, positionMs: Long, durationMs: Long
+    ): Boolean {
+        if (engine == null || activeEngine.get() !== engine ||
+            phase != Phase.STARTING || explicitlyPaused ||
+            durationMs !in 1000L..86_400_000L ||
+            positionMs < 0 || positionMs > durationMs + 1000L)
+            return false
+        val baseline = startupPositionMs
+        if (baseline == null || positionMs < baseline) {
+            startupPositionMs = positionMs
+            return false
+        }
+        if (positionMs - baseline < 350L) return false
         phase = Phase.PLAYING
+        startupPositionMs = null
+        return true
     }
 
     @Synchronized
@@ -140,6 +169,7 @@ internal class NativePlaybackCoordinator {
     fun onExplicitPause() {
         explicitlyPaused = true
         pauseEpoch++
+        startupPositionMs = null
         pendingIndex = null
         boundNextHolder.clear()
         boundNextEngine.clear()
@@ -199,6 +229,7 @@ internal class NativePlaybackCoordinator {
         playingIndex = null
         pendingIndex = null
         explicitlyPaused = false
+        startupPositionMs = null
         activeEngine.clear()
         finishedEngine.clear()
         selectedAdapter.clear()
