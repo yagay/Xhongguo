@@ -477,6 +477,10 @@ internal object NativeSeriesV3 {
                 releaseLease(e, "resume_exception")
                 trace("resume", "failed", t.javaClass.simpleName)
             }
+            // Check whether the host ever supplies a VideoModel or
+            // prepared engine. These probes never issue another play/skip.
+            inspectPendingSource(e, s.generation, 3500L)
+            inspectPendingSource(e, s.generation, 12000L)
             // Cleanup only — NEVER retry play/skip on a timer.
             handler.postDelayed({
                 if (state.isPendingEngine(e) &&
@@ -487,6 +491,36 @@ internal object NativeSeriesV3 {
                 }
             }, 45_000L)
         }
+    }
+
+    /**
+     * Observe actual host source assignment to the next accepted engine.
+     * No VideoModel IDs, URLs or proprietary payloads are recorded.
+     * This does not start playback or touch source selection.
+     */
+    fun onSourceModelAssigned(engine: Any?, suppliedModel: Any?) {
+        if (engine == null || !state.isPendingEngine(engine)) return
+        val snapshot = state.snapshot()
+        trace("source", "observed",
+            "event=setVideoModel,target=" + (snapshot.pendingIndex ?: -1) +
+                ",phase=" + snapshot.phase +
+                ",supplied=" + (suppliedModel != null) +
+                ",engineModel=" + (call(engine, "getVideoModel") != null))
+    }
+
+    /** A single snapshot of a pending native engine (diagnostic only). */
+    private fun inspectPendingSource(engine: Any, generation: Long, delayMs: Long) {
+        handler.postDelayed({
+            val snap = state.snapshot()
+            if (snap.generation != generation ||
+                !state.isPendingEngine(engine)) return@postDelayed
+            val source = call(engine, "getVideoModel") != null
+            val videoId = (call(engine, "getVideoID") as? String)?.isNotBlank() == true
+            val engineState = call(engine, "getPlaybackState") ?: "unknown"
+            trace("source", if (source) "observed" else "degraded",
+                "event=pending_audit,afterMs=$delayMs,phase=" + snap.phase +
+                    ",model=$source,videoId=$videoId,engineState=$engineState")
+        }, delayMs)
     }
 
     fun onEngineCommand(e: Any?, command: String) {
