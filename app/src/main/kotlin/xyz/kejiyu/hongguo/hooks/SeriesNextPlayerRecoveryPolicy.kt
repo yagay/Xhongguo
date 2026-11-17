@@ -24,12 +24,25 @@ internal object SeriesNextPlayerRecoveryPolicy {
         val alreadyAttempted: Boolean
     )
 
-    fun shouldResume(e: Evidence): Boolean =
-        e.background && e.nativeEofObserved && e.sameCompletedEngine &&
-            e.sameSeriesActivity && e.explicitPauseUnchanged &&
-            e.noNewEnginePlay && e.newHolder && e.listenerAttached &&
-            !e.alreadyAttempted && e.completionAgeMs in 1500L..9000L &&
-            e.targetIndex > 0 && e.targetIndex < e.loadedCount &&
-            e.selectionIndex == e.targetIndex &&
-            e.pagerIndex == e.targetIndex
+    /** Explicit skip reasons make device diagnostics actionable. A slow
+     * real host registration can be accepted for up to 15 seconds after EOF,
+     * but only with an unchanged selected page, engine and pause epoch. */
+    fun rejectionReason(e: Evidence): String? = when {
+        !e.background -> "not_background"
+        !e.nativeEofObserved -> "no_native_eof"
+        !e.sameCompletedEngine -> "completed_engine_changed"
+        !e.sameSeriesActivity -> "series_activity_changed"
+        !e.explicitPauseUnchanged -> "explicit_pause_or_owner_transition"
+        !e.noNewEnginePlay -> "new_engine_already_started"
+        !e.newHolder -> "not_distinct_next_holder"
+        !e.listenerAttached -> "next_holder_listener_missing"
+        e.alreadyAttempted -> "already_attempted"
+        e.completionAgeMs !in 1500L..15000L -> "outside_eof_window"
+        e.targetIndex <= 0 || e.targetIndex >= e.loadedCount -> "invalid_next_index"
+        e.selectionIndex != e.targetIndex -> "selection_not_committed"
+        e.pagerIndex != e.targetIndex -> "pager_not_aligned"
+        else -> null
+    }
+
+    fun shouldResume(e: Evidence): Boolean = rejectionReason(e) == null
 }
