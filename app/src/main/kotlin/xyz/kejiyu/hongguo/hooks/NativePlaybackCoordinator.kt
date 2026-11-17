@@ -154,9 +154,12 @@ internal class NativePlaybackCoordinator {
             phase == Phase.PLAYING) playingIndex
         else null
 
+    /** While the official next holder is selected/bound but not playing,
+     * another media-skip would move the pager AGAIN and break the host's
+     * in-flight native selection. Allow commands only from a settled player. */
     @Synchronized
     fun canDispatchEpisodeCommand(): Boolean =
-        phase != Phase.COMPLETED && phase != Phase.IDLE
+        phase == Phase.PLAYING || phase == Phase.PAUSED
 
     /** Only the already accepted host selection can have a one-shot
      * continuation. Never permit a second transition after new play(). */
