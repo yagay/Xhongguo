@@ -189,6 +189,10 @@ internal object NativeSeriesV3 {
 
     fun onCompletion(holder: Any?, finished: Any?) {
         if (holder?.javaClass?.name != SERIES_PLAYER || finished == null) return
+        // Feed and full-series share x05.w, but only a real Series Activity
+        // may advance this V3 state machine. Previously a FEED EOF could
+        // mark COMPLETED and block manual media controls as handoff_pending.
+        if (!SystemMediaBridge.isOfficialSeriesActivityCurrent()) return
         val current = currentEngine.get()
         if (current != null && current !== finished &&
             !state.isPendingEngine(finished)) return
@@ -440,7 +444,8 @@ internal object NativeSeriesV3 {
         if (bindingEngine.get() === e) bindingEngine.clear()
         val a = candidateAdapter.get()
         if (a != null && candidateHolder.get() === holder) bindNext(holder, a)
-        if (currentEngine.get() == null) {
+        if (currentEngine.get() == null && isSeriesRoute()) {
+            // A feed x05.w.L() is not the authoritative Series engine.
             currentEngine = WeakReference(e)
             currentHolder = WeakReference(holder)
         }
