@@ -7800,6 +7800,17 @@ object Hooks {
                 } else chain.proceed()
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
+                // Official feed EOF can fire while another application is
+                // foreground. Do not launch a new fullscreen Series Activity
+                // over that application. Foreground/manual navigation and
+                // all already-open Series autoplay stay untouched.
+                val source = chain.thisObject as? Activity
+                val requestedIntent = chain.getArg(0) as? Intent
+                if (ForegroundLaunchTrace.shouldSuppressBackgroundFeedEofLaunch(
+                        source, requestedIntent)) {
+                    LogUtil.warn("系统媒体: 已阻止后台刷剧结束后自动弹出全集页面")
+                    return@ham null
+                }
                 try {
                     ForegroundLaunchTrace.activityStart(
                         chain.thisObject as? Activity, chain.getArg(0) as? Intent,
