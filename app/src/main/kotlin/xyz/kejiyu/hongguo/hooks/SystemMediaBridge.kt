@@ -1430,6 +1430,23 @@ internal object SystemMediaBridge {
         rememberSeriesAdapter(adapter)
     }
 
+    /** True only for the verified series engine before Activity.onStop.
+     * The native listener is often removed DURING the provisional exit,
+     * before Android has committed real background importance. */
+    fun isOfficialSeriesPrePauseHandoff(engine: Any?): Boolean {
+        val activity = foregroundActivity.get() ?: return false
+        if (!enabled || engine == null || userCommandInProgress ||
+            activity.javaClass.name !=
+                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            videoEngine.get() !== engine) return false
+        return backgroundTransition.canKeepPreparedOnStop(
+            ownerActivity = activity, ownerEngine = engine,
+            explicitPauseEpoch = explicitPauseEpoch,
+            explicitCommand = userCommandInProgress,
+            ownershipSwitch = SinglePlaybackOwner.isOwnershipTransition(),
+            nowMs = SystemClock.uptimeMillis())
+    }
+
 
     /**
      * APK-verified completion stages:
