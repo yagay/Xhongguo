@@ -44,6 +44,21 @@ class NativePlaybackCoordinatorTest {
         assertNull(state.verifiedPlayingIndex(old, adapter))
     }
 
+    @Test fun handlesEnginePlayBeforeAfterHookReportsHolderBinding() {
+        val state = NativePlaybackCoordinator()
+        val adapter = Any()
+        val old = Any()
+        val next = Any()
+        state.onNativePlay(old)
+        state.onNativeCompletion(old)
+        state.onNativeSelection(adapter, 3, accepted = true)
+        state.onNativePlay(next)
+        assertNull(state.verifiedPlayingIndex(next, adapter))
+        state.onNativeHolderBound(Any(), next)
+        assertEquals(3, state.verifiedPlayingIndex(next, adapter))
+        assertNull(state.snapshot().pendingIndex)
+    }
+
     @Test fun explicitPauseCancelsPendingNativeEpisode() {
         val state = NativePlaybackCoordinator()
         val adapter = Any()
