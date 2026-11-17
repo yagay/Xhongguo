@@ -1510,7 +1510,10 @@ internal object SystemMediaBridge {
                 lastVisibleInfoAt = now
                 captureVisibleMediaInfo(activeActivity)
             }
-            if (knownPlaying) scheduleTimelinePoll(1400L)
+            if (knownPlaying ||
+                nativePlayback.snapshot().phase ==
+                    NativePlaybackCoordinator.Phase.STARTING)
+                scheduleTimelinePoll(1400L)
         }
     }
 
@@ -1556,6 +1559,21 @@ internal object SystemMediaBridge {
                 bufferedMs = durationMs * loaded / 100L
             if (speed != null && speed.isFinite() && speed in 0.25f..4f)
                 actualPlaybackSpeed = speed
+
+            // Same official engine, valid video duration and actual time
+            // progression: this is evidence of playback, unlike play().
+            if (nativePlayback.onNativeProgress(engine, positionMs, durationMs)) {
+                NativeSeriesPort.finishAcceptedBackgroundEpisode(
+                    engine, "progress_confirmed")
+                LogUtil.info("系统媒体: 后台下一集真正开始播放" +
+                    " positionMs=$positionMs durationMs=$durationMs")
+                FeatureTrace.event("background", "series_next_start", "ok",
+                    "route=native_timeline_progress,positionMs=" + positionMs,
+                    flow=mediaFlow)
+                onNativePlayback(true, "native-next-progress-confirmed", engine)
+                updateSessionMetadata()
+                updateSessionState(true)
+            }
 
             val now = SystemClock.uptimeMillis()
             if (now - lastProgressDiagnosticAt > 15000L) {
@@ -2049,9 +2067,13 @@ internal object SystemMediaBridge {
         if (!enabled || candidate == null) return
         if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
         if (action == "play") {
-            nativePlayback.onNativePlay(candidate)
+            val pendingBackgroundStart =
+                NativeSeriesPort.hasActiveNoSurfaceMode(candidate)
+            nativePlayback.onNativePlay(candidate,
+                awaitingProgress = pendingBackgroundStart)
             FeatureTrace.event("playback", "native_playback_state",
-                "playing", "generation=" + nativePlayback.snapshot().generation +
+                if (pendingBackgroundStart) "starting" else "playing",
+                "generation=" + nativePlayback.snapshot().generation +
                     ",episode=" + (nativePlayback.snapshot().playingIndex ?: -1),
                 flow=mediaFlow, minIntervalMs=100L)
             pendingNativeNextStart?.takeIf {
@@ -2059,8 +2081,9 @@ internal object SystemMediaBridge {
                     it.activity.get() === foregroundActivity.get() &&
                     it.completedEngine.get() !== candidate
             }?.let {
-                FeatureTrace.event("background", "series_next_start", "ok",
-                    "route=native_engine_play,index=" + it.targetIndex,
+                FeatureTrace.event("background", "series_next_start",
+                    "requested", "route=native_engine_play_command,index=" +
+                        it.targetIndex,
                     flow=mediaFlow)
             }
             if (videoEngine.get() !== candidate) {
@@ -2127,11 +2150,21 @@ internal object SystemMediaBridge {
         }
         if (action == "play") {
             lastLifecyclePauseWasPlaying = false
-            onNativePlayback(true, "TTVideoEngine#play", candidate)
+            val needsProgress = NativeSeriesPort.hasActiveNoSurfaceMode(candidate)
+            if (needsProgress) {
+                // TTVideoEngine.play() with state=0 is not audible playback.
+                // Keep the existing session active but do not claim PLAYING
+                // until the new engine actually advances its own clock.
+                knownPlaying = false
+                updateSessionState(false)
+                FeatureTrace.event("background", "native_start_verification",
+                    "pending", "engineBound=true,await=prepared_progress",
+                    flow=mediaFlow)
+            } else onNativePlayback(true, "TTVideoEngine#play", candidate)
             captureNativePlayEntity("engine-play")
             readCurrentTimeline()
             updateSessionMetadata()
-            updateSessionState(true)
+            updateSessionState(knownPlaying)
             scheduleTimelinePoll(600L)
             // The native Activity can still be drawing its title/episode overlay.
             val act = foregroundActivity.get()
@@ -3023,6 +3056,8 @@ internal object SystemMediaBridge {
             !play && reason == "notification-action") {
             explicitPauseEpoch++
             nativePlayback.onExplicitPause()
+            NativeSeriesPort.finishAcceptedBackgroundEpisode(
+                null, "explicit_pause")
             pendingExit = null
             backgroundTransition.cancel()
             backgroundPauseGuardEngine.clear()
@@ -3179,6 +3214,8 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
+        NativeSeriesPort.finishAcceptedBackgroundEpisode(
+            null, "media_bridge_stop")
         nativePlayback.reset()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
