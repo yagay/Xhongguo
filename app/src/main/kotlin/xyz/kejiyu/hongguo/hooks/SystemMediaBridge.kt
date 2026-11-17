@@ -475,14 +475,14 @@ internal object SystemMediaBridge {
         activity: Activity?, engine: Any?, total: Long?
     ): Long? {
         if (activity == null || engine == null || total == null ||
-            total !in 1L..5000L || episodeMonitor.hasNativeCompletion() ||
-            videoEngine.get() !== engine ||
-            seriesPlayerEngine(nativeSeriesPlayer.get()) !== engine)
+            total !in 1L..5000L || videoEngine.get() !== engine)
             return null
+        val verified = NativeSeriesV3.confirmedEpisodeIndex(engine)
+            ?: return null
         val nav = seriesNavigation() ?: return null
-        if (nav.activity !== activity || nav.count.toLong() != total)
-            return null
-        return nav.index.toLong() + 1L
+        if (nav.activity !== activity || nav.count.toLong() != total ||
+            nav.index != verified) return null
+        return verified.toLong() + 1L
     }
 
     private fun requestEpisodeSkip(delta: Int, reason: String) {
@@ -496,7 +496,7 @@ internal object SystemMediaBridge {
                 if (result == "selected") "requested" else "degraded",
                 "source=$reason,route=host_business,indexDelta=$delta,result=$result",
                 flow=mediaFlow)
-            LogUtil.info("系统媒体V2: 官方业务切集 delta=$delta result=$result")
+            LogUtil.info("系统媒体V3: 官方业务切集 delta=$delta result=$result")
             mediaRefresh.onNativeDataChanged()
             updateSessionState(knownPlaying)
         }
