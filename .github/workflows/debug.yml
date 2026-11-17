@@ -2,7 +2,7 @@ name: Debug APK
 
 on:
   push:
-    branches: [main, beta, feature/module-settings-app]
+    branches: [main, beta, refactor/native-playback-v2, feature/module-settings-app]
   pull_request:
     branches: [main]
   workflow_dispatch:
