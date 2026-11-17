@@ -6291,7 +6291,7 @@ object Hooks {
                                 // for the next SERIES holder. Never reject
                                 // native play before series ownership is
                                 // confirmed by the source/progress pipeline.
-                                !OfficialSeriesPlayback.isSeriesEngine(
+                                !NativeSeriesV3.isSeriesEngine(
                                     chain.thisObject) &&
                                 SinglePlaybackOwner.shouldBlockPlay(chain.thisObject)) {
                                 // This is a retired engine from another page.
@@ -6317,14 +6317,14 @@ object Hooks {
                             try {
                                 if (method.name == "play") {
                                     if (gMasterOn && (gMiniPlayerOn || gSystemMediaOn) &&
-                                        !OfficialSeriesPlayback.isSeriesEngine(
+                                        !NativeSeriesV3.isSeriesEngine(
                                             chain.thisObject))
                                         SinglePlaybackOwner.onEnginePlayed(chain.thisObject)
                                     InAppMiniPlayer.rememberNativeEngine(chain.thisObject)
                                 }
                                 if (method.name == "releaseAsync")
                                     SinglePlaybackOwner.onEngineReleased(chain.thisObject)
-                                OfficialSeriesPlayback.onEngineCommand(
+                                NativeSeriesV3.onEngineCommand(
                                     chain.thisObject, method.name)
                                 InAppMiniPlayer.onNativeEngineAction(
                                     chain.thisObject, method.name)
@@ -6392,7 +6392,7 @@ object Hooks {
                                                         // SOLE authoritative series EOF.
                                                         // Keep SDK callback observation
                                                         // only for other playback routes.
-                                                        if (!OfficialSeriesPlayback.isSeriesRoute())
+                                                        if (!NativeSeriesV3.isSeriesRoute())
                                                             SystemMediaBridge.onNativeCompletion(
                                                                 callbackChain.getArg(0))
                                                     } catch (e: Throwable) {
@@ -6452,16 +6452,16 @@ object Hooks {
             // End-of-video: observe BEFORE calling the original, because
             // x05.w.onCompletion synchronously enters adapter.f.U1/s4/G4.
             module.hook(playerClass.getDeclaredMethod("onCompletion", engineClass))
-                .setId("v2SeriesOnCompletion")
+                .setId("v3SeriesOnCompletion")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     if (gMasterOn && gSystemMediaOn) {
                         try {
-                            OfficialSeriesPlayback.onCompletion(
+                            NativeSeriesV3.onCompletion(
                                 chain.thisObject, chain.getArg(0))
                             SystemMediaBridge.onNativeCompletion(chain.getArg(0))
                         } catch (t: Throwable) {
-                            LogUtil.warn("V2 EOF observer: " + t.javaClass.simpleName)
+                            LogUtil.warn("V3 EOF observer: " + t.javaClass.simpleName)
                         }
                     }
                     chain.proceed()
@@ -6470,15 +6470,15 @@ object Hooks {
 
             // Bind the official engine/holder. No independent decoder.
             module.hook(playerClass.getDeclaredMethod("L", engineClass))
-                .setId("v2SeriesEngineBound")
+                .setId("v3SeriesEngineBound")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     if (gMasterOn && gSystemMediaOn)
-                        OfficialSeriesPlayback.onEngineBindingStart(
+                        NativeSeriesV3.onEngineBindingStart(
                             chain.thisObject, chain.getArg(0))
                     val result = chain.proceed()
                     if (gMasterOn && gSystemMediaOn) try {
-                        OfficialSeriesPlayback.onEngineBound(
+                        NativeSeriesV3.onEngineBound(
                             chain.thisObject, chain.getArg(0))
                     } catch (_: Throwable) { }
                     result
@@ -6488,80 +6488,91 @@ object Hooks {
             for (action in listOf("v", "f")) {
                 try {
                     module.hook(playerClass.getDeclaredMethod(action, listenerClass))
-                        .setId("v2SeriesListener_" + action)
+                        .setId("v3SeriesListener_" + action)
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val listener = chain.getArg(0)
                             if (action == "f" && gMasterOn && gSystemMediaOn &&
-                                OfficialSeriesPlayback.shouldRetainCompletionListener(
+                                NativeSeriesV3.shouldRetainCompletionListener(
                                     chain.thisObject, listener)) return@Hooker null
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) try {
-                                OfficialSeriesPlayback.onListener(
+                                NativeSeriesV3.onListener(
                                     chain.thisObject, listener, action == "v")
                             } catch (_: Throwable) { }
                             result
                         })
                     nativeCount++
                 } catch (t: Throwable) {
-                    LogUtil.warn("V2 listener " + action + " unavailable: " +
+                    LogUtil.warn("V3 listener " + action + " unavailable: " +
                         t.javaClass.simpleName)
                 }
             }
 
             module.hook(seriesAdapter.getDeclaredMethod("U1", String::class.java))
-                .setId("v2SeriesHostAutoplay")
+                .setId("v3SeriesHostAutoplay")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     if (gMasterOn && gSystemMediaOn)
-                        OfficialSeriesPlayback.onAutoplay(chain.thisObject, "before")
+                        NativeSeriesV3.onAutoplay(chain.thisObject, "before")
                     try { chain.proceed() }
                     finally {
                         if (gMasterOn && gSystemMediaOn)
-                            OfficialSeriesPlayback.onAutoplay(
+                            NativeSeriesV3.onAutoplay(
                                 chain.thisObject, "after")
                     }
                 })
             nativeCount++
 
             module.hook(baseAdapter.getDeclaredMethod("G4"))
-                .setId("v2SeriesHostG4")
+                .setId("v3SeriesHostG4")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     if (gMasterOn && gSystemMediaOn)
-                        OfficialSeriesPlayback.onG4(chain.thisObject, "before")
+                        NativeSeriesV3.onG4(chain.thisObject, "before")
                     try { chain.proceed() }
                     finally {
                         if (gMasterOn && gSystemMediaOn)
-                            OfficialSeriesPlayback.onG4(chain.thisObject, "after")
+                            NativeSeriesV3.onG4(chain.thisObject, "after")
                     }
                 })
             nativeCount++
 
-            // Read the ACTUAL autoplay-block decision made inside G4.
-            // Do not call i9() or I4() from a diagnostic probe: both are
-            // native business-policy methods, not free getters.
-            try {
-                val controllerClass = Class.forName("j15.d", false, classLoader)
-                val gates = controllerClass.declaredMethods.filter {
+            // j15.d is an INTERFACE in the APK; hooking i9() there throws
+            // IllegalArgumentException. Discover and install its concrete
+            // implementation from adapter.a.m before original s4 proceeds.
+            val observedAutoPlayGates =
+                java.util.Collections.synchronizedSet(
+                    mutableSetOf<java.lang.reflect.Method>())
+            fun ensureConcreteAutoplayGate(controller: Any) {
+                val gate = controller.javaClass.methods.firstOrNull {
                     it.name == "i9" && it.parameterCount == 0 &&
-                        it.returnType == Boolean::class.javaPrimitiveType
-                }
-                for ((index, gate) in gates.withIndex()) {
+                        it.returnType == Boolean::class.javaPrimitiveType &&
+                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                } ?: controller.javaClass.declaredMethods.firstOrNull {
+                    it.name == "i9" && it.parameterCount == 0 &&
+                        it.returnType == Boolean::class.javaPrimitiveType &&
+                        !java.lang.reflect.Modifier.isAbstract(it.modifiers)
+                } ?: return
+                if (!observedAutoPlayGates.add(gate)) return
+                try {
                     module.hook(gate)
-                        .setId("v2SeriesNativeAutoplayGate_" + index)
+                        .setId("v3SeriesConcreteI9_" +
+                            gate.declaringClass.name.hashCode())
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            val result = chain.proceed()
+                        .intercept(Hooker { original ->
+                            val result = original.proceed()
                             if (gMasterOn && gSystemMediaOn)
-                                OfficialSeriesPlayback.onNativeAutoplayGate(
-                                    chain.thisObject, result)
+                                NativeSeriesV3.onNativeAutoplayGate(
+                                    original.thisObject, result)
                             else result
                         })
                     nativeCount++
+                } catch (t: Throwable) {
+                    observedAutoPlayGates.remove(gate)
+                    LogUtil.warn("V3 concrete i9 hook unavailable: " +
+                        t.javaClass.simpleName)
                 }
-            } catch (e: Throwable) {
-                LogUtil.warn("V2 i9 native gate: " + e.javaClass.simpleName)
             }
 
             // Observe *only* original s4 selections, never synthesize an
@@ -6574,6 +6585,7 @@ object Hooks {
             fun ensureVisibilityQuery(a: Any) {
                 val controller = SystemMediaBridge.getNativeSeriesPageController(a)
                     ?: return
+                ensureConcreteAutoplayGate(controller)
                 val query = controller.javaClass.methods.firstOrNull {
                     it.name == "y4" && it.parameterCount == 0 &&
                         it.returnType == Boolean::class.javaPrimitiveType &&
@@ -6582,13 +6594,13 @@ object Hooks {
                 if (!installedVisibilityQueries.add(query)) return
                 try {
                     module.hook(query)
-                        .setId("v2SeriesInvisible_" +
+                        .setId("v3SeriesInvisible_" +
                             query.declaringClass.name.hashCode())
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { q ->
                             val answer = q.proceed()
                             if (answer == true && gMasterOn && gSystemMediaOn &&
-                                OfficialSeriesPlayback.shouldMaskInvisiblePage(
+                                NativeSeriesV3.shouldMaskInvisiblePage(
                                     q.thisObject)) false else answer
                         })
                     nativeCount++
@@ -6600,7 +6612,7 @@ object Hooks {
 
             module.hook(baseAdapter.getDeclaredMethod(
                 "s4", Int::class.javaPrimitiveType))
-                .setId("v2SeriesNativeSelection")
+                .setId("v3SeriesNativeSelection")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     val enabled = gMasterOn && gSystemMediaOn
@@ -6608,22 +6620,22 @@ object Hooks {
                     var scoped = false
                     if (enabled) try {
                         ensureVisibilityQuery(chain.thisObject)
-                        scoped = OfficialSeriesPlayback.beginVisibilityScope(
+                        scoped = NativeSeriesV3.beginVisibilityScope(
                             chain.thisObject, target)
                     } catch (t: Throwable) {
-                        LogUtil.warn("V2 s4 before: " + t.javaClass.simpleName)
+                        LogUtil.warn("V3 s4 before: " + t.javaClass.simpleName)
                     }
                     try {
                         val result = chain.proceed()
                         if (enabled) try {
-                            OfficialSeriesPlayback.onSelection(
+                            NativeSeriesV3.onSelection(
                                 chain.thisObject, target, result)
                         } catch (t: Throwable) {
-                            LogUtil.warn("V2 s4 after: " + t.javaClass.simpleName)
+                            LogUtil.warn("V3 s4 after: " + t.javaClass.simpleName)
                         }
                         result
                     } finally {
-                        if (scoped) OfficialSeriesPlayback.endVisibilityScope()
+                        if (scoped) NativeSeriesV3.endVisibilityScope()
                     }
                 })
             nativeCount++
@@ -6637,27 +6649,27 @@ object Hooks {
                 }
                 for ((idx, callback) in methods.withIndex()) try {
                     module.hook(callback)
-                        .setId("v2SeriesSource_" + name + "_" + idx)
+                        .setId("v3SeriesSource_" + name + "_" + idx)
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) try {
                                 val engine = chain.getArg(0)
                                 if (name == "onError")
-                                    OfficialSeriesPlayback.onError(
+                                    NativeSeriesV3.onError(
                                         chain.thisObject, engine, "native_onError")
-                                else OfficialSeriesPlayback.onReadiness(
+                                else NativeSeriesV3.onReadiness(
                                     chain.thisObject, name, engine)
                             } catch (_: Throwable) { }
                             result
                         })
                     nativeCount++
                 } catch (t: Throwable) {
-                    LogUtil.warn("V2 source callback " + name + " unavailable: " +
+                    LogUtil.warn("V3 source callback " + name + " unavailable: " +
                         t.javaClass.simpleName)
                 }
             }
-            LogUtil.info("  ✓ 原生播放V2，全集业务 Hook 已替换，安装数=" +
+            LogUtil.info("  ✓ 原生播放V3，全集业务 Hook 已替换，安装数=" +
                 nativeCount + "；旧 timer/pager/dual-owner Hook 不安装")
         } catch (t: Throwable) {
             LogUtil.warn("V2 官方全集业务 Hook 安装失败: " +
