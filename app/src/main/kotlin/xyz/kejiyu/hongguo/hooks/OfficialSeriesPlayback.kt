@@ -436,15 +436,24 @@ internal object OfficialSeriesPlayback {
         log("error", "degraded", message)
     }
 
-    fun awaitingProgress(e: Any?): Boolean =
-        timeline.isPendingEngine(e) &&
-            timeline.snapshot().phase in setOf(
-                OfficialSeriesTimeline.Phase.BOUND,
+    fun awaitingProgress(e: Any?): Boolean {
+        if (e == null) return false
+        if (timeline.isPendingEngine(e)) return timeline.snapshot().phase in
+            setOf(OfficialSeriesTimeline.Phase.BOUND,
                 OfficialSeriesTimeline.Phase.STARTING)
+        // First series episode also needs a genuine engine-progress proof.
+        return currentEngine.get() === e &&
+            timeline.snapshot().phase == OfficialSeriesTimeline.Phase.IDLE &&
+            initialOwnerConfirmed.get() !== e
+    }
 
-    fun needsProgressPolling(): Boolean = timeline.snapshot().phase in setOf(
-        OfficialSeriesTimeline.Phase.BOUND,
-        OfficialSeriesTimeline.Phase.STARTING)
+    fun needsProgressPolling(): Boolean =
+        timeline.snapshot().phase in setOf(
+            OfficialSeriesTimeline.Phase.BOUND,
+            OfficialSeriesTimeline.Phase.STARTING) ||
+            (isSeriesRoute() && currentEngine.get() != null &&
+                timeline.snapshot().phase == OfficialSeriesTimeline.Phase.IDLE &&
+                initialOwnerConfirmed.get() !== currentEngine.get())
 
     fun onProgress(e: Any?, pos: Long, duration: Long): Boolean {
         if (e == null) return false
