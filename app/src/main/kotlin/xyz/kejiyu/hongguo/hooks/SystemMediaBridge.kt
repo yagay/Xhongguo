@@ -578,6 +578,56 @@ internal object SystemMediaBridge {
             rememberSeriesAdapter(adapter)
     }
 
+    private fun discoverSeriesAdapter(activity: Activity) {
+        if (!enabled || activity.javaClass.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ||
+            foregroundActivity.get() !== activity || activity.isFinishing) return
+        val root = try {
+            activity.javaClass.methods.firstOrNull {
+                it.name == "getSupportFragmentManager" &&
+                    it.parameterCount == 0
+            }?.invoke(activity)
+        } catch (_: Throwable) { null } ?: return
+        val queue = java.util.ArrayDeque<Pair<Any, Int>>()
+        queue.add(root to 0)
+        var seen = 0
+        while (queue.isNotEmpty() && seen++ < 24) {
+            val (manager, depth) = queue.removeFirst()
+            val fragments = try {
+                manager.javaClass.methods.firstOrNull {
+                    it.name == "getFragments" && it.parameterCount == 0
+                }?.invoke(manager) as? List<*>
+            } catch (_: Throwable) { null } ?: continue
+            for (fragment in fragments) {
+                if (fragment == null) continue
+                if (fragment.javaClass.name ==
+                    "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment") {
+                    val native = try {
+                        fragment.javaClass.declaredMethods.firstOrNull {
+                            it.name == "nh" && it.parameterCount == 0
+                        }?.apply { isAccessible = true }?.invoke(fragment)
+                    } catch (_: Throwable) { null }
+                    if (isSeriesAdapter(native)) {
+                        rememberSeriesAdapter(native)
+                        return
+                    }
+                }
+                if (depth < 3) {
+                    val child = try {
+                        fragment.javaClass.methods.firstOrNull {
+                            it.name == "getChildFragmentManager" &&
+                                it.parameterCount == 0
+                        }?.invoke(fragment)
+                    } catch (_: Throwable) { null }
+                    if (child != null) queue.add(child to depth + 1)
+                }
+            }
+        }
+        FeatureTrace.event("media", "series_navigation", "degraded",
+            "reason=no_native_adapter_in_fragments", flow=mediaFlow,
+            minIntervalMs=5000L)
+    }
+
     private data class SeriesNavigation(
         val adapter: Any,
         val activity: Activity,
@@ -669,8 +719,34 @@ internal object SystemMediaBridge {
             handler.postDelayed({
                 if (nativeSeriesAdapter.get() !== nav.adapter ||
                     foregroundActivity.get() !== nav.activity) return@postDelayed
-                val selected = (inheritedFieldValue(nav.adapter, "D")
+                var selected = (inheritedFieldValue(nav.adapter, "D")
                     as? Number)?.toInt()
+                val pagerAt = try {
+                    (nav.pager.javaClass.getMethod("getCurrentItem")
+                        .invoke(nav.pager) as? Number)?.toInt()
+                } catch (_: Throwable) { null }
+                // Only for an explicit user skip: if the ViewPager has
+                // selected the target but the host business index lagged,
+                // reconcile that SAME page through the official r4 once.
+                // Never advance by another page or loop at EOF.
+                if (selected != target && pagerAt == target) {
+                    try {
+                        val r4 = nav.adapter.javaClass.methods.firstOrNull {
+                            it.name == "r4" && it.parameterCount == 1 &&
+                                it.parameterTypes[0] == Int::class.javaPrimitiveType
+                        }
+                        val accepted = r4?.invoke(nav.adapter, target)
+                        selected = (inheritedFieldValue(nav.adapter, "D")
+                            as? Number)?.toInt()
+                        FeatureTrace.event("media", "episode_skip_reconcile",
+                            if (selected == target) "ok" else "degraded",
+                            "target=$target,accepted=$accepted", flow=mediaFlow)
+                    } catch (e: Throwable) {
+                        FeatureTrace.event("media", "episode_skip_reconcile",
+                            "fail", "type=" + e.javaClass.simpleName,
+                            flow=mediaFlow)
+                    }
+                }
                 FeatureTrace.event("media", "episode_skip",
                     if (selected == target) "selected" else "degraded",
                     "source=$reason,target=$target,selected=" +
@@ -2805,6 +2881,15 @@ internal object SystemMediaBridge {
                 if (enabled && foregroundActivity.get() === activity && !activity.isFinishing)
                     captureVisibleMediaInfo(activity)
             }, delay)
+        }
+        if (activity.javaClass.name ==
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") {
+            for (delay in longArrayOf(650L, 1800L)) {
+                handler.postDelayed({
+                    if (enabled && foregroundActivity.get() === activity &&
+                        !activity.isFinishing) discoverSeriesAdapter(activity)
+                }, delay)
+            }
         }
         // A running TTVideoEngine/VideoContext can start before the Activity
         // reaches onResume; inspect again after its UI and video surface attach.
