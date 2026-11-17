@@ -31,6 +31,16 @@ class NativePlaybackCoordinatorTest {
         assertNull(state.snapshot().pendingIndex)
     }
 
+    @Test fun initialNativeHolderCanConfirmAlreadyPlayingEngine() {
+        val state = NativePlaybackCoordinator()
+        val adapter = Any()
+        val engine = Any()
+        state.onNativePlay(engine)
+        state.onNativeSelection(adapter, 0, accepted = true)
+        state.onNativeHolderBound(Any(), engine)
+        assertEquals(0, state.verifiedPlayingIndex(engine, adapter))
+    }
+
     @Test fun ignoresPreloadedEngineAndUnacceptedSelection() {
         val state = NativePlaybackCoordinator()
         val adapter = Any()
