@@ -664,6 +664,22 @@ internal object SystemMediaBridge {
      * An early listener is captured now; a late registration matches the
      * same adapter, EOF generation, activity and selected index afterwards.
      */
+    fun onNativeSeriesSelectionCompleted(
+        adapter: Any?, requestedIndex: Int?, accepted: Any?
+    ) {
+        if (accepted != true || adapter == null || requestedIndex == null ||
+            nativeSelectionScope.get()?.adapter !== adapter) return
+        val selectedIndex = (inheritedFieldValue(adapter, "D") as? Number)
+            ?.toInt() ?: return
+        val pager = inheritedFieldValue(adapter, "k") ?: return
+        val pagerIndex = try {
+            (pager.javaClass.getMethod("getCurrentItem").invoke(pager)
+                as? Number)?.toInt() ?: -1
+        } catch (_: Throwable) { -1 }
+        rememberAcceptedNativeNextEpisode(
+            adapter, requestedIndex, selectedIndex, pagerIndex)
+    }
+
     private fun rememberAcceptedNativeNextEpisode(
         adapter: Any, targetIndex: Int, selectedIndex: Int, pagerIndex: Int
     ) {
@@ -943,11 +959,6 @@ internal object SystemMediaBridge {
                     ",pager=" + pagerIndex +
                     ",invisible=" + (pageInvisible?.toString() ?: "unknown"),
                 flow = mediaFlow, minIntervalMs = 100L)
-        }
-        if (method == "a.s4" && phase == "after" &&
-            result == true && selected != null) {
-            rememberAcceptedNativeNextEpisode(
-                target, selected, selectedIndex, pagerIndex)
         }
         if (method == "a.s4" && phase == "before" &&
             episodeMonitor.hasNativeCompletion()) {
