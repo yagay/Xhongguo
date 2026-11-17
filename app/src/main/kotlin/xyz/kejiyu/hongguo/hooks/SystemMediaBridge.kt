@@ -967,6 +967,9 @@ internal object SystemMediaBridge {
         val next = pending.player.get() ?: return false
         val adapter = pending.adapter.get() ?: return false
         val activity = pending.activity.get() ?: return false
+        if (!nativePlayback.canContinueAcceptedSelection(
+                adapter, pending.targetIndex, pending.completedEngine.get()))
+            return false
         return foregroundActivity.get() === activity &&
             !activity.isFinishing && !activity.hasWindowFocus() &&
             seriesPlayerEngine(next) === candidate &&
