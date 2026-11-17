@@ -1430,6 +1430,17 @@ internal object SystemMediaBridge {
         rememberSeriesAdapter(adapter)
     }
 
+    /** Preserve the original holder reference used by background snapshot,
+     * media metadata and playback controls. Do not adopt a preloaded NEXT
+     * holder until its engine is actually the active TTVideoEngine. */
+    fun rememberOfficialSeriesHolder(holder: Any?, engine: Any?) {
+        if (!enabled || holder?.javaClass?.name != "x05.w" ||
+            engine == null || !isOfficialSeriesActivityCurrent()) return
+        val active = videoEngine.get()
+        if (active == null || active === engine)
+            nativeSeriesPlayer = WeakReference(holder)
+    }
+
     /** True only for the verified series engine before Activity.onStop.
      * The native listener is often removed DURING the provisional exit,
      * before Android has committed real background importance. */
