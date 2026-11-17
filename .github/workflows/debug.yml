@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, beta, refactor/native-playback-v2, feature/module-settings-app]
   pull_request:
-    branches: [main]
+    branches: [main, beta]
   workflow_dispatch:
 
 permissions:
