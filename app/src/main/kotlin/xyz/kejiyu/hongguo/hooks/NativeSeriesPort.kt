@@ -18,6 +18,52 @@ internal object NativeSeriesPort {
     const val EPISODE_MODEL =
         "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData"
 
+    data class Compatibility(
+        val present: Int,
+        val expected: Int,
+        val missing: List<String>
+    ) {
+        val compatible: Boolean get() = missing.isEmpty()
+    }
+
+    /** Observe signature drift once at install time. Class existence alone
+     * does not prove that a particular obfuscated business Hook can work. */
+    fun verify(loader: ClassLoader): Compatibility {
+        val spec = listOf(
+            Triple(SERIES_PLAYER, "onCompletion", 1),
+            Triple(SERIES_PLAYER, "L", 1),
+            Triple(SERIES_PLAYER, "resume", 0),
+            Triple(SERIES_PLAYER, "v", 1),
+            Triple(BASE_ADAPTER, "A1", 0),
+            Triple(BASE_ADAPTER, "s4", 1),
+            Triple(BASE_ADAPTER, "l0", 0),
+            Triple(SERIES_ADAPTER, "g", 0),
+            Triple(SERIES_ADAPTER, "r4", 1),
+            Triple(SERIES_FRAGMENT, "nh", 0)
+        )
+        val missing = ArrayList<String>()
+        for ((className, methodName, arity) in spec) {
+            val found = try {
+                val type = Class.forName(className, false, loader)
+                var owner: Class<*>? = type
+                var exists = false
+                while (owner != null && owner != Any::class.java) {
+                    if (owner.declaredMethods.any {
+                            it.name == methodName && it.parameterCount == arity
+                        }) {
+                        exists = true
+                        break
+                    }
+                    owner = owner.superclass
+                }
+                exists
+            } catch (_: Throwable) { false }
+            if (!found) missing.add(className + "." + methodName +
+                "(" + arity + ")")
+        }
+        return Compatibility(spec.size - missing.size, spec.size, missing)
+    }
+
     data class Selection(
         val index: Int,
         val loadedCount: Int,
