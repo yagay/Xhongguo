@@ -111,6 +111,85 @@ internal object NativeSeriesPort {
         return null
     }
 
+    /**
+     * Official APK 7.3.5.32 has a no-Surface playback mode of its own:
+     * x05.w.resume() -> c15.d.i (playWithoutSurface) ->
+     * c15.d$e.a -> c15.d$e.run() -> TTVideoEngine.play().
+     *
+     * While backgrounded, a newly selected episode has NO usable UI Surface,
+     * so an ordinary resume queues a deferred command instead of playing.
+     * For an independently verified accepted next-episode handoff, enable
+     * that EXISTING host mode only for the synchronous original resume call.
+     * No synthetic playback, second engine, fake Surface or pager replay.
+     */
+    data class NativeResumeResult(
+        val invoked: Boolean,
+        val withoutSurface: Boolean,
+        val surfaceAvailable: Boolean?,
+        val reason: String
+    )
+
+    fun resumeAcceptedBackgroundEpisode(
+        player: Any?, expectedEngine: Any?
+    ): NativeResumeResult {
+        if (player == null || expectedEngine == null ||
+            player.javaClass.name != SERIES_PLAYER) {
+            return NativeResumeResult(false, false, null,
+                "invalid_player_or_engine")
+        }
+        val resume = method(player, "resume", 0)
+            ?: return NativeResumeResult(false, false, null,
+                "official_resume_missing")
+        val task = field(player, "f")
+        val validTask = task?.javaClass?.name == "c15.d" &&
+            field(task, "b") === expectedEngine
+        val holder = if (validTask) field(task, "c") else null
+        val surface = try {
+            holder?.let {
+                (method(it, "isSurfaceAvailable", 0)
+                    ?: it.javaClass.methods.firstOrNull { m ->
+                        m.name == "isSurfaceAvailable" &&
+                            m.parameterCount == 0
+                    })?.invoke(it) as? Boolean
+            }
+        } catch (_: Throwable) { null }
+
+        // Never guess the native flag on an unknown APK signature. Run the
+        // original command unchanged if the actual Surface state is unknown.
+        val noSurface = validTask && surface == false
+        val flag = if (noSurface) try {
+            task!!.javaClass.getDeclaredField("i").apply {
+                isAccessible = true
+            }.takeIf { it.type == Boolean::class.javaPrimitiveType }
+        } catch (_: Throwable) { null } else null
+
+        return try {
+            if (flag != null && task != null) {
+                synchronized(task) {
+                    val original = flag.getBoolean(task)
+                    try {
+                        if (!original) flag.setBoolean(task, true)
+                        resume.invoke(player)
+                    } finally {
+                        if (!original && flag.getBoolean(task))
+                            flag.setBoolean(task, false)
+                    }
+                }
+                NativeResumeResult(true, true, surface,
+                    "official_resume_without_surface")
+            } else {
+                resume.invoke(player)
+                NativeResumeResult(true, false, surface,
+                    if (surface == false)
+                        "no_surface_host_flag_unavailable"
+                    else "official_resume_unchanged")
+            }
+        } catch (e: Throwable) {
+            NativeResumeResult(false, false, surface,
+                "official_resume_failed:" + e.javaClass.simpleName)
+        }
+    }
+
     fun selectedModel(adapter: Any?): Any? {
         val a = adapter ?: return null
         val result = try { method(a, "l0", 0)?.invoke(a) }
