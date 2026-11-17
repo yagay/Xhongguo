@@ -95,3 +95,43 @@ replacing the host UI-dependent transition.
 This is a diagnostic refactor milestone, not yet a background playback
 fix: the host can still foreground its Activity when it chooses
 `auto_to_single`. Do not merge this branch as the non-foreground fix.
+
+## Verified background state mismatch and scoped V3 correction
+
+Reopened actual uploaded diagnostic ZIPs:
+- `Xhongguo-diagnostic-20261117-221720.zip` contains the
+  22:17:44.294 `v3_eof background=false` event, followed by
+  22:17:44.312 `feed_native series_f background=true importance=300`.
+  At 22:17:44.332 `s4(target=2)` returned false while
+  business D was 1 and pager was 2, so no native selection was accepted.
+- `Xhongguo-diagnostic-20261117-223039.zip` includes that older
+  process log and a newer 22:30 native J2 handoff. The newer log does
+  not independently show another failed post-series EOF.
+
+The original `SystemMediaBridge.isOfficialSeriesBackground()` required
+the internally requested-background flag, even when Android reported
+the host process importance 300 with no Activity focus. It now accepts
+a confirmed Android process-background importance as an alternate
+authoritative signal **only** when the current Activity is the official
+ShortSeriesActivity, it has no focus, no explicit user command is
+active and the activity is not finishing. The provisional in-app
+media-background guard remains for preStop timing. This does not
+change feed-to-series Activity launching.
+
+`NativeSeriesV3.beginVisibilityScope()` now emits a targeted reason
+(`not_background` or `state_gate`) when a completed native EOF
+cannot acquire the strictly-scoped original s4 visibility exception.
+It does NOT fabricate s4 success, seek, move ViewPager2 or start
+another player. A successful scope still requires the same adapter,
+confirmed EOF, next index, pager alignment and valid range.
+
+Next test: from a *foreground* official Series page, switch to another
+app before episode EOF. In `TRACE_EVENTS.log`, look for
+`playback v3_scope` and compare with `v3_select`,
+`v3_g4_gate`, `v3_progress`. If the scope activates and the
+host still returns false, inspect the original adapter controller and
+further APK guard conditions before making any playback mutation.
+
+Note: no no-foreground feed-to-series handoff has been demonstrated;
+the official J2 path may still open ShortSeriesActivity over another
+app. This branch is experimental and not a confirmed full fix.
