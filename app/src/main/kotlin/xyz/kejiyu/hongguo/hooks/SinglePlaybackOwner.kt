@@ -91,6 +91,18 @@ internal object SinglePlaybackOwner {
         if (route == Route.OTHER) return false
         if (recorded != null && recorded != Route.OTHER &&
             recorded != route) {
+            // The original host can reuse a TTVideoEngine that previously
+            // belonged to FEED for an already ACCEPTED next series episode.
+            // Permit only the exact native holder verified at s4(); all
+            // other stale-page engines stay blocked.
+            if (route == Route.SERIES &&
+                SystemMediaBridge.isVerifiedNextSeriesEngine(engine)) {
+                LogUtil.info("单播放器: 放行官方已选中下一集的新引擎" +
+                    " from=$recorded")
+                FeatureTrace.event("playback", "next_series_owner",
+                    "allowed", "reason=verified_native_selection")
+                return false
+            }
             LogUtil.info("单播放器: 阻止旧页面播放器重新抢占" +
                 " from=$recorded current=$route")
             LogUtil.incr("singlePlaybackStalePlayBlocked")
