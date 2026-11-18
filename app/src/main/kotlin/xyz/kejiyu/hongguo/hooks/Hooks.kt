@@ -5630,6 +5630,12 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val result = chain.proceed()
+                            if (gMasterOn && gSystemMediaOn) {
+                                try {
+                                    NativeSeriesV3.onHostVideoModel(
+                                        chain.thisObject, chain.getArg(0))
+                                } catch (_: Throwable) { }
+                            }
                             if (gMasterOn && gMaxQualityOn) {
                                 try {
                                     rememberAndApplyHighestResolution(
@@ -6299,19 +6305,17 @@ object Hooks {
                                 return@Hooker null
                             }
                             if (method.name == "pause" &&
-                                method.returnType == Void.TYPE) {
-                                // Mini is still inside MainFragmentActivity. Its
-                                // bottom-tab navigation calls low-level engine
-                                // pause directly, bypassing VideoController.
-                                if (!SinglePlaybackOwner.isOwnershipTransition() &&
-                                    !SystemMediaBridge.isExplicitMediaCommandInProgress() &&
-                                    InAppMiniPlayer.shouldKeepNativeEnginePlaying(chain.thisObject)) {
-                                    return@Hooker null
-                                }
-                                if (!SinglePlaybackOwner.isOwnershipTransition() &&
-                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
-                                    return@Hooker null
-                                }
+                                method.returnType == Void.TYPE &&
+                                gMasterOn &&
+                                NativeTransportCoordinator.shouldHoldOriginalPause(
+                                    chain.thisObject,
+                                    miniEnabled = gMiniPlayerOn,
+                                    systemMediaEnabled = gSystemMediaOn)) {
+                                // Early-main behavior: suppress ONLY a verified
+                                // background/mini lifecycle pause on the active
+                                // engine. Let host EOF, media skip and natural
+                                // old-to-new engine transitions run unmodified.
+                                return@Hooker null
                             }
                             val result = chain.proceed()
                             try {
@@ -6494,9 +6498,9 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val listener = chain.getArg(0)
-                            if (action == "f" && gMasterOn && gSystemMediaOn &&
-                                NativeSeriesV3.shouldRetainCompletionListener(
-                                    chain.thisObject, listener)) return@Hooker null
+                            // Host-first: never suppress a native listener
+                            // removal. Old players must be able to release
+                            // their own callbacks during video transitions.
                             val result = chain.proceed()
                             if (gMasterOn && gSystemMediaOn) try {
                                 NativeSeriesV3.onListener(
