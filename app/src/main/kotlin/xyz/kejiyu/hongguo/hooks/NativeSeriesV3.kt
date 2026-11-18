@@ -5,7 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import java.lang.ref.WeakReference
-import java.lang.reflect.Field
 import java.lang.reflect.Method
 import xyz.kejiyu.hongguo.FeatureTrace
 import xyz.kejiyu.hongguo.LogUtil
@@ -39,7 +38,7 @@ internal object NativeSeriesV3 {
     private var candidateAdapter = WeakReference<Any>(null)
     private var initialBaseline: Long? = null
     private var initialOwner = WeakReference<Any>(null)
-    private var resumeAttemptGeneration = -1L
+    private var observedNativeStart: Pair<Long, Int?>? = null
 
     private data class PageScope(
         val controller: Any,
@@ -49,10 +48,6 @@ internal object NativeSeriesV3 {
         val originalBusiness: Int,
         val originalPage: Int,
         val origin: NativeSeriesSelectionRecoveryPolicy.Origin
-    )
-    private data class SurfaceLease(
-        val engine: Any, val task: Any,
-        val flag: Field, val original: Boolean
     )
     private data class AcceptedEofGate(
         val adapter: Any, val controller: Any,
@@ -80,7 +75,6 @@ internal object NativeSeriesV3 {
     private val scopedPage = ThreadLocal<PageScope?>()
 
     private val currentG4 = ThreadLocal<Any?>()
-    private var lease: SurfaceLease? = null
 
     private fun inheritedField(obj: Any?, name: String): Any? {
         var type = obj?.javaClass
@@ -203,14 +197,13 @@ internal object NativeSeriesV3 {
             currentHolder = WeakReference(holder)
             currentEngine = WeakReference(finished)
         }
-        releaseLease(null, "completed")
         acceptedEofGate = null
         manualSkipRequest = null
         manualSelectedIndex = null
         manualSelectedGeneration = -1L
         val g = state.complete(finished)
         candidateHolder.clear()
-        resumeAttemptGeneration = -1L
+        observedNativeStart = null
         trace("eof", "observed", "generation=$g,background=" +
             SystemMediaBridge.isOfficialSeriesBackground())
         // Diagnostics only. No speculative s4(), pager movement or play().
@@ -392,7 +385,7 @@ internal object NativeSeriesV3 {
                 NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP) {
                 // A user skip isn't an EOF, so its generation is unchanged.
                 // Reset the one-shot resume budget for this new target only.
-                resumeAttemptGeneration = -1L
+                observedNativeStart = null
                 manualSelectedGeneration = state.snapshot().generation
                 manualSelectedIndex = target
             }
@@ -468,95 +461,51 @@ internal object NativeSeriesV3 {
                 NativeSeriesV3State.Phase.STARTING)
     }
 
-    /** If the host's selected next holder has no Surface, set its OWN
-     * original c15.d.i playWithoutSurface flag before exactly one resume().
-     * It must survive async VideoModel source loading, then be restored. */
-    @Synchronized private fun enableNoSurface(holder: Any, e: Any): String {
-        if (lease?.engine === e) return "already"
-        releaseLease(null, "new_engine")
-        val task = inheritedField(holder, "f") ?: return "task_missing"
-        if (task.javaClass.name != "c15.d" || inheritedField(task, "b") !== e)
-            return "task_engine_mismatch"
-        val surface = inheritedField(task, "c")
-        val available = call(surface, "isSurfaceAvailable") as? Boolean
-        if (available != false) return "no_missing_surface_evidence"
-        val flag = try {
-            task.javaClass.getDeclaredField("i").apply { isAccessible = true }
-        } catch (_: Throwable) { return "task_flag_missing" }
-        if (flag.type != Boolean::class.javaPrimitiveType)
-            return "task_flag_type_changed"
-        return try {
-            val original = flag.getBoolean(task)
-            if (!original) flag.setBoolean(task, true)
-            lease = SurfaceLease(e, task, flag, original)
-            "enabled"
-        } catch (t: Throwable) { "flag_error_" + t.javaClass.simpleName }
-    }
-
-    @Synchronized private fun releaseLease(e: Any?, reason: String) {
-        val l = lease ?: return
-        if (e != null && l.engine !== e) return
-        lease = null
-        try {
-            l.flag.setBoolean(l.task, l.original)
-            trace("surface", "restored", "reason=$reason")
-        } catch (t: Throwable) {
-            trace("surface", "degraded", "restore=" + t.javaClass.simpleName)
-        }
-    }
-
-    private fun isPendingStartBackground(
-        selected: NativeSeriesV3State.Snapshot
-    ): Boolean =
-        SystemMediaBridge.isOfficialSeriesBackground() ||
-            (selected.generation == manualSelectedGeneration &&
-                selected.pendingIndex != null &&
-                selected.pendingIndex == manualSelectedIndex &&
-                SystemMediaBridge.isOfficialSeriesManualSkipBackground())
-
+    /**
+     * Host-first playback, ported from early main. An accepted native s4()
+     * is ONLY a business selection; x05.w + TTVideoEngine own VideoModel
+     * loading, native play(), readiness and Surface lifecycles.
+     *
+     * The previous module-level no-surface flag, eager holder.resume()
+     * and 45s lease could race the actual source loader. Never start,
+     * seek, pause, replace or force-resume the native engine here.
+     * One observation per (EOF generation, selected index).
+     */
     private fun scheduleStart() {
-        val s = state.snapshot()
-        if (s.phase != NativeSeriesV3State.Phase.BOUND ||
-            s.generation == resumeAttemptGeneration ||
-            !isPendingStartBackground(s)) return
-        resumeAttemptGeneration = s.generation
-        handler.post {
-            val current = state.snapshot()
-            val holder = state.pendingHolder()
-            val e = state.pendingEngine()
-            if (current.generation != s.generation ||
-                current.phase != NativeSeriesV3State.Phase.BOUND ||
-                holder == null || e == null ||
-                !isPendingStartBackground(current)) return@post
-            val mode = enableNoSurface(holder, e)
-            if (mode !in setOf("enabled", "already")) {
-                trace("resume", "degraded", "reason=$mode")
-                return@post
-            }
-            try {
-                val original = method(holder, "resume", 0)
-                if (original == null) {
-                    releaseLease(e, "resume_missing")
-                    trace("resume", "failed", "host_resume_missing")
-                    return@post
-                }
-                original.invoke(holder)
-                trace("resume", "requested", "one_host_resume,target=" +
-                    current.pendingIndex)
-            } catch (t: Throwable) {
-                releaseLease(e, "resume_exception")
-                trace("resume", "failed", t.javaClass.simpleName)
-            }
-            // Cleanup only — NEVER retry play/skip on a timer.
-            handler.postDelayed({
-                if (state.isPendingEngine(e) &&
-                    state.snapshot().generation == s.generation) {
-                    releaseLease(e, "source_timeout")
-                    trace("startup", "degraded", "no_progress,target=" +
-                        current.pendingIndex + ",phase=" + state.snapshot().phase)
-                }
-            }, 45_000L)
-        }
+        val selected = state.snapshot()
+        val key = selected.generation to selected.pendingIndex
+        if (selected.phase != NativeSeriesV3State.Phase.BOUND ||
+            observedNativeStart == key) return
+        observedNativeStart = key
+        val engineRef = WeakReference(state.pendingEngine())
+        trace("startup", "observed",
+            "owner=original_host,target=" + (selected.pendingIndex ?: -1) +
+                ",background=" + SystemMediaBridge.isOfficialSeriesBackground())
+        // Diagnostics ONLY: do not retry play on a timer. The host must
+        // bind a source and reach real progress before we publish success.
+        handler.postDelayed({
+            val latest = state.snapshot()
+            val engine = engineRef.get() ?: return@postDelayed
+            if (latest.generation != selected.generation ||
+                latest.pendingIndex != selected.pendingIndex ||
+                !state.isPendingEngine(engine)) return@postDelayed
+            val hasSource = call(engine, "getVideoModel") != null
+            val playbackState = call(engine, "getPlaybackState")
+            trace("startup", "degraded",
+                "original_host_no_progress,target=" + latest.pendingIndex +
+                    ",model=$hasSource,state=" + (playbackState ?: "unknown") +
+                    ",phase=" + latest.phase)
+        }, 8000L)
+    }
+
+    /** Observe a real SDK VideoModel assignment to the pending engine.
+     * NEVER trigger resume from this callback; playback remains host-owned. */
+    fun onHostVideoModel(engine: Any?, model: Any?) {
+        if (engine == null || !state.isPendingEngine(engine)) return
+        trace("source", "observed",
+            "setVideoModel,pendingIndex=" + state.snapshot().pendingIndex +
+                ",supplied=" + (model != null) +
+                ",engineHasModel=" + (call(engine, "getVideoModel") != null))
     }
 
     fun onEngineCommand(e: Any?, command: String) {
@@ -580,7 +529,6 @@ internal object NativeSeriesV3 {
     fun onError(holder: Any?, e: Any?, reason: String) {
         if (e == null || holder !== state.pendingHolder()) return
         state.onError(e, reason)
-        releaseLease(e, "native_error")
         trace("error", "degraded", reason)
     }
 
@@ -608,7 +556,6 @@ internal object NativeSeriesV3 {
         if (state.confirmProgress(e, pos, duration)) {
             manualSelectedGeneration = -1L
             manualSelectedIndex = null
-            releaseLease(e, "progress")
             currentEngine = WeakReference(e)
             currentHolder = WeakReference(selectedHolder)
             SystemMediaBridge.rememberOfficialSeriesHolder(currentHolder.get(), e)
@@ -706,7 +653,6 @@ internal object NativeSeriesV3 {
         manualSkipRequest = null
         manualSelectedGeneration = -1L
         manualSelectedIndex = null
-        releaseLease(null, "user_pause")
         state.onPause(state.pendingEngine(), true)
     }
 
@@ -715,7 +661,6 @@ internal object NativeSeriesV3 {
         manualSkipRequest = null
         manualSelectedGeneration = -1L
         manualSelectedIndex = null
-        releaseLease(null, "reset")
         state.reset()
         adapter.clear()
         ownerActivity.clear()
@@ -726,7 +671,7 @@ internal object NativeSeriesV3 {
         currentHolder.clear()
         initialBaseline = null
         initialOwner.clear()
-        resumeAttemptGeneration = -1L
+        observedNativeStart = null
         scopedPage.remove()
         currentG4.remove()
     }
