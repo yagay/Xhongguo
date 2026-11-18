@@ -252,9 +252,14 @@ internal object NativeSeriesV3 {
         val native = original as? Boolean ?: return original
         val grant = acceptedEofGate
         val scope = scopedPage.get()
-        val selectionScope = scope?.origin in setOf(
-            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF,
-            NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)
+        // Early main left automatic EOF's host policy untouched.
+        // Only an explicit, verified media user skip may rewrite i9().
+        val manualRequest = scope?.origin ==
+            NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP ||
+            grant?.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP
+        if (!manualRequest) return original
+        val selectionScope = scope?.origin ==
+            NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP
         val sameOriginalG4 = controller != null &&
             controller === currentG4.get()
         val matchingController = sameOriginalG4 &&
@@ -297,8 +302,13 @@ internal object NativeSeriesV3 {
      * ViewPager2 to target BEFORE it calls s4(target). Permit both orders,
      * without moving the pager ourselves. */
     fun beginVisibilityScope(a: Any?, target: Int?): Boolean {
-        if (a == null || target == null) return false
-        val autoBackground = SystemMediaBridge.isOfficialSeriesBackground()
+        // The original host owns ALL automatic EOF and next-episode paging.
+        // No module-issued s4/r4/visibility override is permitted there.
+        if (!NativeTransportPolicy.allowScopedPageOverride(
+                manualUserSkip = manualSkipRequest != null,
+                matchingOriginalSelection = a != null && target != null))
+            return false
+        val autoBackground = false
         val manualBackground =
             SystemMediaBridge.isOfficialSeriesManualSkipBackground()
         if (!autoBackground && !manualBackground) return false
@@ -308,9 +318,7 @@ internal object NativeSeriesV3 {
         val g = state.snapshot().generation
         // A normal EOF is the original verified auto-next route.
         val paused = SystemMediaBridge.isExplicitMediaCommandInProgress()
-        val eofAllowed = autoBackground && state.mayScopeNext(
-            a, target, current, p, count(a),
-            background = true, explicitlyPaused = paused)
+        val eofAllowed = false // Never relax automatic host EOF decisions
 
         // The independent manual route exists ONLY for a genuine user
         // media-button request. It cannot be obtained by autoplay, a random
@@ -353,9 +361,8 @@ internal object NativeSeriesV3 {
         val s = scopedPage.get() ?: return false
         val permitted = controller != null && controller === s.controller &&
             state.snapshot().generation == s.generation &&
-            (if (s.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)
-                SystemMediaBridge.isOfficialSeriesManualSkipBackground()
-            else SystemMediaBridge.isOfficialSeriesBackground())
+            s.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP &&
+            SystemMediaBridge.isOfficialSeriesManualSkipBackground()
         if (permitted) trace("visibility", "scoped",
             "target=" + s.target + ",beforePager=" + s.originalPage)
         return permitted
@@ -372,19 +379,18 @@ internal object NativeSeriesV3 {
         trace("select", if (accepted) "accepted" else "rejected",
             "target=$target,result=$returned,D=" + (d(a) ?: -1) +
             ",pager=" + (page(a) ?: -1) +
-            ",eofScope=" + (scope?.target == target))
+            ",manualScope=" + (scope?.origin ==
+                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP))
         if (!accepted) return
         if (scope != null && scope.adapter === a && scope.target == target &&
-            scope.origin in setOf(
-                NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF,
-                NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP)) {
+            scope.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP) {
             acceptedEofGate = AcceptedEofGate(a, scope.controller,
                 state.snapshot().generation, target,
                 SystemClock.uptimeMillis(), scope.origin)
             if (scope.origin ==
                 NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP) {
                 // A user skip isn't an EOF, so its generation is unchanged.
-                // Reset the one-shot resume budget for this new target only.
+                // Reset the source observation for this selected target only.
                 observedNativeStart = null
                 manualSelectedGeneration = state.snapshot().generation
                 manualSelectedIndex = target
