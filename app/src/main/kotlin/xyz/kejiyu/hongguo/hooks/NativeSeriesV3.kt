@@ -297,7 +297,10 @@ internal object NativeSeriesV3 {
         if (sameOriginalG4)
             trace("g4_gate", if (relax) "scoped" else "observed",
                 "nativeBlock=$native,override=$relax,age=$age")
-        return if (relax) false else original
+        return if (NativeTransportPolicy.allowScopedPageOverride(
+                manualUserSkip = manualRequest,
+                matchingOriginalSelection = relax))
+            false else original
     }
 
     /**
