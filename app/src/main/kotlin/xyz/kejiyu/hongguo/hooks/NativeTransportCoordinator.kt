@@ -16,7 +16,15 @@ internal object NativeTransportCoordinator {
         val manual = systemMediaEnabled &&
             NativeSeriesV3.isOriginalManualSkipPause(engine)
         val ownership = SinglePlaybackOwner.isOwnershipTransition()
-        if (explicit || manual || ownership) return false
+        if (manual) {
+            // A MediaSession g()/A1() requires the old native engine to
+            // yield. This is NOT an Activity lifecycle pause.
+            xyz.kejiyu.hongguo.FeatureTrace.event(
+                "background", "manual_skip_original_pause", "allowed",
+                "reason=original_host_transport", minIntervalMs = 300L)
+            return false
+        }
+        if (explicit || ownership) return false
 
         val mini = miniEnabled &&
             InAppMiniPlayer.shouldKeepNativeEnginePlaying(engine)
