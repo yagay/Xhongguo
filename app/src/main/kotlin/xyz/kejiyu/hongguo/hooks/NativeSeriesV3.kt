@@ -72,6 +72,9 @@ internal object NativeSeriesV3 {
         val generation: Long, val startedMs: Long
     )
     @Volatile private var manualSkipRequest: ManualSkipRequest? = null
+    // Only inside the single synchronous original adapter.g()/A1() call.
+    // The host must be allowed to pause its OLD engine when changing video.
+    private val originalSkipEngine = ThreadLocal<Any?>()
     private var manualSelectedGeneration = -1L
     private var manualSelectedIndex: Int? = null
     private val scopedPage = ThreadLocal<PageScope?>()
@@ -632,6 +635,13 @@ internal object NativeSeriesV3 {
         return true
     }
 
+    /** Permit the official old-engine pause only while executing the
+     * actual user-requested host skip. Does not affect background lifecycle
+     * pauses or any other engine/adapter/thread. */
+    fun isOriginalManualSkipPause(engine: Any?): Boolean =
+        engine != null && originalSkipEngine.get() === engine &&
+            SystemMediaBridge.isOfficialSeriesManualSkipBackground()
+
     fun skipNative(delta: Int): String {
         if (delta != 1 && delta != -1) return "invalid_delta"
         if (!state.canManualSkip()) return "handoff_pending"
@@ -661,11 +671,17 @@ internal object NativeSeriesV3 {
             }
         }, 2600L)
         val result = try {
+            // Original g()/A1() internally pauses the old TTVideoEngine
+            // before it binds the selected next holder. Suppressing that
+            // pause as if it were a lifecycle exit strands the next video.
+            originalSkipEngine.set(currentEngine.get())
             hostCommand.invoke(a)
         } catch (t: Throwable) {
             manualSkipRequest = null
             trace("manual_skip", "failed", t.javaClass.simpleName)
             return "host_exception_" + t.javaClass.simpleName
+        } finally {
+            originalSkipEngine.remove()
         }
         if (result == false) {
             manualSkipRequest = null
