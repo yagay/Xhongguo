@@ -298,62 +298,48 @@ internal object NativeSeriesV3 {
         return if (relax) false else original
     }
 
-    /** V2 incorrectly demanded pager == D. The original app often advances
-     * ViewPager2 to target BEFORE it calls s4(target). Permit both orders,
-     * without moving the pager ourselves. */
+    /**
+     * The host owns the full automatic EOF route, as in early main.
+     * An explicit MediaSession next/previous command gets only a single,
+     * identity- and generation-bound offscreen selection exception.
+     */
     fun beginVisibilityScope(a: Any?, target: Int?): Boolean {
-        // The original host owns ALL automatic EOF and next-episode paging.
-        // No module-issued s4/r4/visibility override is permitted there.
-        if (!NativeTransportPolicy.allowScopedPageOverride(
-                manualUserSkip = manualSkipRequest != null,
-                matchingOriginalSelection = a != null && target != null))
+        if (a == null || target == null) return false
+        val manual = manualSkipRequest ?: return false
+        if (!SystemMediaBridge.isOfficialSeriesManualSkipBackground())
             return false
-        val autoBackground = false
-        val manualBackground =
-            SystemMediaBridge.isOfficialSeriesManualSkipBackground()
-        if (!autoBackground && !manualBackground) return false
         onAdapter(a)
         val current = d(a) ?: return false
-        val p = page(a) ?: return false
-        val g = state.snapshot().generation
-        // A normal EOF is the original verified auto-next route.
+        val pager = page(a) ?: return false
+        val generation = state.snapshot().generation
         val paused = SystemMediaBridge.isExplicitMediaCommandInProgress()
-        val eofAllowed = false // Never relax automatic host EOF decisions
-
-        // The independent manual route exists ONLY for a genuine user
-        // media-button request. It cannot be obtained by autoplay, a random
-        // pager callback, an unrelated adapter or an old generation.
-        val manual = manualSkipRequest
-        val manualAllowed = !eofAllowed && manual != null &&
-            NativeManualEpisodeSkipPolicy.mayScope(
-                sameAdapter = manual.adapter === a && adapter.get() === a,
-                background = manualBackground,
-                nativeSelectionIdle = state.canManualSkip(),
-                explicitTransportPause = paused,
-                originalIndex = current,
-                pagerIndex = p,
-                requestedIndex = target,
-                mediaTargetIndex = manual.targetIndex,
-                loadedCount = count(a),
-                sameGeneration = manual.generation == g &&
-                    manual.fromIndex == current,
-                ageMs = SystemClock.uptimeMillis() - manual.startedMs)
-
-        if (!eofAllowed && !manualAllowed) {
-            if (manual != null && manual.adapter === a)
+        val allowed = NativeManualEpisodeSkipPolicy.mayScope(
+            sameAdapter = manual.adapter === a && adapter.get() === a,
+            background = true,
+            nativeSelectionIdle = state.canManualSkip(),
+            explicitTransportPause = paused,
+            originalIndex = current,
+            pagerIndex = pager,
+            requestedIndex = target,
+            mediaTargetIndex = manual.targetIndex,
+            loadedCount = count(a),
+            sameGeneration = manual.generation == generation &&
+                manual.fromIndex == current,
+            ageMs = SystemClock.uptimeMillis() - manual.startedMs)
+        if (!allowed) {
+            if (manual.adapter === a)
                 trace("manual_scope", "rejected",
-                    "D=$current,pager=$p,target=$target,expected=" +
+                    "D=$current,pager=$pager,target=$target,expected=" +
                         manual.targetIndex + ",phase=" + state.snapshot().phase)
             return false
         }
         val controller = inheritedField(a, "m") ?: return false
-        val origin = if (eofAllowed)
-            NativeSeriesSelectionRecoveryPolicy.Origin.VERIFIED_EOF
-            else NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP
-        if (manualAllowed) manualSkipRequest = null // single-use
-        scopedPage.set(PageScope(controller, a, g, target, current, p, origin))
-        trace("scope", "enabled", "D=$current,pager=$p,target=$target," +
-            "g=$g,origin=$origin")
+        manualSkipRequest = null // one target, one use, no future EOF grant
+        scopedPage.set(PageScope(controller, a, generation, target, current,
+            pager, NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP))
+        trace("scope", "enabled",
+            "D=$current,pager=$pager,target=$target,g=$generation," +
+                "origin=USER_SKIP")
         return true
     }
 
