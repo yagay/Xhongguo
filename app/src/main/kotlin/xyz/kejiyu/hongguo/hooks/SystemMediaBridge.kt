@@ -617,6 +617,17 @@ internal object SystemMediaBridge {
      * suppress user-requested pause, foreground pause or a preload engine.
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
+        // Verified in 05:40:55 diagnostic: both MediaSession next presses
+        // triggered "已保护当前后台播放器 pause" BEFORE native s4 accepted
+        // the new index. That pause is part of the host's original g()/A1()
+        // switch, not Activity.onPause. Never block the old engine yielding
+        // playback to its successor during this exact synchronous command.
+        if (NativeSeriesV3.isOriginalManualSkipPause(candidate)) {
+            FeatureTrace.event("background", "manual_skip_original_pause",
+                "allowed", "reason=host_business_selection", flow=mediaFlow)
+            LogUtil.info("系统媒体: 手动切集时允许官方旧引擎 pause，等待新播放器接管")
+            return false
+        }
         // A completed series episode MUST be allowed to pause/release its
         // own decoder while the host binds the next holder.
         if (NativeSeriesV3.isSeriesEngine(candidate) &&
