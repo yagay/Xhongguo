@@ -16,9 +16,11 @@ import xyz.kejiyu.hongguo.LogUtil
  * -> x05.w.v / x05.w.L -> actual TTVideoEngine progress.
  *
  * The original host decides the episode and owns its playback engine.
- * No new decoder, second ViewPager move, timer-based retry or fake EOF.
- * The single permitted command is one host x05.w.resume() for the exact
- * accepted next holder while the screen has no surface.
+ * Host-first strategy: no new decoder, extra ViewPager move, synthetic
+ * EOF, timer retry, module-originated resume or Surface-flag mutation.
+ * Observe original VideoModel assignment and real progress before updating
+ * the shared MediaSession. Only explicit user media skips may request one
+ * official adapter.g()/A1() business selection.
  */
 internal object NativeSeriesV3 {
     private const val SERIES_ACTIVITY =
@@ -49,12 +51,12 @@ internal object NativeSeriesV3 {
         val originalPage: Int,
         val origin: NativeSeriesSelectionRecoveryPolicy.Origin
     )
-    private data class AcceptedEofGate(
+    private data class AcceptedManualGate(
         val adapter: Any, val controller: Any,
         val generation: Long, val index: Int, val at: Long,
         val origin: NativeSeriesSelectionRecoveryPolicy.Origin
     )
-    private var acceptedEofGate: AcceptedEofGate? = null
+    private var acceptedManualGate: AcceptedManualGate? = null
 
     /**
      * MediaSession manual next/previous requests may complete through the
@@ -197,7 +199,7 @@ internal object NativeSeriesV3 {
             currentHolder = WeakReference(holder)
             currentEngine = WeakReference(finished)
         }
-        acceptedEofGate = null
+        acceptedManualGate = null
         manualSkipRequest = null
         manualSelectedIndex = null
         manualSelectedGeneration = -1L
@@ -243,14 +245,14 @@ internal object NativeSeriesV3 {
         if (phase == "after") {
             // The grant is single-use: when the original G4 call returns,
             // a later manual/foreground G4 is never affected.
-            acceptedEofGate = null
+            acceptedManualGate = null
             currentG4.remove()
         }
     }
 
     fun onNativeAutoplayGate(controller: Any?, original: Any?): Any? {
         val native = original as? Boolean ?: return original
-        val grant = acceptedEofGate
+        val grant = acceptedManualGate
         val scope = scopedPage.get()
         // Early main left automatic EOF's host policy untouched.
         // Only an explicit, verified media user skip may rewrite i9().
@@ -370,7 +372,7 @@ internal object NativeSeriesV3 {
         if (!accepted) return
         if (scope != null && scope.adapter === a && scope.target == target &&
             scope.origin == NativeSeriesSelectionRecoveryPolicy.Origin.USER_SKIP) {
-            acceptedEofGate = AcceptedEofGate(a, scope.controller,
+            acceptedManualGate = AcceptedManualGate(a, scope.controller,
                 state.snapshot().generation, target,
                 SystemClock.uptimeMillis(), scope.origin)
             if (scope.origin ==
@@ -438,19 +440,6 @@ internal object NativeSeriesV3 {
             currentHolder = WeakReference(holder)
         }
         SystemMediaBridge.rememberOfficialSeriesHolder(holder, e)
-    }
-
-    fun shouldRetainCompletionListener(holder: Any?, listener: Any?): Boolean {
-        if (holder == null || listener == null ||
-            holder !== currentHolder.get() || listener !== adapter.get())
-            return false
-        return (SystemMediaBridge.isOfficialSeriesBackground() ||
-            SystemMediaBridge.isOfficialSeriesPrePauseHandoff(engine(holder))) &&
-            state.snapshot().phase !in setOf(
-                NativeSeriesV3State.Phase.FAILED,
-                NativeSeriesV3State.Phase.SELECTED,
-                NativeSeriesV3State.Phase.BOUND,
-                NativeSeriesV3State.Phase.STARTING)
     }
 
     /**
@@ -641,7 +630,7 @@ internal object NativeSeriesV3 {
     }
 
     fun onExplicitPause() {
-        acceptedEofGate = null
+        acceptedManualGate = null
         manualSkipRequest = null
         manualSelectedGeneration = -1L
         manualSelectedIndex = null
@@ -649,7 +638,7 @@ internal object NativeSeriesV3 {
     }
 
     fun reset() {
-        acceptedEofGate = null
+        acceptedManualGate = null
         manualSkipRequest = null
         manualSelectedGeneration = -1L
         manualSelectedIndex = null
