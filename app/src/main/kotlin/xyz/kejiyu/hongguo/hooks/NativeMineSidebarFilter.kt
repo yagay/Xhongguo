@@ -36,7 +36,10 @@ internal object NativeMineSidebarFilter {
         "creator_center", "creatorcenter", "wallet_center",
         "walletcenter", "vip_center", "vipcenter", "game_center", "gamecenter"
     )
-    private val modelStringFields = arrayOf("b", "c", "d", "e")
+    // Verified against n$a serializer in classes5.dex:
+    //   b = cell_name, c = jump_url; d/e are icon URLs and must not
+    //   drive filtering (other items can reuse the same image asset).
+    private val modelStringFields = arrayOf("b", "c")
     private var lastProbeAt = 0L
     private var inspectedItems = 0
     private var filteredItems = 0
