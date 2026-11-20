@@ -62,9 +62,11 @@ internal object BackgroundSeriesTransitionGuard {
     }
 
     /**
-     * Called after an Activity truly loses foreground visibility. Do not infer
-     * background merely from onUserLeaveHint or onPause: both also occur
-     * during ordinary feed -> series navigation while the app is visible.
+     * Never assume onUserLeaveHint or onPause *alone* means the user left:
+     * they are also emitted for normal in-app navigation. But an explicit
+     * AppTask.isVisible == false at that instant IS evidence that the task
+     * was not visible. Capture it immediately, before the official series
+     * Activity's launch can make the task visible again.
      */
     private fun inspectBackground(activity: Activity, source: String) {
         if (!active()) return
@@ -81,7 +83,8 @@ internal object BackgroundSeriesTransitionGuard {
                 taskBackgrounded = true
                 LogUtil.info("后台切集守护: 已确认刷剧任务在后台" +
                     " source=" + source + " taskVisible=" + visibility +
-                    " importance=" + importance)
+                    " importance=" + importance +
+                    " raceFix=early-invisible-snapshot")
                 LogUtil.incr("systemMediaSeriesTaskBackgroundVerified")
             }
         } else if (source == "pause+650ms" || source == "stop+350ms") {
@@ -96,6 +99,11 @@ internal object BackgroundSeriesTransitionGuard {
 
     fun onActivityPaused(activity: Activity?) {
         if (!active() || activity?.javaClass?.name != FEED) return
+        // The 20:31:32 diagnostic showed official series playback began
+        // ~150 ms after onUserLeaveHint, ahead of both delayed probes.
+        // A synchronous "false" is safe; true/unknown is not.
+        if (taskVisible(activity) == false)
+            inspectBackground(activity, "pause-immediate")
         main.postDelayed({
             inspectBackground(activity, "pause+250ms")
         }, 250L)
@@ -113,21 +121,33 @@ internal object BackgroundSeriesTransitionGuard {
 
     fun onUserLeaveHint(activity: Activity?) {
         if (!active() || activity?.javaClass?.name != FEED) return
-        // Diagnostic only. This callback is also sent for in-app navigation.
+        val visible = taskVisible(activity)
+        val importance = processImportance()
         LogUtil.info("后台切集守护: 刷剧 onUserLeaveHint" +
-            " taskVisible=" + taskVisible(activity) +
-            " importance=" + processImportance() +
+            " taskVisible=" + visible +
+            " importance=" + importance +
             " previouslyBackground=" + taskBackgrounded)
+        if (visible == false) {
+            // TaskInfo reports invisibility before process importance drops:
+            // the UI thread must not wait for the 250/650 ms callbacks.
+            inspectBackground(activity, "user-leave-immediate")
+        }
     }
 
     fun onLaunchRequested(activity: Activity?, intent: Intent?) {
         if (!active() || activity == null || intent == null) return
         val destination = intent.component?.className
-        if (destination != SERIES || !taskBackgrounded) return
+        if (destination != SERIES) return
+        val visibility = taskVisible(activity)
+        if (!taskBackgrounded && activity.javaClass.name == FEED &&
+            visibility == false) {
+            inspectBackground(activity, "native-series-launch-immediate")
+        }
         LogUtil.info("后台切集守护: 捕获红果原生全集 Activity 启动" +
             " caller=" + activity.javaClass.simpleName +
-            " taskVisible=" + taskVisible(activity) +
-            " importance=" + processImportance())
+            " taskVisible=" + visibility +
+            " importance=" + processImportance() +
+            " previouslyBackground=" + taskBackgrounded)
         LogUtil.incr("systemMediaSeriesBackgroundLaunchObserved")
     }
 
@@ -182,13 +202,15 @@ internal object BackgroundSeriesTransitionGuard {
         pendingRelocation = false
         val visibility = taskVisible(activity)
         var moved = false
-        if (visibility != false) {
-            try {
-                moved = activity.moveTaskToBack(true)
-            } catch (e: Throwable) {
-                LogUtil.warn("后台切集守护: 恢复任务后台失败 " +
-                    e.javaClass.simpleName + ": " + e.message)
-            }
+        // Even if TaskInfo still reports invisible before the first frame,
+        // move it behind the user's current task. Otherwise the native
+        // ShortSeriesActivity can surface a moment later without another
+        // onResume callback.
+        try {
+            moved = activity.moveTaskToBack(true)
+        } catch (e: Throwable) {
+            LogUtil.warn("后台切集守护: 恢复任务后台失败 " +
+                e.javaClass.simpleName + ": " + e.message)
         }
         lastFocusReason = "background-series-resume"
         LogUtil.info("后台切集守护: 自动全集切换不允许抢前台" +
@@ -199,19 +221,21 @@ internal object BackgroundSeriesTransitionGuard {
         // A window can become focused slightly after onResume. One bounded
         // check covers that race, but must not keep forcing the task back.
         val owner = WeakReference(activity)
-        main.postDelayed({
-            val target = owner.get() ?: return@postDelayed
-            if (!active() || target.isDestroyed || target.isFinishing ||
-                !taskBackgrounded || lastFocusReason != "background-series-resume")
-                return@postDelayed
-            if (taskVisible(target) == true && target.hasWindowFocus()) {
-                val retry = try { target.moveTaskToBack(true) }
-                    catch (_: Throwable) { false }
-                LogUtil.info("后台切集守护: 原生窗口延迟获得焦点，单次退回后台" +
-                    " moved=" + retry)
-                LogUtil.incr("systemMediaSeriesFocusRetry")
-            }
-        }, 180L)
+        for (delayMs in longArrayOf(180L, 900L)) {
+            main.postDelayed({
+                val target = owner.get() ?: return@postDelayed
+                if (!active() || target.isDestroyed || target.isFinishing ||
+                    !taskBackgrounded ||
+                    lastFocusReason != "background-series-resume") return@postDelayed
+                if (taskVisible(target) == true && target.hasWindowFocus()) {
+                    val retry = try { target.moveTaskToBack(true) }
+                        catch (_: Throwable) { false }
+                    LogUtil.info("后台切集守护: 原生窗口延迟获得焦点，限次退回后台" +
+                        " delayMs=" + delayMs + " moved=" + retry)
+                    LogUtil.incr("systemMediaSeriesFocusRetry")
+                }
+            }, delayMs)
+        }
         pendingSeriesActivity.clear()
         return true
     }

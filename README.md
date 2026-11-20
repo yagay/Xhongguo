@@ -167,3 +167,7 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 诊断日志关键字：后台切集守护、systemMediaSeriesTaskBackgroundVerified、systemMediaSeriesBackgroundCreated、systemMediaSeriesForegroundGuardApplied。
 若任务可见性无法确认，模块安全跳过，不会将用户正在使用的红果强行送入后台。
 现有 19:40/19:57/20:06 诊断包尚未捕获明确的后台任务抢焦点复现场景；首次装入后需真机复测是否出现界面闪动、媒体暂停或下一集失败。
+
+### 2026-11-20 20:31 后台进入全集时间竞争修复
+
+日志显示刷剧 onUserLeaveHint 时 AppTask.isVisible=false，但进程 importance 仍为 100；150 毫秒内官方全集开始启动，而后台守护原本使用 250/650 毫秒延迟探测，导致判断时任务已经被重新置为可见。现在在 onUserLeaveHint、onPause 和原生全集 Activity 启动请求处，只要任务明确报告不可见就即时锁存；如果确认为同一个后台任务的原生全集创建，首次 onResume 会调用 moveTaskToBack(true)，再在 180/900 毫秒进行有限的窗口焦点复核，避免重新弹出。前台正常进入全集、外部 ACTION_VIEW/通知返回入口不采取处理，原生播放器及 EpisodeNavigator 不变。日志指纹 raceFix=early-invisible-snapshot，可用来验证新逻辑是否命中。
