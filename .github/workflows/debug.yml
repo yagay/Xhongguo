@@ -27,6 +27,20 @@ jobs:
           if [ -z "$SDKMANAGER" ]; then echo "sdkmanager is missing"; exit 1; fi
           "$SDKMANAGER" --install "platforms;android-36"
       - uses: gradle/actions/setup-gradle@v4
+      # Optional persistent signing identity. Keep the keystore PRIVATE in
+      # Actions Secrets, never commit it in this public repository.
+      - name: Restore persistent Debug signing identity
+        env:
+          XH_DEBUG_KEYSTORE_BASE64: ${{ secrets.XH_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$XH_DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::warning::No fixed Debug keystore configured. CI will generate a new signing identity; APKs from different runs cannot overwrite one another."
+          else
+            mkdir -p "$HOME/.android"
+            printf '%s' "$XH_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+            chmod 600 "$HOME/.android/debug.keystore"
+            echo "Persistent Debug signing identity restored (key contents never printed)."
+          fi
       - name: Prevent legacy profile fallback
         run: python3 tools/verify_universal_mapping.py
       - name: Build Debug only

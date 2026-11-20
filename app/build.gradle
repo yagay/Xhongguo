@@ -3,6 +3,11 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// Github Actions builds used to share the same 1.0.1/20260811 identity.
+// Embed an immutable source commit so target-process logs can be compared
+// with the installed module APK, even when Android has not restarted it.
+def sourceRevision = (System.getenv('GITHUB_SHA') ?: 'local').take(12)
+
 android {
     namespace 'xyz.kejiyu.hongguo'
     compileSdk 36
@@ -13,6 +18,7 @@ android {
         targetSdk 34
         versionCode 20260811
         versionName "1.0.1"
+        buildConfigField 'String', 'SOURCE_COMMIT', "\"${sourceRevision}\""
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 

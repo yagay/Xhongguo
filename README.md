@@ -192,3 +192,11 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 新增独立 `MineDrawerDataFilter`，只针对已验证的 CN 7.3.5.32 对控制器 `e()` 返回的数据过滤四个项目，并在 `g()` 发布的最终 StateFlow 读回核验；如果其他路径仍发布包含目标项的数据，才对最终 StateFlow 做一次补救过滤。所有过滤均为复制新 List，不修改原始对象与容器尺寸。
 
 新的设置键 `mine_drawer_data_filter_v1` 默认开启，与之前实验性设置键无关；日志关键词为「我的右侧菜单数据过滤」。已保留 `6f058b8` 的后台播放/媒体控制实现，避免相关功能回退。
+
+### Debug APK 安装与 Hook 版本核验（2026-11-20）
+
+诊断 22:23 证实手机上的 Xhongguo 设置文件没有 `mine_drawer_data_filter_v1`，且红果 PID=32141 于 21:59:19 启动（早于 Actions #44825261729 的 22:00:37 运行），当前未加载源码 `ccf661e` 的菜单过滤 Hook。经对实际 APK Signing Block v2 证书比较，Actions #44814424348 和 #44825261729 的 Debug 安装包 SHA-256 分别为 `034019f2fe06ff9f...` 和 `b4cc904eee48756f...`，签名不同，无法直接覆盖安装。
+
+Debug 工作流现在支持 `XH_DEBUG_KEYSTORE_BASE64` GitHub Actions repository secret（内容为完整、私有的 `~/.android/debug.keystore` 文件的 Base64；需是别名 `androiddebugkey`、口令 `android` 的 Android Debug keystore）。配置后每次构建会恢复同一个签名，避免不同运行器产生不同签名。如果未配置仍会构建成功，但会明确警告签名可能改变。不要把 keystore 或 Base64 字符串提交进公开仓库。
+
+新增 `BuildConfig.SOURCE_COMMIT`，在目标进程模块启动日志中输出 `模块构建提交=...`，在诊断 ZIP 的 `device.txt`、`build-verification.txt` 中核对正在运行的 Hook 版本是否与安装的 APK 相符。老模块没有这一日志，不能据老日志判断新 Hook 失败。

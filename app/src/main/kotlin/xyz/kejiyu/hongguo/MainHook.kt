@@ -24,6 +24,7 @@ class MainHook : XposedModule() {
         currentProcessName = param.processName ?: ""
         LogUtil.init(param.processName)
         LogUtil.info("══════════ 模块加载 ══════════")
+        LogUtil.info("模块构建提交=${BuildConfig.SOURCE_COMMIT} | version=${BuildConfig.VERSION_NAME}/${BuildConfig.VERSION_CODE}")
         LogUtil.info("进程=${param.processName} | systemServer=${param.isSystemServer}")
         LogUtil.info("框架=${frameworkName} v${frameworkVersion} | API=${apiVersion}")
         LogUtil.info("日志文件=${LogUtil.getFilePath()}")

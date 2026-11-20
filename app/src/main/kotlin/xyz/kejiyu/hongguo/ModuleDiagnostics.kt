@@ -157,6 +157,7 @@ object ModuleDiagnostics {
         val files = linkedMapOf<String, String>()
         files["device.txt"] = buildString {
             appendLine("Xhongguo " + BuildConfig.VERSION_NAME + " / " + BuildConfig.VERSION_CODE)
+            appendLine("Installed module source commit=" + BuildConfig.SOURCE_COMMIT)
             appendLine("Android " + Build.VERSION.RELEASE + " API " + Build.VERSION.SDK_INT)
             appendLine("Device: " + Build.MANUFACTURER + " " + Build.DEVICE)
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -182,6 +183,21 @@ object ModuleDiagnostics {
             .values.joinToString("\n").takeLast(3_000_000)
         files["REPORT.txt"] = FeatureDiagnostics.analyze(ctx, evidence,
             files["root/status.txt"] == "ROOT GRANTED")
+        files["build-verification.txt"] = buildString {
+            val expected = BuildConfig.SOURCE_COMMIT
+            appendLine("Installed Xhongguo build=" + expected)
+            val found = Regex("模块构建提交=([a-zA-Z0-9._-]+)")
+                .findAll(evidence).map { it.groupValues[1] }.distinct().toList()
+            appendLine("Hook process build marker(s)=" +
+                if (found.isEmpty()) "(missing; process may be running an older module)" else found.joinToString(","))
+            val matched = found.any { it == expected }
+            appendLine("Current module/process build confirmed=" + matched)
+            if (!matched) {
+                appendLine("Re-enable Xhongguo in LSPosed if needed; force-stop com.phoenix.read and launch it again.")
+                appendLine("If settings.txt lacks mine_drawer_data_filter_v1, the installed APK is older than the menu fix.")
+            }
+            appendLine("Existing CI Debug APKs may have different signatures. Android cannot overwrite-update across signers.")
+        }
         val output = ctx.contentResolver.openOutputStream(uri, "w")
             ?: error("Cannot open destination ZIP")
         output.use { target ->
