@@ -39,7 +39,8 @@ internal object EpisodeNavigator {
         val destinationIndex: Int,
         val started: Long,
         val direction: Int,
-        var sawNativeStart: Boolean = false
+        var sawNativeStart: Boolean = false,
+        var observedEngine: WeakReference<Any> = WeakReference(null)
     )
     private var pending: Pending? = null
     private var lastUnsupportedAt = 0L
@@ -228,6 +229,7 @@ internal object EpisodeNavigator {
 
     private fun checkPending(task: Pending) {
         if (pending !== task) return
+        if (task.sawNativeStart && finishIfPlayingTarget(task)) return
         if (SystemClock.uptimeMillis() - task.started >= TIMEOUT_MS) {
             pending = null
             LogUtil.warn("系统媒体切集: 超时，未确认目标视频开始播放" +
@@ -235,9 +237,22 @@ internal object EpisodeNavigator {
             LogUtil.incr("systemMediaEpisodeUnconfirmed")
             return
         }
-        // While the native page is settling, the page index may advance
-        // before its engine actually starts. Completion only happens in
-        // onNativePlayback(true) with the exact target video ID.
+        // Waiting for the real video. Do not inject another play request.
+    }
+
+    private fun finishIfPlayingTarget(task: Pending): Boolean {
+        if (pending !== task || !task.sawNativeStart) return false
+        val activity = task.activity.get() ?: return false
+        val engine = task.observedEngine.get() ?: return false
+        val candidate = FullSeriesMediaInfo.navigationCandidate(activity, engine)
+        if (candidate?.currentIndex != task.destinationIndex ||
+            candidate.currentVideoId != task.destinationId) return false
+        pending = null
+        LogUtil.info("系统媒体切集: 原生播放已确认 " +
+            "direction=${if (task.direction > 0) "next" else "previous"}" +
+            " targetIndex=${task.destinationIndex}")
+        LogUtil.incr("systemMediaEpisodeConfirmed")
+        return true
     }
 
     /** Called by the existing native playback observer, not a new global Hook. */
@@ -248,15 +263,8 @@ internal object EpisodeNavigator {
             ?.takeIf { it.isNotBlank() && it != "null" }
         if (engineId != task.destinationId || engineId == task.sourceId) return false
         task.sawNativeStart = true
-        val candidate = FullSeriesMediaInfo.navigationCandidate(activity, engine)
-        if (candidate == null || candidate.currentIndex != task.destinationIndex ||
-            candidate.currentVideoId != task.destinationId) return false
-        pending = null
-        LogUtil.info("系统媒体切集: 原生播放已确认 " +
-            "direction=${if (task.direction > 0) "next" else "previous"}" +
-            " targetIndex=${task.destinationIndex}")
-        LogUtil.incr("systemMediaEpisodeConfirmed")
-        return true
+        task.observedEngine = WeakReference(engine)
+        return finishIfPlayingTarget(task)
     }
 
     fun reset() {
