@@ -68,6 +68,8 @@ object Hooks {
     private var gSystemMediaOn = false
     private var gPlayerOn = false
     private var gAdOn = false
+    private var gMineShortcutsOff = true
+    private var gNextMineUiScanAt = 0L
     private var gRefreshOff = false
     private var gTopZoneOn = false
     private var gNavBarOff = false
@@ -280,7 +282,11 @@ object Hooks {
         gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
         SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
         gPlayerOn = prefs.getBoolean("player_bar", false)
-        gAdOn = prefs.getBoolean("ad_block", false)
+        // Dedicated default-on cleanup for the requested build. Keep the old
+        // ad_block provider key for compatibility, but use one new UI toggle.
+        gAdOn = prefs.getBoolean("hide_all_ads", true)
+        gMineShortcutsOff = prefs.getBoolean("hide_mine_shortcuts", true)
+        MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
         gTopZoneOn = prefs.getBoolean("top_zone", false)
         gNavBarOff = prefs.getBoolean("nav_bar_off", false)
@@ -2667,10 +2673,18 @@ object Hooks {
         } catch (_: Throwable) {}
         return roots
     }
+    private fun scanMineUiIfNeeded(force: Boolean = false) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!force && now < gNextMineUiScanAt) return
+        gNextMineUiScanAt = now + 750L
+        MineUiCleaner.scan(gCurrentActivity)
+    }
+
     private fun scanAllWindows() {
         try {
             if (gCurrentActivity == null) return
             scanShoppingTabIfNeeded(gCurrentActivity)
+            scanMineUiIfNeeded(force = true)
             val decor = gCurrentActivity!!.window.decorView
             gNames.hideIdNames.forEach { resolveEntryId(it, decor) }
             gNames.progressIdNames.forEach { resolveEntryId(it, decor, gProgressIdSet, "进度条资源") }
@@ -2706,6 +2720,8 @@ object Hooks {
             override fun run() {
                 try {
                     scanShoppingTabIfNeeded(gCurrentActivity)
+                    if (gMasterOn && (gMineShortcutsOff || gAdOn))
+                        scanMineUiIfNeeded()
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
                     }
@@ -3868,6 +3884,11 @@ object Hooks {
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
                 else restoreShoppingTabViews()
             }, "disable_shopping_mall")
+            addSwitch("隐藏我的快捷入口", "隐藏「福利、订单、消息」整排；保留账号、收藏和历史", { gMineShortcutsOff }, {
+                gMineShortcutsOff = it
+                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
+                gNextMineUiScanAt = 0L
+            }, "hide_mine_shortcuts")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
@@ -3935,7 +3956,11 @@ object Hooks {
             addSwitch("顶部区域拦截下滑", "拦截屏幕顶部区域向下滑动手势", { gTopZoneOn }, { gTopZoneOn = it }, "top_zone")
 
             content.addView(sectionTitle(act, "内容与账号", p))
-            addSwitch("拦截广告 / 挂件", "拦截已适配的广告层、金宝箱和悬浮挂件", { gAdOn }, { gAdOn = it }, "ad_block")
+            addSwitch("隐藏广告 / 挂件", "默认开启：拦截已适配广告层、金宝箱、悬浮挂件及「我的」广告卡片", { gAdOn }, {
+                gAdOn = it
+                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it)
+                gNextMineUiScanAt = 0L
+            }, "hide_all_ads")
             addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
             addSwitch("显示 VIP 图标", "控制 VIP 图标相关显示逻辑", { gVipIconOn }, { gVipIconOn = it }, "vip_icon")
 
