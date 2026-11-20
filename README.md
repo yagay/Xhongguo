@@ -177,3 +177,18 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 新增 MineUiCleaner：在红果主界面检测「福利、订单、消息」三个标签共同所在的紧凑行，仅把整行设置为 GONE（不删除首页底栏、账号信息、收藏或历史）；隐藏前保留原始可见性，关闭开关时可恢复。
 在已确认的「我的」页面范围内额外隐藏带明确广告文字或原生广告资源名称的独立卡片，避免误将视频、账号及系统设置节点识别成广告。
 已适配的广告 Hook（暂停广告、片尾广告、广告图标、金宝箱和悬浮挂件）继续启用；两个设置「隐藏我的快捷入口」及「隐藏广告与挂件」均默认开启，受模块总开关控制。未知动态广告不承诺全部覆盖；若仍残留，使用诊断日志定位其具体原生组件。
+
+### 2026-11-20: 从 Actions #44814424348 的稳定源码重新修复「我的」右侧菜单
+
+基线为 GitHub Actions #44814424348 对应的提交 `6f058b83859a014da8c898fb5a5348819d137dbb`。已丢弃此后多个版本的 MineSidebar 视图扫描/列表 Hook，不合并原先尝试。
+
+使用之前上传的 `红果免费短剧_7.3.5.32.apk` 原版 DEX 验证：
+
+- `MineSidebarController.e():List`（classes5.dex 代码偏移 `0x9b1d74`）生成数据；
+- `MineSidebarController.g():void`（偏移 `0x9b1fe0`）调用 `e()`，包装为 `wr5.c(List)`，发布到 `MineSidebarController.p:MutableStateFlow`，由 `q:StateFlow` 对外提供 Compose 消费；
+- `MineSidebarPageKt.b(StateFlow,...)` 是侧边菜单 Compose 渲染入口；
+- 项目模型 `com.dragon.read.kmp.mine.model.n`（`SidebarFunctionItemModel`）的字段 `b=cell_name` 与 `c=jump_url`，`d/e` 是图标，不用于识别。
+
+新增独立 `MineDrawerDataFilter`，只针对已验证的 CN 7.3.5.32 对控制器 `e()` 返回的数据过滤四个项目，并在 `g()` 发布的最终 StateFlow 读回核验；如果其他路径仍发布包含目标项的数据，才对最终 StateFlow 做一次补救过滤。所有过滤均为复制新 List，不修改原始对象与容器尺寸。
+
+新的设置键 `mine_drawer_data_filter_v1` 默认开启，与之前实验性设置键无关；日志关键词为「我的右侧菜单数据过滤」。已保留 `6f058b8` 的后台播放/媒体控制实现，避免相关功能回退。

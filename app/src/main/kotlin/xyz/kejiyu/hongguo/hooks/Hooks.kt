@@ -69,6 +69,7 @@ object Hooks {
     private var gPlayerOn = false
     private var gAdOn = false
     private var gMineShortcutsOff = true
+    private var gMineDrawerCleanOn = true
     private var gNextMineUiScanAt = 0L
     private var gRefreshOff = false
     private var gTopZoneOn = false
@@ -286,6 +287,8 @@ object Hooks {
         // ad_block provider key for compatibility, but use one new UI toggle.
         gAdOn = prefs.getBoolean("hide_all_ads", true)
         gMineShortcutsOff = prefs.getBoolean("hide_mine_shortcuts", true)
+        gMineDrawerCleanOn = prefs.getBoolean("mine_drawer_data_filter_v1", true)
+        MineDrawerDataFilter.enabled = gMasterOn && gMineDrawerCleanOn
         MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
         gTopZoneOn = prefs.getBoolean("top_zone", false)
@@ -3857,6 +3860,7 @@ object Hooks {
             content.addView(sectionTitle(act, "核心", p))
             addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
                 gMasterOn = it
+                MineDrawerDataFilter.enabled = it && gMineDrawerCleanOn
                 InAppMiniPlayer.enabled = it && gMiniPlayerOn
                 SystemMediaBridge.configure(act, it && gSystemMediaOn)
                 if (!it) {
@@ -3889,6 +3893,10 @@ object Hooks {
                 MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
                 gNextMineUiScanAt = 0L
             }, "hide_mine_shortcuts")
+            addSwitch("我的右侧菜单精简", "从官方 Compose 数据源中移除创作中心、我的钱包、会员中心、游戏中心；无需占位", { gMineDrawerCleanOn }, {
+                gMineDrawerCleanOn = it
+                MineDrawerDataFilter.enabled = gMasterOn && it
+            }, "mine_drawer_data_filter_v1")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
@@ -4922,6 +4930,11 @@ object Hooks {
             " | legacyObfuscatedMappings=" + (!TargetNames.isUniversal(gNames)) +
             " | oldResourceIds=" + gTargetIdSet.size)
         LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
+        if (pkg == TargetNames.CN_PACKAGE && gTargetVersionName == "7.3.5.32") {
+            MineDrawerDataFilter.install(module, classLoader)
+        } else {
+            LogUtil.info("我的右侧菜单数据过滤: 未匹配经 APK 验证的红果 CN 7.3.5.32，跳过")
+        }
 
         try {
             if (!UpdateChecker.checking && UpdateChecker.latestVersion == null) {
