@@ -6606,6 +6606,10 @@ object Hooks {
                     }
                 } catch (_: Exception) {}
                 val result = chain.proceed()
+                try { BackgroundSeriesTransitionGuard.onActivityCreated(a) }
+                catch (e: Throwable) {
+                    LogUtil.warn("后台切集守护: onCreate 诊断失败 " + e.message)
+                }
                 try {
                     if (a != null) {
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
@@ -6649,7 +6653,9 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
-                        SystemMediaBridge.onActivityResumed(a)
+                        val preserveBackground =
+                            BackgroundSeriesTransitionGuard.onActivityResumed(a)
+                        SystemMediaBridge.onActivityResumed(a, preserveBackground)
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6677,6 +6683,10 @@ object Hooks {
                 try { SystemMediaBridge.onActivityPaused(a) } catch (e: Throwable) {
                     LogUtil.warn("系统媒体: Activity.onPause 诊断失败: " + e.message)
                 }
+                try { BackgroundSeriesTransitionGuard.onActivityPaused(a) }
+                catch (e: Throwable) {
+                    LogUtil.warn("后台切集守护: onPause 诊断失败 " + e.message)
+                }
                 stopPeriodicScan()
                 val result = chain.proceed()
                 mainHandler.postDelayed({
@@ -6698,7 +6708,14 @@ object Hooks {
                         } catch (e: Throwable) {
                             LogUtil.warn("系统媒体: Activity.onStop 诊断失败: " + e.message)
                         }
-                        chain.proceed()
+                        val result = chain.proceed()
+                        try {
+                            BackgroundSeriesTransitionGuard.onActivityStopped(
+                                chain.thisObject as? Activity)
+                        } catch (e: Throwable) {
+                            LogUtil.warn("后台切集守护: onStop 诊断失败 " + e.message)
+                        }
+                        result
                     })
                 LogUtil.info("  ✓ system media Activity.onStop observer")
             } catch (e: Throwable) {
@@ -6710,7 +6727,9 @@ object Hooks {
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
                         try {
-                            SystemMediaBridge.onUserLeave(chain.thisObject as? Activity)
+                            val activity = chain.thisObject as? Activity
+                            BackgroundSeriesTransitionGuard.onUserLeaveHint(activity)
+                            SystemMediaBridge.onUserLeave(activity)
                         } catch (e: Throwable) {
                             LogUtil.warn("系统媒体后台离开检测异常: " + e.message)
                         }
@@ -6742,14 +6761,26 @@ object Hooks {
                     LogUtil.incr("shoppingActivityIntentBlocked")
                     LogUtil.info("已拦截打开商城 Activity")
                     null
-                } else chain.proceed()
+                } else {
+                    try {
+                        BackgroundSeriesTransitionGuard.onLaunchRequested(
+                            chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                    } catch (_: Throwable) {}
+                    chain.proceed()
+                }
             }
             ham(c, "startActivityForResult", "shoppingStartForResult") { chain ->
                 if (isShoppingMallDisabled() &&
                     isShoppingActivityIntent(chain.getArg(0) as? Intent)) {
                     LogUtil.incr("shoppingActivityIntentBlocked")
                     null
-                } else chain.proceed()
+                } else {
+                    try {
+                        BackgroundSeriesTransitionGuard.onLaunchRequested(
+                            chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                    } catch (_: Throwable) {}
+                    chain.proceed()
+                }
             }
             LogUtil.info("  ✓ targeted shopping activity launch intercept")
         } catch (e: Exception) { LogUtil.error("lifecycle", e) }

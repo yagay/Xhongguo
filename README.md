@@ -157,3 +157,13 @@
 ### 2026-11-20：EpisodeNavigator v4 诊断修复
 
 20:06 的诊断显示 65 集内层 Fragment 索引准确、可见度为 15，但系统媒体导航器仍返回 `no-matching-native-episode-model`。原因是读媒体信息时采用了活动内缓存的剧集归属，而导航器仍将 `observedForEngine(engine).seriesId` 当作主要依据。v4 优先使用当前 Activity 的已确认剧集 ID、原生 presenter 模型与对应总集数，允许唯一的高可见度 Fragment 在严格索引检查通过时作为切集来源。拒绝时记录具体原因（`导航模型拒绝原因`），避免只出现笼统的 `model=false`。原生导航控件仍需要独立验证；不得把编译通过当成真实切集通过。
+
+### 后台刷剧进入全集：防止任务抢前台
+
+添加独立 BackgroundSeriesTransitionGuard，使用 Android 原生 ActivityManager.AppTask.taskInfo.isVisible 及进程 importance 诊断。
+只有先确认刷剧任务不可见、同一任务又新建官方 ShortSeriesActivity 时，才在原生 onResume 后尝试一次 moveTaskToBack(true)；如果窗口稍后抢焦点，只补做一次受限检查。
+不拦截官方 Activity 启动、不关闭窗口、不模拟播放操作。普通前台进入全集、用户主动切回红果、不同 Task 的跳转不受影响。
+SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此时不会误解除后台播放暂停保护。
+诊断日志关键字：后台切集守护、systemMediaSeriesTaskBackgroundVerified、systemMediaSeriesBackgroundCreated、systemMediaSeriesForegroundGuardApplied。
+若任务可见性无法确认，模块安全跳过，不会将用户正在使用的红果强行送入后台。
+现有 19:40/19:57/20:06 诊断包尚未捕获明确的后台任务抢焦点复现场景；首次装入后需真机复测是否出现界面闪动、媒体暂停或下一集失败。

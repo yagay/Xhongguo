@@ -1054,20 +1054,26 @@ internal object SystemMediaBridge {
             " page=" + activity.javaClass.simpleName)
     }
 
-    fun onActivityResumed(activity: Activity?) {
+    fun onActivityResumed(activity: Activity?, preserveBackground: Boolean = false) {
         if (!enabled || activity == null ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         foregroundActivity = WeakReference(activity)
         lastPlayerActivityPauseAt = 0L
-        lastUserLeaveAt = 0L
-        lastUserLeaveWasPlaying = false
-        lastUserLeaveEngine.clear()
-        if (backgroundPauseGuardEngine.get() != null) {
-            backgroundPauseGuardEngine.clear()
-            backgroundPauseGuardUntil = 0L
-            backgroundPauseSuppressed = 0
-            backgroundResumeBudget = 0
-            LogUtil.info("系统媒体: 红果恢复前台，解除当前播放器暂停保护")
+        if (!preserveBackground) {
+            lastUserLeaveAt = 0L
+            lastUserLeaveWasPlaying = false
+            lastUserLeaveEngine.clear()
+            if (backgroundPauseGuardEngine.get() != null) {
+                backgroundPauseGuardEngine.clear()
+                backgroundPauseGuardUntil = 0L
+                backgroundPauseSuppressed = 0
+                backgroundResumeBudget = 0
+                LogUtil.info("系统媒体: 红果恢复前台，解除当前播放器暂停保护")
+            }
+        } else {
+            LogUtil.info("系统媒体: 后台原生全集 Activity.onResume" +
+                " 并非用户返回前台，保留后台媒体状态和暂停保护")
+            LogUtil.incr("systemMediaSeriesBackgroundResumePreserved")
         }
         for (delay in longArrayOf(650L, 2100L)) {
             handler.postDelayed({
@@ -1083,7 +1089,7 @@ internal object SystemMediaBridge {
                     !activity.isFinishing) discoverPlayingVideo(activity, "periodic")
             }, delay)
         }
-        if (requestedBackgroundPlayback) {
+        if (requestedBackgroundPlayback && !preserveBackground) {
             LogUtil.info("系统媒体: 返回红果，结束后台暂停保护")
             requestedBackgroundPlayback = false
             leaveAt = 0L
