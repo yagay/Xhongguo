@@ -200,3 +200,11 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 Debug 工作流现在支持 `XH_DEBUG_KEYSTORE_BASE64` GitHub Actions repository secret（内容为完整、私有的 `~/.android/debug.keystore` 文件的 Base64；需是别名 `androiddebugkey`、口令 `android` 的 Android Debug keystore）。配置后每次构建会恢复同一个签名，避免不同运行器产生不同签名。如果未配置仍会构建成功，但会明确警告签名可能改变。不要把 keystore 或 Base64 字符串提交进公开仓库。
 
 新增 `BuildConfig.SOURCE_COMMIT`，在目标进程模块启动日志中输出 `模块构建提交=...`，在诊断 ZIP 的 `device.txt`、`build-verification.txt` 中核对正在运行的 Hook 版本是否与安装的 APK 相符。老模块没有这一日志，不能据老日志判断新 Hook 失败。
+
+### 2026-11-20 22:32：诊断证明构建正确但首次菜单数据已预初始化
+
+最新诊断 `Xhongguo-diagnostic-20261120-223251.zip` 证明已安装和目标红果进程都加载 `4bdf77129c94`，右侧 `HongguoMineFunctionFragment.onCreateContent` 打开时 `Controller.e/g` Hook 已安装却没有一次触发。
+
+检查原版 APK 7.3.5.32 classes5.dex 字节码可知 `MineSidebarController.<init>` 构造函数内部就调用 `e()` 生成初始菜单并赋给 `p:MutableStateFlow`。实际 Fragment classes3.dex 中 `e:MineSidebarController`，因此首次打开菜单可能不再触发 `Controller.e/g`。本版在真实的 `HongguoMineFunctionFragment.onCreateContent` 返回后通过其 `e` 字段直接读取当前控制器的 `p`，过滤后写回，使 Compose 对应的 `q` 状态也更新；原先 `Controller.e/g` 处理后续变化。
+
+此外原导出 settings.txt 用 false 作为未写入布尔开关的默认值，因此即使目标进程 `enabled=true`，导出也可能显示 `mine_drawer_data_filter_v1=false`。现修正为显示实际默认值并标明 `stored=true/false`，便于区别未配置和显式关闭。

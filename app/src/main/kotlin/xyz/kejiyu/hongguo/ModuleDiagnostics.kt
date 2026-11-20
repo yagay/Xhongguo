@@ -173,9 +173,17 @@ object ModuleDiagnostics {
         }
         val prefs = ModuleSettingsStore.prefs(ctx)
         files["settings.txt"] = buildString {
+            // Report both the effective value and whether the key was ever
+            // written. Previously an absent default-ON key was shown as false,
+            // contradicting the runtime Hook's enabled=true state.
+            val defaultOn = setOf(
+                "video_longpress_settings", "disable_shopping_mall",
+                "hide_mine_shortcuts", "hide_all_ads",
+                "mine_drawer_data_filter_v1"
+            )
             for (key in ModuleSettingsStore.BOOLEANS.sorted()) {
-                appendLine(key + "=" + prefs.getBoolean(key,
-                    key == "video_longpress_settings" || key == "disable_shopping_mall"))
+                appendLine(key + "=" + prefs.getBoolean(key, key in defaultOn) +
+                    " (stored=" + prefs.contains(key) + ")")
             }
         }
         files.putAll(collectRoot(ctx))

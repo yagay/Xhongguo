@@ -50,6 +50,7 @@ internal object MineDrawerDataFilter {
 
     private var generatedCalls = 0L
     private var publishCalls = 0L
+    private var initialFragmentScrubCalls = 0L
     private var removedTotal = 0L
     private var lastNoMatchAt = 0L
 
@@ -163,6 +164,55 @@ internal object MineDrawerDataFilter {
             val getValue = flowClass.getMethod("getValue")
             val setValue = flowClass.getMethod("setValue", Any::class.java)
 
+            /**
+             * Controller.<init> calls e() and initializes p *before* the
+             * right drawer Fragment opens. If this happened before
+             * onPackageReady, neither e() nor g() is invoked on opening.
+             * Read the current p state from Fragment.e's controller instead.
+             */
+            val scrubCurrentState: (Any, String) -> Unit = { controller, reason ->
+                if (!enabled) {
+                    LogUtil.info("我的右侧菜单数据过滤: 跳过当前状态 reason=" + reason +
+                        " enabled=false")
+                } else try {
+                    val flow = flowField.get(controller)
+                    val value = if (flow != null) getValue.invoke(flow) else null
+                    val currentItems = if (value != null && wrapper.isInstance(value)) {
+                        content.get(value) as? List<*>
+                    } else null
+                    if (currentItems == null) {
+                        LogUtil.warn("我的右侧菜单数据过滤: 当前状态不是可过滤菜单" +
+                            " reason=" + reason +
+                            " flow=" + flow?.javaClass?.name +
+                            " state=" + value?.javaClass?.name)
+                    } else {
+                        val cleanedResult = filtered(currentItems)
+                        if (cleanedResult.removed > 0 && flow != null) {
+                            setValue.invoke(flow, constructor.newInstance(cleanedResult.value))
+                            logFilter(cleanedResult, currentItems.size, reason)
+                            LogUtil.incr("mineDrawerInitialStateRepaired")
+                        }
+                        val after = if (flow != null) getValue.invoke(flow) else null
+                        val finalList = if (after != null && wrapper.isInstance(after)) {
+                            content.get(after) as? List<*>
+                        } else null
+                        LogUtil.info("我的右侧菜单数据过滤: 当前实际控制器状态" +
+                            " source=" + reason +
+                            " before=" + currentItems.size +
+                            " models=" + cleanedResult.matchedModels +
+                            " removed=" + cleanedResult.removed +
+                            " after=" + (finalList?.size ?: -1) +
+                            " remainingBlocked=" +
+                            (finalList?.let { filtered(it).removed } ?: -1))
+                        LogUtil.incr("mineDrawerCurrentFlowVerified")
+                    }
+                } catch (e: Throwable) {
+                    LogUtil.warn("我的右侧菜单数据过滤: 当前状态修复失败" +
+                        " source=" + reason + " error=" +
+                        e.javaClass.simpleName + ": " + e.message)
+                }
+            }
+
             module.hook(build)
                 .setId("xhMineDrawerControllerBuild")
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
@@ -237,12 +287,28 @@ internal object MineDrawerDataFilter {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val output = chain.proceed()
+                            initialFragmentScrubCalls++
+                            val fragment = chain.thisObject
+                            val controller = try {
+                                fragment.javaClass.getDeclaredField("e").apply {
+                                    isAccessible = true
+                                }.get(fragment)
+                            } catch (e: Throwable) {
+                                LogUtil.warn("我的右侧菜单数据过滤: 右侧 Fragment.e 读取失败" +
+                                    " " + e.javaClass.simpleName + ": " + e.message)
+                                null
+                            }
                             LogUtil.info("我的右侧菜单数据过滤: 真实右侧 Fragment 已打开" +
                                 " enabled=" + enabled +
                                 " generated=" + generatedCalls +
                                 " published=" + publishCalls +
-                                " class=" + chain.thisObject.javaClass.name)
+                                " fragmentOpen=" + initialFragmentScrubCalls +
+                                " controllerFound=" + (controller != null) +
+                                " controllerType=" + controller?.javaClass?.name)
                             LogUtil.incr("mineDrawerRightSlideOpened")
+                            if (controller != null && cls.isInstance(controller)) {
+                                scrubCurrentState(controller, "Fragment.onCreateContent/current-p")
+                            }
                             output
                         })
                 }
@@ -252,7 +318,7 @@ internal object MineDrawerDataFilter {
             }
 
             LogUtil.info("我的右侧菜单数据过滤: APK 7.3.5.32 " +
-                "Controller.e/g + StateFlow 已安装")
+                "Controller.e/g + Fragment.e 当前 StateFlow 已安装")
         } catch (e: Throwable) {
             LogUtil.warn("我的右侧菜单数据过滤: 安装失败 " +
                 e.javaClass.simpleName + ": " + e.message)
