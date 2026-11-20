@@ -500,11 +500,15 @@ internal object MineUiCleaner {
     }
 
     fun scan(activity: Activity?, windows: Collection<View>) {
-        if ((!hideShortcuts && !hideAds) || activity?.javaClass?.name != MAIN ||
-            activity.isFinishing || activity.isDestroyed) return
+        if ((!hideShortcuts && !hideAds) || activity == null ||
+            activity.isFinishing || activity.isDestroyed ||
+            !activity.javaClass.name.startsWith("com.dragon.read.")) return
         try {
-            val decor = activity.window?.decorView ?: return
+            // The hamburger drawer can be a separate Activity/Window. Scan it
+            // independently; only the shortcut row belongs to the main tab.
             cleanRightMenu(windows)
+            if (activity.javaClass.name != MAIN) return
+            val decor = activity.window?.decorView ?: return
             val row = findShortcutRow(decor)
             if (row != null) {
                 val page = findMinePage(row, decor.resources.displayMetrics.heightPixels,
