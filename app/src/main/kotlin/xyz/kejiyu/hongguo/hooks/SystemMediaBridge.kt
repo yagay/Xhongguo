@@ -999,12 +999,8 @@ internal object SystemMediaBridge {
         }
         val stateChanged = knownPlaying != playing
         knownPlaying = playing
-        if (playing && EpisodeNavigator.onNativePlayback(
-                foregroundActivity.get(), videoEngine.get(), true)) {
-            captureNativePlayEntity("episode-native-confirmed")
-            readCurrentTimeline()
-            updateSessionMetadata()
-        }
+        if (playing) EpisodeNavigator.onNativePlayback(
+            foregroundActivity.get(), videoEngine.get(), true)
         if (playing) {
             scheduleTimelinePoll(900L)
             if (!requestedBackgroundPlayback) resumeAttempts = 0
@@ -1230,6 +1226,20 @@ internal object SystemMediaBridge {
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 注册通知按键失败 " + e.message)
         }
+    }
+
+    /**
+     * Called after a verified native episode transition, or after a safe
+     * one-shot timeout. Re-enable available transport actions and refresh
+     * metadata without sending another native play command.
+     */
+    fun onEpisodeNavigationSettled() {
+        if (!enabled) return
+        captureNativePlayEntity("episode-navigation-settled")
+        readCurrentTimeline()
+        updateSessionMetadata(force = true)
+        updateSessionState(knownPlaying)
+        if (reportedCard) updateMediaNotification(knownPlaying)
     }
 
     private fun requestEpisode(direction: Int, reason: String) {

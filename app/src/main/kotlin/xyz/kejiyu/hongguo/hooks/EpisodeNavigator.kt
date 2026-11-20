@@ -40,12 +40,24 @@ internal object EpisodeNavigator {
         val started: Long,
         val direction: Int,
         var sawNativeStart: Boolean = false,
-        var observedEngine: WeakReference<Any> = WeakReference(null)
+        var observedEngine: WeakReference<Any> = WeakReference(null),
+        var sourceEngine: WeakReference<Any> = WeakReference(null),
+        var sourceEngineId: String? = null,
+        var initialProgressMs: Long = -1L
     )
     private var pending: Pending? = null
     private var lastUnsupportedAt = 0L
     private var lastCapabilityDiagnosticAt = 0L
     private var lastCapabilityReason = ""
+    private var lastViewDiagnosticAt = 0L
+
+    private fun playbackPosition(engine: Any): Long? {
+        for (name in arrayOf("getCurrentPlaybackTimeAsync", "getCurrentPlaybackTime")) {
+            val number = call(engine, name) as? Number
+            if (number != null && number.toLong() >= 0L) return number.toLong()
+        }
+        return null
+    }
 
     private fun reportCapability(
         reason: String, activity: Activity?, engine: Any?,
@@ -124,6 +136,10 @@ internal object EpisodeNavigator {
         val fragmentView = call(model.fragment, "getView") as? View
             ?: return null
         val candidates = ArrayList<Target>()
+        var pagerSeen = 0
+        var recyclerSeen = 0
+        var pagerSameCount = 0
+        var recyclerSameCount = 0
         val queue = java.util.ArrayDeque<View>()
         queue.addLast(fragmentView)
         var scanned = 0
@@ -131,12 +147,21 @@ internal object EpisodeNavigator {
             val view = queue.removeFirst()
             if (extendsClass(view, "androidx.viewpager2.widget.ViewPager2") ||
                 extendsClass(view, "androidx.viewpager.widget.ViewPager")) {
+                pagerSeen++
+                val adapter = call(view, "getAdapter")
+                val count = (call(adapter, "getItemCount") as? Number)?.toInt()
+                    ?: (call(adapter, "getCount") as? Number)?.toInt()
+                if (count == model.listCount) pagerSameCount++
                 if (matchesPager(view, model.currentIndex, model.listCount)) {
                     candidates.add(Target(activity, model, view, "pager"))
                 }
-            } else if (extendsClass(view, "androidx.recyclerview.widget.RecyclerView") &&
-                matchesRecycler(view, model.currentIndex, model.listCount)) {
-                candidates.add(Target(activity, model, view, "recycler"))
+            } else if (extendsClass(view, "androidx.recyclerview.widget.RecyclerView")) {
+                recyclerSeen++
+                val adapter = call(view, "getAdapter")
+                if ((call(adapter, "getItemCount") as? Number)?.toInt() ==
+                    model.listCount) recyclerSameCount++
+                if (matchesRecycler(view, model.currentIndex, model.listCount))
+                    candidates.add(Target(activity, model, view, "recycler"))
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) queue.addLast(view.getChildAt(i))
@@ -145,6 +170,16 @@ internal object EpisodeNavigator {
         // A matching ViewPager is authoritative; its internal RecyclerView
         // may also match. For an ambiguous set of independent page controls,
         // refuse to navigate rather than driving the wrong list.
+        val now = SystemClock.uptimeMillis()
+        if (now - lastViewDiagnosticAt > 12000L) {
+            lastViewDiagnosticAt = now
+            LogUtil.info("系统媒体切集: 原生导航视图检测" +
+                " viewsScanned=" + scanned + " pagerSeen=" + pagerSeen +
+                " pagerSameCount=" + pagerSameCount +
+                " recyclerSeen=" + recyclerSeen +
+                " recyclerSameCount=" + recyclerSameCount +
+                " matched=" + candidates.size + " evidence=" + model.evidence)
+        }
         val pagers = candidates.filter { it.type == "pager" }
         return when {
             pagers.size == 1 -> pagers[0]
@@ -215,6 +250,9 @@ internal object EpisodeNavigator {
         }
         val p = Pending(WeakReference(target.activity), target.model.currentVideoId,
             destinationId, destination, SystemClock.uptimeMillis(), direction)
+        p.sourceEngine = WeakReference(engine)
+        p.sourceEngineId = call(engine, "getVideoID")?.toString()
+            ?.takeIf { it.isNotBlank() && it != "null" }
         pending = p
         val dispatched = try {
             when (target.type) {
@@ -276,6 +314,7 @@ internal object EpisodeNavigator {
             LogUtil.warn("系统媒体切集: 超时，未确认目标视频开始播放" +
                 " targetIndex=${task.destinationIndex} nativeStart=${task.sawNativeStart}")
             LogUtil.incr("systemMediaEpisodeUnconfirmed")
+            SystemMediaBridge.onEpisodeNavigationSettled()
             return
         }
         // Waiting for the real video. Do not inject another play request.
@@ -288,23 +327,45 @@ internal object EpisodeNavigator {
         val candidate = FullSeriesMediaInfo.navigationCandidate(activity, engine)
         if (candidate?.currentIndex != task.destinationIndex ||
             candidate.currentVideoId != task.destinationId) return false
+        val progress = playbackPosition(engine) ?: return false
+        if (task.initialProgressMs < 0L) {
+            task.initialProgressMs = progress
+            return false
+        }
+        if (progress - task.initialProgressMs < 250L) return false
         pending = null
-        LogUtil.info("系统媒体切集: 原生播放已确认 " +
-            "direction=${if (task.direction > 0) "next" else "previous"}" +
-            " targetIndex=${task.destinationIndex}")
+        LogUtil.info("系统媒体切集: 目标集播放进度确认 " +
+            "direction=" + (if (task.direction > 0) "next" else "previous") +
+            " targetIndex=" + task.destinationIndex +
+            " progressDeltaMs=" + (progress - task.initialProgressMs))
         LogUtil.incr("systemMediaEpisodeConfirmed")
+        SystemMediaBridge.onEpisodeNavigationSettled()
         return true
     }
 
     /** Called by the existing native playback observer, not a new global Hook. */
     fun onNativePlayback(activity: Activity?, engine: Any?, playing: Boolean): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            main.post { onNativePlayback(activity, engine, playing) }
+            return false
+        }
         val task = pending ?: return false
         if (!playing || activity !== task.activity.get() || engine == null) return false
         val engineId = call(engine, "getVideoID")?.toString()
             ?.takeIf { it.isNotBlank() && it != "null" }
-        if (engineId != task.destinationId || engineId == task.sourceId) return false
+        val newEngine = engine !== task.sourceEngine.get()
+        val changedNativeId = engineId != null && task.sourceEngineId != null &&
+            engineId != task.sourceEngineId
+        // These IDs need not equal SaasVideoData.vid. Require a *new*
+        // native play event and independently validate current list/index.
+        if (!newEngine && !changedNativeId) return false
         task.sawNativeStart = true
         task.observedEngine = WeakReference(engine)
+        task.initialProgressMs = playbackPosition(engine) ?: -1L
+        LogUtil.info("系统媒体切集: 已捕获新原生播放" +
+            " newEngine=" + newEngine +
+            " changedNativeId=" + changedNativeId +
+            " targetIndex=" + task.destinationIndex)
         return finishIfPlayingTarget(task)
     }
 
