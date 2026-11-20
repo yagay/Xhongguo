@@ -44,6 +44,29 @@ internal object EpisodeNavigator {
     )
     private var pending: Pending? = null
     private var lastUnsupportedAt = 0L
+    private var lastCapabilityDiagnosticAt = 0L
+    private var lastCapabilityReason = ""
+
+    private fun reportCapability(
+        reason: String, activity: Activity?, engine: Any?,
+        model: FullSeriesMediaInfo.NavigationCandidate? = null
+    ) {
+        val now = SystemClock.uptimeMillis()
+        if (reason == lastCapabilityReason &&
+            now - lastCapabilityDiagnosticAt in 0L..12000L) return
+        lastCapabilityDiagnosticAt = now
+        lastCapabilityReason = reason
+        LogUtil.info("系统媒体切集: EpisodeNavigator v2 导航能力" +
+            " reason=$reason" +
+            " page=" + (activity?.javaClass?.simpleName ?: "none") +
+            " engine=" + (engine != null) +
+            " model=" + (model != null) +
+            " index=" + (model?.currentIndex ?: -1) +
+            " listCount=" + (model?.listCount ?: -1) +
+            " prev=" + (model?.previousVideoId != null) +
+            " next=" + (model?.nextVideoId != null))
+        LogUtil.incr("systemMediaEpisodeCapabilityChecked")
+    }
 
     private fun call(obj: Any?, methodName: String, vararg params: Any): Any? {
         if (obj == null) return null
@@ -132,12 +155,30 @@ internal object EpisodeNavigator {
     }
 
     private fun resolve(activity: Activity?, engine: Any?): Target? {
-        if (Looper.myLooper() != Looper.getMainLooper() ||
-            activity?.javaClass?.name != SERIES_ACTIVITY || engine == null ||
-            activity.isFinishing || activity.isDestroyed) return null
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            reportCapability("not-main-thread", activity, engine)
+            return null
+        }
+        if (activity?.javaClass?.name != SERIES_ACTIVITY ||
+            activity.isFinishing || activity.isDestroyed) {
+            reportCapability("not-active-series-activity", activity, engine)
+            return null
+        }
+        if (engine == null) {
+            reportCapability("no-active-video-engine", activity, null)
+            return null
+        }
         val model = FullSeriesMediaInfo.navigationCandidate(activity, engine)
-            ?: return null
-        return locate(activity, model)
+        if (model == null) {
+            reportCapability("no-matching-native-episode-model", activity, engine)
+            return null
+        }
+        val target = locate(activity, model)
+        reportCapability(
+            if (target == null) "no-matching-native-pager"
+            else "ready-" + target.type,
+            activity, engine, model)
+        return target
     }
 
     fun controls(activity: Activity?, engine: Any?): Controls {
@@ -269,5 +310,7 @@ internal object EpisodeNavigator {
 
     fun reset() {
         pending = null
+        lastCapabilityReason = ""
+        lastCapabilityDiagnosticAt = 0L
     }
 }
