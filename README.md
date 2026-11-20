@@ -181,3 +181,9 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 ### 2026-11-20 我的页面占位和右侧菜单清理
 
 改进 MineUiCleaner：隐藏福利/订单/消息整排时，除了 View.GONE，还同步折叠节点的固定高度、最小高度与 Margin，以及仅含隐藏节点的有限上层包装容器。恢复开关时保留并还原原始布局信息。保护 ScrollView、RecyclerView、ViewPager 和整页容器，避免隐藏其他业务页面。右上角三横线展开的侧边菜单，按已知精确文本「创作中心、我的钱包、会员中心、游戏中心」识别单独菜单行，只有同一窗口同时出现至少两项目标时才执行，并折叠对应行的布局占位。使用 WindowManagerGlobal 根视图扫描以覆盖独立弹窗；不删除账号资料、收藏、历史、设置和其他菜单项。开关沿用 hide_mine_shortcuts，默认开启。界面效果仍需真机验证。
+
+### 2026-11-20 20:58 我的页面清理 V2
+
+根据 20:58 诊断包：曾经检测并隐藏整排 1272×160px RecyclerView，但存在外层占位；右侧菜单无任何匹配成功记录。诊断导出时 hide_mine_shortcuts=false、hide_all_ads=false，表明旧精简开关关闭。本版使用默认开启、可单独关闭的新开关 mine_cleanup_v2，避免旧测试开关的状态阻止本次修复；广告清理仍尊重现有 hide_all_ads 设置。
+新增对外层容器的安全折叠：如果只有隐藏区域和无业务内容的装饰/空白节点，收起固定高度与边距；保护其他可点击、文本/图片业务节点、RecyclerView/ScrollView 和屏幕级容器。无法安全折叠会记录「外层占位诊断」。
+侧边菜单改用 TextView 文本及 View.contentDescription 双路径识别；支持惰性加载单条菜单项，在同窗另有已知菜单项时才清理独立行；每 12 秒输出目标名称、命中数量和窗口根类名，便于发现 WebView/Compose 等不属于原生 TextView 的渲染结构。

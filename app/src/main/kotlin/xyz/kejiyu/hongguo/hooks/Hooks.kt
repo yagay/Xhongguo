@@ -285,7 +285,10 @@ object Hooks {
         // Dedicated default-on cleanup for the requested build. Keep the old
         // ad_block provider key for compatibility, but use one new UI toggle.
         gAdOn = prefs.getBoolean("hide_all_ads", true)
-        gMineShortcutsOff = prefs.getBoolean("hide_mine_shortcuts", true)
+        // v2 opts in to structural layout cleanup, independently of the old
+        // "hide_mine_shortcuts" switch. The 20:58 diagnostics showed the old
+        // preference persisted as false after testing, preventing both fixes.
+        gMineShortcutsOff = prefs.getBoolean("mine_cleanup_v2", true)
         MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn)
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
         gTopZoneOn = prefs.getBoolean("top_zone", false)
@@ -3884,11 +3887,11 @@ object Hooks {
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
                 else restoreShoppingTabViews()
             }, "disable_shopping_mall")
-            addSwitch("精简我的页面", "移除福利/订单/消息整排及占位；隐藏右侧菜单的创作中心/我的钱包/会员中心/游戏中心", { gMineShortcutsOff }, {
+            addSwitch("精简我的页面 V2", "同步折叠福利/订单/消息及空白；隐藏右侧四项；默认开启", { gMineShortcutsOff }, {
                 gMineShortcutsOff = it
                 MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
                 gNextMineUiScanAt = 0L
-            }, "hide_mine_shortcuts")
+            }, "mine_cleanup_v2")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {

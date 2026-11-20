@@ -130,43 +130,78 @@ internal object MineUiCleaner {
         }
     }
 
+    private var lastWrapperProbe = 0L
+    private var lastMenuProbe = 0L
+
+    private fun meaningfulSibling(root: View, depth: Int = 0): Boolean {
+        if (root.visibility != View.VISIBLE || depth > 5) return false
+        if (root is TextView && normalized(root.text).isNotEmpty()) return true
+        if (root.isClickable && root.height > root.resources.displayMetrics.density * 20f) {
+            // A real button or media tile counts as content; a background
+            // spacer/divider is never enough to preserve a blank wrapper.
+            return true
+        }
+        if (root is android.widget.ImageView && root.drawable != null &&
+            root.width > root.resources.displayMetrics.density * 32f &&
+            root.height > root.resources.displayMetrics.density * 32f) return true
+        if (root is ViewGroup) {
+            if (root.javaClass.name.contains("RecyclerView") &&
+                root.visibility == View.VISIBLE && root.height > 0) return true
+            for (i in 0 until minOf(root.childCount, 20)) {
+                if (meaningfulSibling(root.getChildAt(i), depth + 1)) return true
+            }
+        }
+        return false
+    }
+
     private fun collapseEmptyWrappers(
         hidden: View,
         states: MutableMap<View, Int>,
-        reason: String
+        reason: String,
+        originalHeight: Int
     ) {
         var item = hidden
         val density = hidden.resources.displayMetrics.density
         val screenHeight = hidden.resources.displayMetrics.heightPixels
-        repeat(4) {
+        repeat(6) { level ->
             val parent = item.parent as? ViewGroup ?: return
-            // A ScrollView, RecyclerView or a full-page root must NEVER be
-            // collapsed. Their child positions are owned by the system.
-            val type = parent.javaClass.name
-            if (type.contains("RecyclerView") ||
-                type.contains("ScrollView") ||
-                type.contains("ViewPager") ||
-                type.contains("DecorView") ||
-                parent.height > minOf(screenHeight * .40f, 340f * density))
-                return
+            val cls = parent.javaClass.name
+            if (cls.contains("RecyclerView") || cls.contains("ScrollView") ||
+                cls.contains("ViewPager") || cls.contains("DecorView") ||
+                cls.contains("CoordinatorLayout")) return
 
-            // Only collapse the wrapper if no actual visible sibling remains.
-            // Thin decorative divider/spacer views do not count as content.
-            val substantiveSibling = (0 until parent.childCount)
-                .map { parent.getChildAt(it) }
-                .any { child ->
-                    child !== item && child.visibility == View.VISIBLE &&
-                        child.height > 7f * density && child.width > 7f * density
+            // Never collapse a whole Mine page, a screen-sized layout or a
+            // container with real, still-visible content.
+            val height = if (parent.height > 0) parent.height else parent.measuredHeight
+            val maxHeight = minOf(screenHeight * .34f,
+                maxOf(originalHeight + 120f * density, 220f * density))
+            val siblings = (0 until parent.childCount).map { parent.getChildAt(it) }
+                .filter { it !== item && it.visibility == View.VISIBLE }
+            val meaningful = siblings.any { meaningfulSibling(it) }
+            if (height > maxHeight || meaningful) {
+                val now = SystemClock.uptimeMillis()
+                if (now - lastWrapperProbe > 12000L) {
+                    lastWrapperProbe = now
+                    LogUtil.info("我的页面精简: 外层占位诊断" +
+                        " level=" + level + " wrapper=" + parent.javaClass.name +
+                        " height=" + height + " maxHeight=" + maxHeight.toInt() +
+                        " siblings=" + siblings.size +
+                        " substantive=" + meaningful +
+                        " paramsHeight=" + (parent.layoutParams?.height ?: -2))
+                    LogUtil.incr("mineUiWrapperStopProbe")
                 }
-            if (substantiveSibling) return
+                return
+            }
             if (parent.visibility != View.GONE) {
                 synchronized(states) {
                     if (!states.containsKey(parent)) states[parent] = parent.visibility
                 }
                 zeroGeometry(parent)
                 parent.visibility = View.GONE
-                LogUtil.info("我的页面精简: 收起空白外层容器 " +
-                    reason + " class=" + parent.javaClass.simpleName)
+                LogUtil.info("我的页面精简: 已折叠空白外层" +
+                    " level=" + level +
+                    " class=" + parent.javaClass.simpleName +
+                    " originalHeight=" + height + " reason=" + reason)
                 LogUtil.incr("mineUiWrapperCollapsed")
             }
             item = parent
@@ -178,10 +213,10 @@ internal object MineUiCleaner {
         synchronized(states) {
             if (!states.containsKey(view)) states[view] = view.visibility
         }
-        val originalHeight = view.height
+        val originalHeight = maxOf(view.height, view.measuredHeight)
         zeroGeometry(view)
         view.visibility = View.GONE
-        collapseEmptyWrappers(view, states, reason)
+        collapseEmptyWrappers(view, states, reason, originalHeight)
         view.requestLayout()
         (view.parent as? View)?.requestLayout()
         LogUtil.info("我的页面精简: 已移除占位 " + reason +
@@ -361,34 +396,61 @@ internal object MineUiCleaner {
      * menu root where at least two of them are visible simultaneously.
      * This prevents removing the same-named buttons on unrelated pages.
      */
+    private data class MenuLabel(val view: View, val title: String)
+
+    private fun menuName(view: View): String {
+        val raw = if (view is TextView && !view.text.isNullOrBlank()) {
+            view.text
+        } else view.contentDescription
+        return normalized(raw).trimEnd('›', '>', '»', '→', '：', ':')
+    }
+
+    /** Includes contentDescription-backed row widgets and normal TextViews. */
+    private fun collectMenuLabels(root: View): List<MenuLabel> {
+        val result = ArrayList<MenuLabel>()
+        val queue = java.util.ArrayDeque<View>()
+        queue.addLast(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned++ < 2400) {
+            val view = queue.removeFirst()
+            if (view.visibility != View.VISIBLE || !view.isShown) continue
+            val title = menuName(view)
+            if (title in RIGHT_MENU_ITEMS || title in PROTECTED_MENU_ITEMS) {
+                result.add(MenuLabel(view, title))
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) queue.addLast(view.getChildAt(i))
+            }
+        }
+        return result
+    }
+
     private fun findRightMenuItem(
-        label: TextView,
-        rootLabels: List<TextView>
+        label: MenuLabel,
+        rootLabels: List<MenuLabel>
     ): ViewGroup? {
-        val density = label.resources.displayMetrics.density
-        val screenWidth = label.resources.displayMetrics.widthPixels
-        var current = label.parent as? ViewGroup
+        val density = label.view.resources.displayMetrics.density
+        val screenWidth = label.view.resources.displayMetrics.widthPixels
+        var current = (label.view as? ViewGroup) ?: label.view.parent as? ViewGroup
         var candidate: ViewGroup? = null
-        repeat(8) {
+        repeat(9) {
             val group = current ?: return@repeat
-            val width = group.width
-            val height = group.height
-            if (group.isShown && width >= .28f * screenWidth &&
+            val width = maxOf(group.width, group.measuredWidth)
+            val height = maxOf(group.height, group.measuredHeight)
+            if (group.isShown && width >= .22f * screenWidth &&
                 width <= screenWidth * 1.02f &&
-                height >= 28f * density && height <= 116f * density) {
+                height >= 20f * density && height <= 140f * density &&
+                !group.javaClass.name.contains("RecyclerView")) {
                 val otherTarget = rootLabels.any { other ->
-                    other !== label && isDescendant(other, group) &&
-                        normalized(other.text) in RIGHT_MENU_ITEMS
+                    other.view !== label.view && isDescendant(other.view, group) &&
+                        other.title in RIGHT_MENU_ITEMS &&
+                        other.title != label.title
                 }
                 val protectedLabel = rootLabels.any { other ->
-                    other !== label && isDescendant(other, group) &&
-                        normalized(other.text) in PROTECTED_MENU_ITEMS
+                    other.view !== label.view && isDescendant(other.view, group) &&
+                        other.title in PROTECTED_MENU_ITEMS
                 }
-                if (!otherTarget && !protectedLabel) {
-                    // Prefer the outermost single-entry row. It includes the
-                    // icon, its margins and background, not just the TextView.
-                    candidate = group
-                }
+                if (!otherTarget && !protectedLabel) candidate = group
             }
             current = group.parent as? ViewGroup
         }
@@ -399,24 +461,42 @@ internal object MineUiCleaner {
         if (!hideShortcuts) return
         val processed = HashSet<View>()
         var removed = 0
+        var observedTargets = 0
+        var observedLabelNames = HashSet<String>()
+        var windowKinds = ArrayList<String>()
         for (root in roots) {
             if (!root.isAttachedToWindow || !root.isShown) continue
-            val labels = collectVisibleText(root, 1600)
-            val targets = labels.filter { normalized(it.text) in RIGHT_MENU_ITEMS }
-            val distinct = targets.map { normalized(it.text) }.distinct()
-            if (distinct.size < 2) continue
+            windowKinds.add(root.javaClass.simpleName)
+            val labels = collectMenuLabels(root)
+            val targets = labels.filter { it.title in RIGHT_MENU_ITEMS }
+            val distinct = targets.map { it.title }.distinct()
+            observedTargets += distinct.size
+            observedLabelNames.addAll(distinct)
+            if (distinct.isEmpty()) continue
+            // A drawer may lazily bind only one menu entry at a time. Two
+            // target labels, or a target plus a known drawer-settings entry,
+            // are required to avoid touching unrelated promo surfaces.
+            val menuProof = distinct.size >= 2 ||
+                labels.any { it.title in PROTECTED_MENU_ITEMS }
+            if (!menuProof) continue
             for (label in targets) {
                 val item = findRightMenuItem(label, labels) ?: continue
                 if (!processed.add(item)) continue
-                hide(item, menuStates, "右侧菜单 " + normalized(label.text))
+                hide(item, menuStates, "右侧菜单 " + label.title)
                 removed++
             }
         }
-        if (removed > 0) {
-            LogUtil.info("我的页面精简: 右侧菜单本轮移除 " + removed +
-                " 项 (创作中心/我的钱包/会员中心/游戏中心)")
-            LogUtil.incr("mineRightMenuItemsHidden")
+        val now = SystemClock.uptimeMillis()
+        if ((removed > 0 || now - lastMenuProbe > 12000L) && roots.isNotEmpty()) {
+            lastMenuProbe = now
+            LogUtil.info("我的页面精简: 右侧菜单扫描" +
+                " targetCount=" + observedTargets +
+                " names=" + observedLabelNames.joinToString(",") +
+                " hidden=" + removed +
+                " windows=" + windowKinds.take(8).joinToString(","))
+            LogUtil.incr("mineRightMenuProbe")
         }
+        if (removed > 0) LogUtil.incr("mineRightMenuItemsHidden")
     }
 
     fun scan(activity: Activity?, windows: Collection<View>) {
