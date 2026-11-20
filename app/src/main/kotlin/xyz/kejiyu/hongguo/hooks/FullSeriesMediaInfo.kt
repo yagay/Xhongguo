@@ -657,13 +657,44 @@ internal object FullSeriesMediaInfo {
         val evidence: String
     )
 
+    private var lastNavRejectReason = ""
+    private var lastNavRejectAt = 0L
+
+    private fun rejectedNavigation(reason: String, extra: String = ""): NavigationCandidate? {
+        val now = SystemClock.uptimeMillis()
+        if (reason != lastNavRejectReason || now - lastNavRejectAt > 12_000L) {
+            lastNavRejectReason = reason
+            lastNavRejectAt = now
+            LogUtil.info("系统媒体切集: 导航模型拒绝原因=" + reason +
+                (if (extra.isNotEmpty()) " " + extra else ""))
+            LogUtil.incr("systemMediaEpisodeModelReject")
+        }
+        return null
+    }
+
     fun navigationCandidate(activity: Activity?, engine: Any?): NavigationCandidate? {
         if (activity?.javaClass?.name != ACTIVITY || engine == null ||
-            activity.isFinishing || activity.isDestroyed) return null
+            activity.isFinishing || activity.isDestroyed)
+            return rejectedNavigation("inactive-activity-or-engine")
+
         val engineId = call(engine, "getVideoID")?.toString()
             ?.takeIf { it.isNotBlank() && it != "null" }
-        val seriesKey = observedForEngine(engine).seriesId
-        val ranked = currentFragmentEntries(activity, seriesKey, null)
+
+        // The metadata resolver already verified the series ID against the
+        // active inner fragment. Reuse that verified identity rather than
+        // requiring observedForEngine(engine) to have a direct ID mapping.
+        val cachedKey = if (cachedActivity.get() === activity) cachedSeriesKey else null
+        val cachedCount = if (cachedActivity.get() === activity) cachedTotal else null
+        val presenter = field(activity, "a")
+        val presenterKey = listOf("I", "z")
+            .mapNotNull { field(presenter, it) }
+            .filter { it.javaClass.name == DATA }
+            .mapNotNull { seriesId(field(it, "episodesId")) }
+            .firstOrNull()
+        val observedKey = observedForEngine(engine).seriesId
+        val seriesKey = cachedKey ?: observedKey ?: presenterKey
+
+        val ranked = currentFragmentEntries(activity, seriesKey, cachedCount)
             .sortedWith(compareByDescending<ActiveFragmentEntry> {
                 engineId != null && vid(it.video) == engineId
             }.thenByDescending { it.score }.thenByDescending { it.seriesVerified })
@@ -671,58 +702,90 @@ internal object FullSeriesMediaInfo {
         val runnerUp = ranked.getOrNull(1)
         val exactEngine = best != null && engineId != null &&
             vid(best.video) == engineId
+        val ambiguous = runnerUp != null && best != null &&
+            runnerUp.score == best.score &&
+            runnerUp.seriesVerified == best.seriesVerified &&
+            runnerUp.fragment !== best.fragment
         val uniqueVisible = best != null && best.score >= 12 &&
-            best.seriesVerified &&
-            (runnerUp == null || runnerUp.score < best.score)
+            !ambiguous && (runnerUp == null || runnerUp.score < best.score) &&
+            (best.seriesVerified ||
+                seriesId(field(best.video, "episodesId")) != null)
+
         val fragment: Any
         val index: Int
         val expectedCount: Int
         val evidence: String
-        if (best != null && (exactEngine || uniqueVisible)) {
-            if (runnerUp != null && runnerUp.score == best.score &&
-                runnerUp.seriesVerified == best.seriesVerified &&
-                runnerUp.fragment !== best.fragment) return null
+        if (best != null && (exactEngine || uniqueVisible) && !ambiguous) {
             fragment = best.fragment
             index = best.itemPosition
             expectedCount = best.listCount
             evidence = if (exactEngine) "engine-id" else "unique-visible-fragment"
         } else {
-            // The Activity may remain alive after its view loses window focus.
-            // Revalidate the exact fragment/series/indices on every request.
-            if (trustedNavActivity.get() !== activity) return null
-            fragment = trustedNavFragment.get() ?: return null
+            // A previous foreground validation allows a background session
+            // to use the same fragment, but never an unverified new Activity.
+            if (trustedNavActivity.get() !== activity) {
+                return rejectedNavigation("no-unique-trusted-fragment",
+                    "candidates=" + ranked.size +
+                    " cachedSeries=" + (cachedKey != null) +
+                    " observedSeries=" + (observedKey != null) +
+                    " presenterSeries=" + (presenterKey != null) +
+                    " score=" + (best?.score ?: -1) +
+                    " verified=" + (best?.seriesVerified == true) +
+                    " ambiguous=" + ambiguous)
+            }
+            fragment = trustedNavFragment.get()
+                ?: return rejectedNavigation("trusted-fragment-collected")
             if (call(fragment, "getActivity") !== activity ||
-                call(fragment, "isAdded") != true) return null
+                call(fragment, "isAdded") != true)
+                return rejectedNavigation("trusted-fragment-detached")
             index = (call(fragment, "getCurrentPosition") as? Number)
-                ?.toInt() ?: return null
+                ?.toInt() ?: return rejectedNavigation("no-background-position")
             expectedCount = (call(fragment, "getDataList") as? List<*>)
-                ?.size ?: return null
+                ?.size ?: return rejectedNavigation("no-background-list")
             evidence = "validated-fragment-background"
         }
-        val list = call(fragment, "getDataList") as? List<*> ?: return null
+
+        val list = call(fragment, "getDataList") as? List<*>
+            ?: return rejectedNavigation("list-unavailable")
         if (list.size != expectedCount || index !in list.indices ||
-            list.size !in 2..5000) return null
+            list.size !in 2..5000)
+            return rejectedNavigation("list-index-not-aligned",
+                "index=" + index + " count=" + list.size +
+                " expected=" + expectedCount)
+
         fun videoAt(position: Int): Any? {
             if (position !in list.indices) return null
             return call(list[position], "getVideoData")?.takeIf {
                 it.javaClass.name == DATA
             }
         }
-        val selected = videoAt(index) ?: return null
-        val selectedId = vid(selected) ?: return null
-        // Independent model indices must agree with the selected native page.
+        val selected = videoAt(index)
+            ?: return rejectedNavigation("current-wrapper-unavailable",
+                "index=" + index + " count=" + list.size)
+        val selectedId = vid(selected)
+            ?: return rejectedNavigation("current-video-id-unavailable")
         val localIndex = number(field(selected, "indexInList"))
         val episodeNumber = number(field(selected, "vidIndex"))
         if (localIndex != index.toLong() &&
-            episodeNumber != index.toLong() + 1L) return null
+            episodeNumber != index.toLong() + 1L)
+            return rejectedNavigation("native-index-disagreement",
+                "position=" + index +
+                " localIndex=" + (localIndex ?: -1) +
+                " episodeNumber=" + (episodeNumber ?: -1))
+
         val key = seriesId(field(selected, "episodesId"))
-        if (seriesKey != null && key != null && key != seriesKey) return null
+        if (seriesKey != null && key != null && key != seriesKey)
+            return rejectedNavigation("current-series-disagreement")
         if (evidence == "validated-fragment-background" &&
-            trustedNavSeries != null && key != trustedNavSeries) return null
+            trustedNavSeries != null && key != trustedNavSeries)
+            return rejectedNavigation("background-series-changed")
+        if (key == null && seriesKey == null)
+            return rejectedNavigation("series-unverified")
+
         fun neighborId(position: Int): String? {
             val adjacent = videoAt(position) ?: return null
-            val neighborKey = seriesId(field(adjacent, "episodesId"))
-            if (key != null && neighborKey != null && key != neighborKey)
+            val neighborSeries = seriesId(field(adjacent, "episodesId"))
+            if (key != null && neighborSeries != null && key != neighborSeries)
                 return null
             val neighborIndex = number(field(adjacent, "indexInList"))
             val neighborEpisode = number(field(adjacent, "vidIndex"))
@@ -730,21 +793,23 @@ internal object FullSeriesMediaInfo {
                 neighborEpisode != position.toLong() + 1L) return null
             return vid(adjacent)?.takeIf { it != selectedId }
         }
+
         if (evidence != "validated-fragment-background") {
             trustedNavActivity = WeakReference(activity)
             trustedNavFragment = WeakReference(fragment)
-            trustedNavSeries = key
+            trustedNavSeries = key ?: seriesKey
         }
         if (lastNavEvidence != evidence) {
             lastNavEvidence = evidence
             LogUtil.info("系统媒体切集: 当前导航模型来源=" + evidence +
                 " engineIdMatched=" + (engineId != null && engineId == selectedId) +
-                " seriesVerified=" + (key != null) +
+                " seriesVerified=" + (key != null || seriesKey != null) +
                 " index=" + index + " count=" + list.size)
+            LogUtil.incr("systemMediaEpisodeModelResolved")
         }
         return NavigationCandidate(
             fragment, index, list.size, selectedId,
-            neighborId(index - 1), neighborId(index + 1), key, evidence)
+            neighborId(index - 1), neighborId(index + 1), key ?: seriesKey, evidence)
     }
 
     fun read(activity: Activity?, engine: Any?): Info {

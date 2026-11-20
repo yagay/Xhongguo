@@ -68,7 +68,7 @@ internal object EpisodeNavigator {
             now - lastCapabilityDiagnosticAt in 0L..12000L) return
         lastCapabilityDiagnosticAt = now
         lastCapabilityReason = reason
-        LogUtil.info("系统媒体切集: EpisodeNavigator v3 导航能力" +
+        LogUtil.info("系统媒体切集: EpisodeNavigator v4 导航能力" +
             " reason=$reason" +
             " page=" + (activity?.javaClass?.simpleName ?: "none") +
             " engine=" + (engine != null) +

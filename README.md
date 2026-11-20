@@ -153,3 +153,7 @@
 
 安装 APK、在 LSPosed 中启用并选择红果作用域后，直接打开桌面的 **Xhongguo**，点击 **打开模块设置** 即可修改全部功能。
 设置保存到模块自身的私有配置，通过仅允许红果目标应用 UID 访问的 ContentProvider 同步到 Hook；无需先打开目标 App 的设置面板。旧版保存在红果数据目录中的配置会在第一次运行红果时尝试迁移；部分启动时 Hook 需要完全退出并重启红果才能生效。
+
+### 2026-11-20：EpisodeNavigator v4 诊断修复
+
+20:06 的诊断显示 65 集内层 Fragment 索引准确、可见度为 15，但系统媒体导航器仍返回 `no-matching-native-episode-model`。原因是读媒体信息时采用了活动内缓存的剧集归属，而导航器仍将 `observedForEngine(engine).seriesId` 当作主要依据。v4 优先使用当前 Activity 的已确认剧集 ID、原生 presenter 模型与对应总集数，允许唯一的高可见度 Fragment 在严格索引检查通过时作为切集来源。拒绝时记录具体原因（`导航模型拒绝原因`），避免只出现笼统的 `model=false`。原生导航控件仍需要独立验证；不得把编译通过当成真实切集通过。

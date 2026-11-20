@@ -616,7 +616,7 @@ internal object SystemMediaBridge {
         enabled = true
         appContext = ctx.applicationContext
         if (firstActivation) {
-            LogUtil.info("系统媒体切集: EpisodeNavigator v3 已加载（diagnostic capability probe）")
+            LogUtil.info("系统媒体切集: EpisodeNavigator v4 已加载（diagnostic capability probe）")
         }
         // Do not advertise an active MediaSession before real playback is observed.
         // Home/splash startup is not evidence of a playing video.
