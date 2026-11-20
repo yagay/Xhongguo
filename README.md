@@ -191,3 +191,9 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 ### 2026-11-20 右侧菜单独立清理 V3
 
 诊断显示官方红果 7.3.5.32 上只检测到游戏中心一个普通 View 菜单标签（可能属于我的主页，而非右侧抽屉）；其他三个目标在该轮 View 层级中不存在；用户导出时 mine_cleanup_v2=false，导致过去整套菜单清理被停用。本版新增独立且默认开启的 right_menu_cleanup 开关。右侧菜单清理不再依赖 mine_cleanup_v2，也不再依据同一 DecorView 任意一个游戏中心文本就删除主页卡片。删除候选项之前必须发现右侧抽屉容器（类名特征或屏幕右缘的窄高可见面板），再限制到抽屉内部的独立菜单行；允许 TextView 文本或 contentDescription，且支持惰性逐项加载。新增每五秒节流的「右侧菜单 V3」诊断日志，报告观察到的目标名称、已确认抽屉数量、实际隐藏数量和 Compose/WebView/RecyclerView 容器类型。如果未找到目标，则需要真实右侧菜单展开时的截图或该诊断供下一步定位。
+
+### 原版 APK 7.3.5.32：三横线侧边菜单源码验证及原生数据层 Hook
+
+通过先前上传的原版《红果免费短剧_7.3.5.32.apk》检查 21 个 DEX。classes5.dex 中确认 com.dragon.read.kmp.mine.sidebar.MineSidebarPageKt.e(List,Composer,int):void、com.dragon.read.kmp.mine.sidebar.MineSidebarController.b(List):List，以及 com.dragon.read.kmp.mine.model.n (SidebarFunctionItemModel)，其 b/c/d/e 字段均为 String。诊断日志同步确认 MainPageDrawerLayout+ComposeView+AndroidComposeView；旧 View/TextView 隐藏逻辑无法完整访问 Compose 节点。
+新增 NativeMineSidebarFilter.kt，在 Controller.b 返回列表后以及 Compose.e 接收列表前，仅过滤类型为该菜单模型且字段与四个屏蔽标题或明确的路由标识匹配的项目。支持嵌套列表并同时移除已空的子列表，避免空白占位。其他项目保持不变。仅为 CN 7.3.5.32 安装，未命中会输出诊断而不会修改未知版本。
+新增独立、默认开启的 native_mine_sidebar_filter 开关；弃用此前只识别普通 View 的 right_menu_cleanup 行为，旧开关不影响新功能。新日志关键字：原生侧边菜单、nativeMineSidebarModelProbe、nativeMineSidebarItemsFiltered。仍需真机展开侧边菜单验证，若后端菜单模型没有直接存储中文名称或路由标识，则根据实际数据扩展过滤条件。

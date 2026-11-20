@@ -21,7 +21,7 @@ object ModuleSettingsStore {
         "notification_menu", "download_limit_unlimit", "video_longpress_settings",
         "disable_shopping_mall", "in_app_mini_player", "system_media_playback",
         "hide_mine_shortcuts", "hide_all_ads", "mine_cleanup_v2",
-        "right_menu_cleanup"
+        "right_menu_cleanup", "native_mine_sidebar_filter"
     )
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(

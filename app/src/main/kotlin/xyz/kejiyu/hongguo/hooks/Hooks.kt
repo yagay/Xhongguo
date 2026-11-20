@@ -293,12 +293,15 @@ object Hooks {
         // Drawer cleanup is independent of Mine shortcut cleanup. Some users
         // disable the latter to recover layout, but still want the four
         // commercial entries removed from the right-side menu.
-        gRightMenuOn = prefs.getBoolean("right_menu_cleanup", true)
+        gRightMenuOn = prefs.getBoolean("native_mine_sidebar_filter", true)
+        // APK 7.3.5.32 uses Jetpack Compose, not Android TextViews, for
+        // the four right drawer actions. Disable the old View scanner.
         MineUiCleaner.configure(
             gMasterOn && gMineShortcutsOff,
             gMasterOn && gAdOn,
-            gMasterOn && gRightMenuOn
+            false
         )
+        NativeMineSidebarFilter.enabled = gMasterOn && gRightMenuOn
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
         gTopZoneOn = prefs.getBoolean("top_zone", false)
         gNavBarOff = prefs.getBoolean("nav_bar_off", false)
@@ -2732,7 +2735,7 @@ object Hooks {
             override fun run() {
                 try {
                     scanShoppingTabIfNeeded(gCurrentActivity)
-                    if (gMasterOn && (gMineShortcutsOff || gAdOn || gRightMenuOn))
+                    if (gMasterOn && (gMineShortcutsOff || gAdOn))
                         scanMineUiIfNeeded()
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
@@ -3898,16 +3901,13 @@ object Hooks {
             }, "disable_shopping_mall")
             addSwitch("精简我的页面 V2", "折叠福利/订单/消息及空白占位，不再控制侧边菜单", { gMineShortcutsOff }, {
                 gMineShortcutsOff = it
-                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn,
-                    gMasterOn && gRightMenuOn)
+                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn, false)
                 gNextMineUiScanAt = 0L
             }, "mine_cleanup_v2")
-            addSwitch("隐藏右侧菜单四项", "独立开关：移除创作中心、我的钱包、会员中心、游戏中心", { gRightMenuOn }, {
+            addSwitch("原生侧边菜单过滤", "从红果 Compose 菜单列表移除创作中心、我的钱包、会员中心、游戏中心（7.3.5.32）", { gRightMenuOn }, {
                 gRightMenuOn = it
-                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn,
-                    gMasterOn && it)
-                gNextMineUiScanAt = 0L
-            }, "right_menu_cleanup")
+                NativeMineSidebarFilter.enabled = gMasterOn && it
+            }, "native_mine_sidebar_filter")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
@@ -3977,8 +3977,7 @@ object Hooks {
             content.addView(sectionTitle(act, "内容与账号", p))
             addSwitch("隐藏广告 / 挂件", "默认开启：拦截已适配广告层、金宝箱、悬浮挂件及「我的」广告卡片", { gAdOn }, {
                 gAdOn = it
-                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it,
-                    gMasterOn && gRightMenuOn)
+                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it, false)
                 gNextMineUiScanAt = 0L
             }, "hide_all_ads")
             addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
@@ -4942,6 +4941,11 @@ object Hooks {
             " | legacyObfuscatedMappings=" + (!TargetNames.isUniversal(gNames)) +
             " | oldResourceIds=" + gTargetIdSet.size)
         LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
+        if (pkg == TargetNames.CN_PACKAGE && gTargetVersionName == "7.3.5.32") {
+            NativeMineSidebarFilter.install(module, classLoader)
+        } else {
+            LogUtil.info("原生侧边菜单: 非 APK 验证版本，跳过 Compose 私有方法 Hook")
+        }
 
         try {
             if (!UpdateChecker.checking && UpdateChecker.latestVersion == null) {
