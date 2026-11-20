@@ -2677,7 +2677,7 @@ object Hooks {
         val now = android.os.SystemClock.uptimeMillis()
         if (!force && now < gNextMineUiScanAt) return
         gNextMineUiScanAt = now + 750L
-        MineUiCleaner.scan(gCurrentActivity)
+        MineUiCleaner.scan(gCurrentActivity, collectAllWindows())
     }
 
     private fun scanAllWindows() {
@@ -3884,7 +3884,7 @@ object Hooks {
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
                 else restoreShoppingTabViews()
             }, "disable_shopping_mall")
-            addSwitch("隐藏我的快捷入口", "隐藏「福利、订单、消息」整排；保留账号、收藏和历史", { gMineShortcutsOff }, {
+            addSwitch("精简我的页面", "移除福利/订单/消息整排及占位；隐藏右侧菜单的创作中心/我的钱包/会员中心/游戏中心", { gMineShortcutsOff }, {
                 gMineShortcutsOff = it
                 MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
                 gNextMineUiScanAt = 0L

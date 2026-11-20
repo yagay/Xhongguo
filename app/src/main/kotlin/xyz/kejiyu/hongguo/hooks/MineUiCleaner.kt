@@ -26,34 +26,150 @@ internal object MineUiCleaner {
 
     private const val MAIN = "com.dragon.read.pages.main.MainFragmentActivity"
     private val SHORTCUTS = setOf("福利", "订单", "消息")
+    private val RIGHT_MENU_ITEMS = setOf("创作中心", "我的钱包", "会员中心", "游戏中心")
+    private val PROTECTED_MENU_ITEMS = setOf(
+        "设置", "账号与隐私", "账号设置", "我的收藏", "观看历史",
+        "帮助与反馈", "意见反馈", "客服中心", "个人主页", "我的"
+    )
     private val rowStates = Collections.synchronizedMap(WeakHashMap<View, Int>())
     private val adStates = Collections.synchronizedMap(WeakHashMap<View, Int>())
+    private val menuStates = Collections.synchronizedMap(WeakHashMap<View, Int>())
+
+    private data class SavedGeometry(
+        val width: Int,
+        val height: Int,
+        val minimumHeight: Int,
+        val leftMargin: Int?,
+        val topMargin: Int?,
+        val rightMargin: Int?,
+        val bottomMargin: Int?
+    )
+    private val savedGeometry = Collections.synchronizedMap(
+        WeakHashMap<View, SavedGeometry>()
+    )
     private var minePage = WeakReference<ViewGroup>(null)
     private var lastDiagnosticAt = 0L
     private var lastAdScanAt = 0L
     private var lastHiddenRow: WeakReference<View> = WeakReference(null)
 
     fun configure(shortcuts: Boolean, ads: Boolean) {
-        if (hideShortcuts && !shortcuts) restore(rowStates)
+        if (hideShortcuts && !shortcuts) {
+            restore(rowStates)
+            restore(menuStates)
+        }
         if (hideAds && !ads) restore(adStates)
         hideShortcuts = shortcuts
         hideAds = ads
         if (!shortcuts && !ads) minePage.clear()
     }
 
+    private fun rememberGeometry(view: View) {
+        val params = view.layoutParams ?: return
+        synchronized(savedGeometry) {
+            if (savedGeometry.containsKey(view)) return
+            val margins = params as? ViewGroup.MarginLayoutParams
+            savedGeometry[view] = SavedGeometry(
+                params.width, params.height, view.minimumHeight,
+                margins?.leftMargin, margins?.topMargin,
+                margins?.rightMargin, margins?.bottomMargin
+            )
+        }
+    }
+
+    private fun zeroGeometry(view: View) {
+        rememberGeometry(view)
+        val params = view.layoutParams
+        if (params != null) {
+            params.height = 0
+            if (params is ViewGroup.MarginLayoutParams) {
+                params.leftMargin = 0
+                params.topMargin = 0
+                params.rightMargin = 0
+                params.bottomMargin = 0
+            }
+            view.layoutParams = params
+        }
+        view.minimumHeight = 0
+    }
+
+    private fun restoreGeometry(view: View) {
+        val saved = synchronized(savedGeometry) {
+            savedGeometry.remove(view)
+        } ?: return
+        val params = view.layoutParams
+        if (params != null) {
+            params.width = saved.width
+            params.height = saved.height
+            if (params is ViewGroup.MarginLayoutParams) {
+                if (saved.leftMargin != null) params.leftMargin = saved.leftMargin
+                if (saved.topMargin != null) params.topMargin = saved.topMargin
+                if (saved.rightMargin != null) params.rightMargin = saved.rightMargin
+                if (saved.bottomMargin != null) params.bottomMargin = saved.bottomMargin
+            }
+            view.layoutParams = params
+        }
+        view.minimumHeight = saved.minimumHeight
+    }
+
     private fun restore(states: MutableMap<View, Int>) {
         val snapshot = synchronized(states) {
             states.entries.map { it.key to it.value }.also { states.clear() }
         }
-        for ((view, visibility) in snapshot) {
+        // The item was hidden before its one-child wrapper. Restore the
+        // wrapper first to avoid displaying half of a recycled item.
+        for ((view, visibility) in snapshot.asReversed()) {
             try {
+                restoreGeometry(view)
                 view.visibility = visibility
                 view.requestLayout()
                 (view.parent as? View)?.requestLayout()
             } catch (_: Throwable) {}
         }
         if (snapshot.isNotEmpty()) {
-            LogUtil.info("我的页面精简: 已恢复 " + snapshot.size + " 个界面节点")
+            LogUtil.info("我的页面精简: 已恢复 " + snapshot.size + " 个界面节点及原始占位")
+        }
+    }
+
+    private fun collapseEmptyWrappers(
+        hidden: View,
+        states: MutableMap<View, Int>,
+        reason: String
+    ) {
+        var item = hidden
+        val density = hidden.resources.displayMetrics.density
+        val screenHeight = hidden.resources.displayMetrics.heightPixels
+        repeat(4) {
+            val parent = item.parent as? ViewGroup ?: return
+            // A ScrollView, RecyclerView or a full-page root must NEVER be
+            // collapsed. Their child positions are owned by the system.
+            val type = parent.javaClass.name
+            if (type.contains("RecyclerView") ||
+                type.contains("ScrollView") ||
+                type.contains("ViewPager") ||
+                type.contains("DecorView") ||
+                parent.height > minOf(screenHeight * .40f, 340f * density))
+                return
+
+            // Only collapse the wrapper if no actual visible sibling remains.
+            // Thin decorative divider/spacer views do not count as content.
+            val substantiveSibling = (0 until parent.childCount)
+                .map { parent.getChildAt(it) }
+                .any { child ->
+                    child !== item && child.visibility == View.VISIBLE &&
+                        child.height > 7f * density && child.width > 7f * density
+                }
+            if (substantiveSibling) return
+            if (parent.visibility != View.GONE) {
+                synchronized(states) {
+                    if (!states.containsKey(parent)) states[parent] = parent.visibility
+                }
+                zeroGeometry(parent)
+                parent.visibility = View.GONE
+                LogUtil.info("我的页面精简: 收起空白外层容器 " +
+                    reason + " class=" + parent.javaClass.simpleName)
+                LogUtil.incr("mineUiWrapperCollapsed")
+            }
+            item = parent
         }
     }
 
@@ -62,12 +178,15 @@ internal object MineUiCleaner {
         synchronized(states) {
             if (!states.containsKey(view)) states[view] = view.visibility
         }
+        val originalHeight = view.height
+        zeroGeometry(view)
         view.visibility = View.GONE
+        collapseEmptyWrappers(view, states, reason)
         view.requestLayout()
         (view.parent as? View)?.requestLayout()
-        LogUtil.info("我的页面精简: 已隐藏 " + reason +
+        LogUtil.info("我的页面精简: 已移除占位 " + reason +
             " class=" + view.javaClass.simpleName +
-            " size=" + view.width + "x" + view.height)
+            " originalHeight=" + originalHeight)
         LogUtil.incr("mineUiHidden")
     }
 
@@ -236,11 +355,76 @@ internal object MineUiCleaner {
         if (removed > 0) LogUtil.incr("mineAdCardsHidden")
     }
 
-    fun scan(activity: Activity?) {
+    /**
+     * The hamburger menu is often an overlay Window, not part of the
+     * MainFragmentActivity's decorView. Scope these exact four labels to a
+     * menu root where at least two of them are visible simultaneously.
+     * This prevents removing the same-named buttons on unrelated pages.
+     */
+    private fun findRightMenuItem(
+        label: TextView,
+        rootLabels: List<TextView>
+    ): ViewGroup? {
+        val density = label.resources.displayMetrics.density
+        val screenWidth = label.resources.displayMetrics.widthPixels
+        var current = label.parent as? ViewGroup
+        var candidate: ViewGroup? = null
+        repeat(8) {
+            val group = current ?: return@repeat
+            val width = group.width
+            val height = group.height
+            if (group.isShown && width >= .28f * screenWidth &&
+                width <= screenWidth * 1.02f &&
+                height >= 28f * density && height <= 116f * density) {
+                val otherTarget = rootLabels.any { other ->
+                    other !== label && isDescendant(other, group) &&
+                        normalized(other.text) in RIGHT_MENU_ITEMS
+                }
+                val protectedLabel = rootLabels.any { other ->
+                    other !== label && isDescendant(other, group) &&
+                        normalized(other.text) in PROTECTED_MENU_ITEMS
+                }
+                if (!otherTarget && !protectedLabel) {
+                    // Prefer the outermost single-entry row. It includes the
+                    // icon, its margins and background, not just the TextView.
+                    candidate = group
+                }
+            }
+            current = group.parent as? ViewGroup
+        }
+        return candidate
+    }
+
+    private fun cleanRightMenu(roots: Collection<View>) {
+        if (!hideShortcuts) return
+        val processed = HashSet<View>()
+        var removed = 0
+        for (root in roots) {
+            if (!root.isAttachedToWindow || !root.isShown) continue
+            val labels = collectVisibleText(root, 1600)
+            val targets = labels.filter { normalized(it.text) in RIGHT_MENU_ITEMS }
+            val distinct = targets.map { normalized(it.text) }.distinct()
+            if (distinct.size < 2) continue
+            for (label in targets) {
+                val item = findRightMenuItem(label, labels) ?: continue
+                if (!processed.add(item)) continue
+                hide(item, menuStates, "右侧菜单 " + normalized(label.text))
+                removed++
+            }
+        }
+        if (removed > 0) {
+            LogUtil.info("我的页面精简: 右侧菜单本轮移除 " + removed +
+                " 项 (创作中心/我的钱包/会员中心/游戏中心)")
+            LogUtil.incr("mineRightMenuItemsHidden")
+        }
+    }
+
+    fun scan(activity: Activity?, windows: Collection<View>) {
         if ((!hideShortcuts && !hideAds) || activity?.javaClass?.name != MAIN ||
             activity.isFinishing || activity.isDestroyed) return
         try {
             val decor = activity.window?.decorView ?: return
+            cleanRightMenu(windows)
             val row = findShortcutRow(decor)
             if (row != null) {
                 val page = findMinePage(row, decor.resources.displayMetrics.heightPixels,
@@ -268,6 +452,7 @@ internal object MineUiCleaner {
     }
 
     fun restoreAll() {
+        restore(menuStates)
         restore(rowStates)
         restore(adStates)
         minePage.clear()
