@@ -23,6 +23,7 @@ import xyz.kejiyu.hongguo.LogUtil
 internal object MineUiCleaner {
     @Volatile private var hideShortcuts = false
     @Volatile private var hideAds = false
+    @Volatile private var hideRightMenu = false
 
     private const val MAIN = "com.dragon.read.pages.main.MainFragmentActivity"
     private val SHORTCUTS = setOf("福利", "订单", "消息")
@@ -52,14 +53,13 @@ internal object MineUiCleaner {
     private var lastAdScanAt = 0L
     private var lastHiddenRow: WeakReference<View> = WeakReference(null)
 
-    fun configure(shortcuts: Boolean, ads: Boolean) {
-        if (hideShortcuts && !shortcuts) {
-            restore(rowStates)
-            restore(menuStates)
-        }
+    fun configure(shortcuts: Boolean, ads: Boolean, rightMenu: Boolean) {
+        if (hideShortcuts && !shortcuts) restore(rowStates)
+        if (hideRightMenu && !rightMenu) restore(menuStates)
         if (hideAds && !ads) restore(adStates)
         hideShortcuts = shortcuts
         hideAds = ads
+        hideRightMenu = rightMenu
         if (!shortcuts && !ads) minePage.clear()
     }
 
@@ -398,109 +398,153 @@ internal object MineUiCleaner {
      */
     private data class MenuLabel(val view: View, val title: String)
 
-    private fun menuName(view: View): String {
-        val raw = if (view is TextView && !view.text.isNullOrBlank()) {
-            view.text
-        } else view.contentDescription
-        return normalized(raw).trimEnd('›', '>', '»', '→', '：', ':')
+    private fun menuName(value: CharSequence?): String? {
+        val cleaned = normalized(value)
+            .trimEnd('›', '>', '»', '→', '：', ':', '·', '。')
+        if (cleaned in RIGHT_MENU_ITEMS || cleaned in PROTECTED_MENU_ITEMS) {
+            return cleaned
+        }
+        // Some OEM/KMP binders append a badge or right-arrow to the title.
+        // Only accept short, tightly-scoped suffixes; do not hide unrelated
+        // sentences which merely contain these words.
+        for (name in RIGHT_MENU_ITEMS) {
+            if (cleaned.startsWith(name) &&
+                cleaned.length - name.length <= 5 &&
+                cleaned.substring(name.length).all {
+                    it.isDigit() || it in "➜➡→›»>·•.·：:()（）新"
+                }) return name
+        }
+        return null
     }
 
-    /** Includes contentDescription-backed row widgets and normal TextViews. */
+    /** Includes TextView text AND contentDescription even when both exist. */
     private fun collectMenuLabels(root: View): List<MenuLabel> {
         val result = ArrayList<MenuLabel>()
         val queue = java.util.ArrayDeque<View>()
         queue.addLast(root)
         var scanned = 0
-        while (queue.isNotEmpty() && scanned++ < 2400) {
+        while (queue.isNotEmpty() && scanned++ < 2800) {
             val view = queue.removeFirst()
             if (view.visibility != View.VISIBLE || !view.isShown) continue
-            val title = menuName(view)
-            if (title in RIGHT_MENU_ITEMS || title in PROTECTED_MENU_ITEMS) {
-                result.add(MenuLabel(view, title))
-            }
-            if (view is ViewGroup) {
-                for (i in 0 until view.childCount) queue.addLast(view.getChildAt(i))
-            }
+            val candidates = ArrayList<CharSequence?>(2)
+            if (view is TextView) candidates.add(view.text)
+            candidates.add(view.contentDescription)
+            val title = candidates.firstNotNullOfOrNull { menuName(it) }
+            if (title != null) result.add(MenuLabel(view, title))
+            if (view is ViewGroup) for (i in 0 until view.childCount)
+                queue.addLast(view.getChildAt(i))
         }
         return result
     }
 
-    private fun findRightMenuItem(
-        label: MenuLabel,
-        rootLabels: List<MenuLabel>
-    ): ViewGroup? {
+    /** Only act within a real right-side drawer, not the Mine page body. */
+    private fun rightDrawerFor(view: View): ViewGroup? {
+        val width = view.resources.displayMetrics.widthPixels
+        val height = view.resources.displayMetrics.heightPixels
+        val rect = android.graphics.Rect()
+        var current = view.parent as? ViewGroup
+        repeat(15) {
+            val group = current ?: return@repeat
+            if (group.isShown && group.getGlobalVisibleRect(rect)) {
+                val name = group.javaClass.name.lowercase()
+                val namedDrawer = (name.contains("drawer") ||
+                    name.contains("sidebar") || name.contains("sidemenu"))
+                val rightPanel = rect.right >= width * .90f &&
+                    rect.left >= width * .11f &&
+                    rect.width() in (width * .38f).toInt()..(width * .90f).toInt() &&
+                    rect.height() >= height * .47f
+                if (namedDrawer || rightPanel) return group
+            }
+            current = group.parent as? ViewGroup
+        }
+        return null
+    }
+
+    private fun findRightMenuItem(label: MenuLabel, panel: ViewGroup,
+                                  labels: List<MenuLabel>): ViewGroup? {
         val density = label.view.resources.displayMetrics.density
         val screenWidth = label.view.resources.displayMetrics.widthPixels
-        var current = (label.view as? ViewGroup) ?: label.view.parent as? ViewGroup
+        var current = label.view.parent as? ViewGroup
         var candidate: ViewGroup? = null
-        repeat(9) {
+        repeat(11) {
             val group = current ?: return@repeat
+            if (group === panel || !isDescendant(group, panel)) return@repeat
             val width = maxOf(group.width, group.measuredWidth)
             val height = maxOf(group.height, group.measuredHeight)
-            if (group.isShown && width >= .22f * screenWidth &&
-                width <= screenWidth * 1.02f &&
-                height >= 20f * density && height <= 140f * density &&
+            val otherMenuEntry = labels.any { other ->
+                other.view !== label.view &&
+                    other.title != label.title &&
+                    isDescendant(other.view, group)
+            }
+            if (group.isShown &&
+                width in (screenWidth * .20f).toInt()..screenWidth &&
+                height >= 18f * density && height <= 150f * density &&
+                !otherMenuEntry &&
                 !group.javaClass.name.contains("RecyclerView")) {
-                val otherTarget = rootLabels.any { other ->
-                    other.view !== label.view && isDescendant(other.view, group) &&
-                        other.title in RIGHT_MENU_ITEMS &&
-                        other.title != label.title
-                }
-                val protectedLabel = rootLabels.any { other ->
-                    other.view !== label.view && isDescendant(other.view, group) &&
-                        other.title in PROTECTED_MENU_ITEMS
-                }
-                if (!otherTarget && !protectedLabel) candidate = group
+                candidate = group
             }
             current = group.parent as? ViewGroup
         }
         return candidate
     }
 
+    private fun menuHostKinds(roots: Collection<View>): String {
+        val found = LinkedHashSet<String>()
+        var observed = 0
+        for (root in roots) {
+            val queue = java.util.ArrayDeque<View>()
+            queue.addLast(root)
+            while (queue.isNotEmpty() && observed++ < 1900) {
+                val node = queue.removeFirst()
+                val cls = node.javaClass.name
+                if (cls.contains("ComposeView") || cls.contains("WebView") ||
+                    cls.contains("DrawerLayout") || cls.contains("RecyclerView"))
+                    found.add(node.javaClass.simpleName)
+                if (node is ViewGroup && node.visibility == View.VISIBLE) {
+                    for (i in 0 until node.childCount) queue.addLast(node.getChildAt(i))
+                }
+            }
+        }
+        return found.take(12).joinToString(",")
+    }
+
     private fun cleanRightMenu(roots: Collection<View>) {
-        if (!hideShortcuts) return
+        if (!hideRightMenu) return
         val processed = HashSet<View>()
+        val observed = LinkedHashSet<String>()
+        var panelMatches = 0
         var removed = 0
-        var observedTargets = 0
-        var observedLabelNames = HashSet<String>()
-        var windowKinds = ArrayList<String>()
         for (root in roots) {
             if (!root.isAttachedToWindow || !root.isShown) continue
-            windowKinds.add(root.javaClass.simpleName)
             val labels = collectMenuLabels(root)
-            val targets = labels.filter { it.title in RIGHT_MENU_ITEMS }
-            val distinct = targets.map { it.title }.distinct()
-            observedTargets += distinct.size
-            observedLabelNames.addAll(distinct)
-            if (distinct.isEmpty()) continue
-            // A drawer may lazily bind only one menu entry at a time. Two
-            // target labels, or a target plus a known drawer-settings entry,
-            // are required to avoid touching unrelated promo surfaces.
-            val menuProof = distinct.size >= 2 ||
-                labels.any { it.title in PROTECTED_MENU_ITEMS }
-            if (!menuProof) continue
-            for (label in targets) {
-                val item = findRightMenuItem(label, labels) ?: continue
+            for (label in labels) {
+                if (label.title !in RIGHT_MENU_ITEMS) continue
+                observed.add(label.title)
+                val panel = rightDrawerFor(label.view) ?: continue
+                panelMatches++
+                val panelLabels = labels.filter { isDescendant(it.view, panel) }
+                val item = findRightMenuItem(label, panel, panelLabels) ?: continue
                 if (!processed.add(item)) continue
                 hide(item, menuStates, "右侧菜单 " + label.title)
                 removed++
             }
         }
         val now = SystemClock.uptimeMillis()
-        if ((removed > 0 || now - lastMenuProbe > 12000L) && roots.isNotEmpty()) {
+        if (removed > 0 || now - lastMenuProbe > 5000L) {
             lastMenuProbe = now
-            LogUtil.info("我的页面精简: 右侧菜单扫描" +
-                " targetCount=" + observedTargets +
-                " names=" + observedLabelNames.joinToString(",") +
-                " hidden=" + removed +
-                " windows=" + windowKinds.take(8).joinToString(","))
+            LogUtil.info("我的页面精简: 右侧菜单 V3" +
+                " observed=" + observed.joinToString(",") +
+                " drawerConfirmed=" + panelMatches +
+                " removed=" + removed +
+                " windows=" + roots.joinToString(",") { it.javaClass.simpleName }.take(160) +
+                " hosts=" + menuHostKinds(roots))
             LogUtil.incr("mineRightMenuProbe")
         }
         if (removed > 0) LogUtil.incr("mineRightMenuItemsHidden")
     }
 
     fun scan(activity: Activity?, windows: Collection<View>) {
-        if ((!hideShortcuts && !hideAds) || activity == null ||
+        if ((!hideShortcuts && !hideAds && !hideRightMenu) || activity == null ||
             activity.isFinishing || activity.isDestroyed ||
             !activity.javaClass.name.startsWith("com.dragon.read.")) return
         try {

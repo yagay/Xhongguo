@@ -187,3 +187,7 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 根据 20:58 诊断包：曾经检测并隐藏整排 1272×160px RecyclerView，但存在外层占位；右侧菜单无任何匹配成功记录。诊断导出时 hide_mine_shortcuts=false、hide_all_ads=false，表明旧精简开关关闭。本版使用默认开启、可单独关闭的新开关 mine_cleanup_v2，避免旧测试开关的状态阻止本次修复；广告清理仍尊重现有 hide_all_ads 设置。
 新增对外层容器的安全折叠：如果只有隐藏区域和无业务内容的装饰/空白节点，收起固定高度与边距；保护其他可点击、文本/图片业务节点、RecyclerView/ScrollView 和屏幕级容器。无法安全折叠会记录「外层占位诊断」。
 侧边菜单改用 TextView 文本及 View.contentDescription 双路径识别；支持惰性加载单条菜单项，在同窗另有已知菜单项时才清理独立行；每 12 秒输出目标名称、命中数量和窗口根类名，便于发现 WebView/Compose 等不属于原生 TextView 的渲染结构。
+
+### 2026-11-20 右侧菜单独立清理 V3
+
+诊断显示官方红果 7.3.5.32 上只检测到游戏中心一个普通 View 菜单标签（可能属于我的主页，而非右侧抽屉）；其他三个目标在该轮 View 层级中不存在；用户导出时 mine_cleanup_v2=false，导致过去整套菜单清理被停用。本版新增独立且默认开启的 right_menu_cleanup 开关。右侧菜单清理不再依赖 mine_cleanup_v2，也不再依据同一 DecorView 任意一个游戏中心文本就删除主页卡片。删除候选项之前必须发现右侧抽屉容器（类名特征或屏幕右缘的窄高可见面板），再限制到抽屉内部的独立菜单行；允许 TextView 文本或 contentDescription，且支持惰性逐项加载。新增每五秒节流的「右侧菜单 V3」诊断日志，报告观察到的目标名称、已确认抽屉数量、实际隐藏数量和 Compose/WebView/RecyclerView 容器类型。如果未找到目标，则需要真实右侧菜单展开时的截图或该诊断供下一步定位。

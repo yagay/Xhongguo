@@ -69,6 +69,7 @@ object Hooks {
     private var gPlayerOn = false
     private var gAdOn = false
     private var gMineShortcutsOff = true
+    private var gRightMenuOn = true
     private var gNextMineUiScanAt = 0L
     private var gRefreshOff = false
     private var gTopZoneOn = false
@@ -289,7 +290,15 @@ object Hooks {
         // "hide_mine_shortcuts" switch. The 20:58 diagnostics showed the old
         // preference persisted as false after testing, preventing both fixes.
         gMineShortcutsOff = prefs.getBoolean("mine_cleanup_v2", true)
-        MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn)
+        // Drawer cleanup is independent of Mine shortcut cleanup. Some users
+        // disable the latter to recover layout, but still want the four
+        // commercial entries removed from the right-side menu.
+        gRightMenuOn = prefs.getBoolean("right_menu_cleanup", true)
+        MineUiCleaner.configure(
+            gMasterOn && gMineShortcutsOff,
+            gMasterOn && gAdOn,
+            gMasterOn && gRightMenuOn
+        )
         gRefreshOff = prefs.getBoolean("pull_refresh", false)
         gTopZoneOn = prefs.getBoolean("top_zone", false)
         gNavBarOff = prefs.getBoolean("nav_bar_off", false)
@@ -2723,7 +2732,7 @@ object Hooks {
             override fun run() {
                 try {
                     scanShoppingTabIfNeeded(gCurrentActivity)
-                    if (gMasterOn && (gMineShortcutsOff || gAdOn))
+                    if (gMasterOn && (gMineShortcutsOff || gAdOn || gRightMenuOn))
                         scanMineUiIfNeeded()
                     if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
                         forcePauseRestoreControls()
@@ -3887,11 +3896,18 @@ object Hooks {
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
                 else restoreShoppingTabViews()
             }, "disable_shopping_mall")
-            addSwitch("精简我的页面 V2", "同步折叠福利/订单/消息及空白；隐藏右侧四项；默认开启", { gMineShortcutsOff }, {
+            addSwitch("精简我的页面 V2", "折叠福利/订单/消息及空白占位，不再控制侧边菜单", { gMineShortcutsOff }, {
                 gMineShortcutsOff = it
-                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
+                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn,
+                    gMasterOn && gRightMenuOn)
                 gNextMineUiScanAt = 0L
             }, "mine_cleanup_v2")
+            addSwitch("隐藏右侧菜单四项", "独立开关：移除创作中心、我的钱包、会员中心、游戏中心", { gRightMenuOn }, {
+                gRightMenuOn = it
+                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && gAdOn,
+                    gMasterOn && it)
+                gNextMineUiScanAt = 0L
+            }, "right_menu_cleanup")
             addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
@@ -3961,7 +3977,8 @@ object Hooks {
             content.addView(sectionTitle(act, "内容与账号", p))
             addSwitch("隐藏广告 / 挂件", "默认开启：拦截已适配广告层、金宝箱、悬浮挂件及「我的」广告卡片", { gAdOn }, {
                 gAdOn = it
-                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it)
+                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it,
+                    gMasterOn && gRightMenuOn)
                 gNextMineUiScanAt = 0L
             }, "hide_all_ads")
             addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
