@@ -197,3 +197,9 @@ SystemMediaBridge.onActivityResumed() 现在接收后台自动切集标记，此
 通过先前上传的原版《红果免费短剧_7.3.5.32.apk》检查 21 个 DEX。classes5.dex 中确认 com.dragon.read.kmp.mine.sidebar.MineSidebarPageKt.e(List,Composer,int):void、com.dragon.read.kmp.mine.sidebar.MineSidebarController.b(List):List，以及 com.dragon.read.kmp.mine.model.n (SidebarFunctionItemModel)，其 b/c/d/e 字段均为 String。诊断日志同步确认 MainPageDrawerLayout+ComposeView+AndroidComposeView；旧 View/TextView 隐藏逻辑无法完整访问 Compose 节点。
 新增 NativeMineSidebarFilter.kt，在 Controller.b 返回列表后以及 Compose.e 接收列表前，仅过滤类型为该菜单模型且字段与四个屏蔽标题或明确的路由标识匹配的项目。支持嵌套列表并同时移除已空的子列表，避免空白占位。其他项目保持不变。仅为 CN 7.3.5.32 安装，未命中会输出诊断而不会修改未知版本。
 新增独立、默认开启的 native_mine_sidebar_filter 开关；弃用此前只识别普通 View 的 right_menu_cleanup 行为，旧开关不影响新功能。新日志关键字：原生侧边菜单、nativeMineSidebarModelProbe、nativeMineSidebarItemsFiltered。仍需真机展开侧边菜单验证，若后端菜单模型没有直接存储中文名称或路由标识，则根据实际数据扩展过滤条件。
+
+### 2026-11-20 21:37 右侧三横线真实 Fragment 核验
+
+原版 7.3.5.32 的 classes3.dex 确认 `com.dragon.read.component.biz.impl.mine.functionpage.HongguoMineFunctionFragment` 继承 `AbsRightSlideFragment`，负责「我的」页右侧滑出内容；其 `onCreateContent` 创建 ComposeView，内部 `kh(List)` 将菜单数据封装为 `wr5.c(List)` 并调用 `MutableStateFlow.setValue`。该 Fragment 的回调调用 `MineSidebarPageKt.b(StateFlow,...)`；这是比之前直接拦截内部 `MineSidebarPageKt.e(List,...)` 更上游的正确入口。
+新 Hook 优先处理 `HongguoMineFunctionFragment.kh(List)`、`MineSidebarController.f(List)` 的源数据，旧 `Controller.b` 与 `Compose.e` 过滤保留兜底，其他菜单项不变；另外观察 `HongguoMineFunctionFragment.onCreateContent` 用于确认真正右侧 Fragment 实际打开。
+21:37:57 诊断显示旧 Compose.e 曾执行 10->6 的四项过滤，但当时导出的 `native_mine_sidebar_filter=false`，所以效果未验证成立。测试请确认「原生侧边菜单过滤」开关实际为 true，然后强制停止红果重开，并在抽屉展开时导出日志，查找 `我的三横线右侧 Fragment.onCreateContent` 和 `right-slide-fragment.kh`。

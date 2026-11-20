@@ -30,6 +30,14 @@ internal object NativeMineSidebarFilter {
         "com.dragon.read.kmp.mine.sidebar.MineSidebarController"
     private const val COMPOSE =
         "com.dragon.read.kmp.mine.sidebar.MineSidebarPageKt"
+    // Verified in classes3.dex: the actual page opened from 我的 -> 三横线.
+    // It extends AbsRightSlideFragment, and kh(List) publishes wr5.c(List)
+    // to the sidebar MutableStateFlow before the ComposeView renders it.
+    private const val RIGHT_SLIDE_FRAGMENT =
+        "com.dragon.read.component.biz.impl.mine.functionpage.HongguoMineFunctionFragment"
+    private var rightSlideOpened = 0
+    private var rightSlideInputObserved = 0
+    private var rightSlideItemsRemoved = 0
 
     private val blockedTitles = setOf("创作中心", "我的钱包", "会员中心", "游戏中心")
     private val blockedRoutes = setOf(
@@ -127,6 +135,64 @@ internal object NativeMineSidebarFilter {
     fun install(module: MainHook, loader: ClassLoader) {
         var installed = 0
         try {
+            val fragment = Class.forName(RIGHT_SLIDE_FRAGMENT, false, loader)
+            val sourceMethod = fragment.declaredMethods.firstOrNull {
+                it.name == "kh" && it.parameterTypes.size == 1 &&
+                    List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
+                    it.returnType == Void.TYPE
+            }
+            if (sourceMethod != null) {
+                module.hook(sourceMethod)
+                    .setId("xhMineRightSlideFragmentMenuState")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val original = chain.getArg(0) as? List<*>
+                            ?: return@Hooker chain.proceed()
+                        rightSlideInputObserved++
+                        if (!enabled) return@Hooker chain.proceed()
+                        val cleaned = filterList(original, "right-slide-fragment.kh")
+                            ?: return@Hooker chain.proceed()
+                        rightSlideItemsRemoved += original.size - cleaned.size
+                        val args = (chain.args as Array<Any?>).copyOf()
+                        args[0] = cleaned
+                        chain.proceed(args)
+                    })
+                installed++
+                LogUtil.info("原生侧边菜单: 已安装 我的右侧滑出 Fragment.kh(List) 数据写入 Hook")
+            } else LogUtil.warn("原生侧边菜单: 右侧 Fragment.kh(List) 未找到")
+
+            val create = fragment.declaredMethods.firstOrNull {
+                it.name == "onCreateContent" &&
+                    it.parameterTypes.size == 3 &&
+                    it.parameterTypes[0] == android.view.LayoutInflater::class.java &&
+                    it.parameterTypes[1] == android.view.ViewGroup::class.java &&
+                    it.parameterTypes[2] == android.os.Bundle::class.java
+            }
+            if (create != null) {
+                module.hook(create)
+                    .setId("xhMineRightSlideFragmentContent")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        rightSlideOpened++
+                        LogUtil.info("原生侧边菜单: 我的三横线右侧 Fragment.onCreateContent" +
+                            " opened=" + rightSlideOpened +
+                            " inputCalls=" + rightSlideInputObserved +
+                            " removed=" + rightSlideItemsRemoved +
+                            " enabled=" + enabled +
+                            " result=" + result?.javaClass?.simpleName)
+                        LogUtil.incr("nativeMineRightSlideFragmentOpened")
+                        result
+                    })
+                installed++
+                LogUtil.info("原生侧边菜单: 已安装 我的右侧 Fragment.onCreateContent 观察 Hook")
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("原生侧边菜单: 我的右侧 Fragment Hook 安装失败 " +
+                e.javaClass.simpleName + ": " + e.message)
+        }
+
+        try {
             val clazz = Class.forName(CONTROLLER, false, loader)
             val method = clazz.declaredMethods.firstOrNull {
                 it.name == "b" && it.parameterTypes.size == 1 &&
@@ -147,6 +213,35 @@ internal object NativeMineSidebarFilter {
             } else LogUtil.warn("原生侧边菜单: Controller.b(List):List 不存在")
         } catch (e: Throwable) {
             LogUtil.warn("原生侧边菜单: Controller Hook 安装失败 " +
+                e.javaClass.simpleName + ": " + e.message)
+        }
+
+        try {
+            val clazz = Class.forName(CONTROLLER, false, loader)
+            val source = clazz.declaredMethods.firstOrNull {
+                it.name == "f" && it.parameterTypes.size == 1 &&
+                    List::class.java.isAssignableFrom(it.parameterTypes[0]) &&
+                    it.returnType == Void.TYPE
+            }
+            if (source != null) {
+                module.hook(source)
+                    .setId("xhNativeMineSidebarControllerPublish")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (!enabled) return@Hooker chain.proceed()
+                        val original = chain.getArg(0) as? List<*>
+                            ?: return@Hooker chain.proceed()
+                        val clean = filterList(original, "controller.f")
+                            ?: return@Hooker chain.proceed()
+                        val args = (chain.args as Array<Any?>).copyOf()
+                        args[0] = clean
+                        chain.proceed(args)
+                    })
+                installed++
+                LogUtil.info("原生侧边菜单: 已安装 Controller.f(List) 状态发布 Hook")
+            }
+        } catch (e: Throwable) {
+            LogUtil.warn("原生侧边菜单: Controller.f Hook 安装失败 " +
                 e.javaClass.simpleName + ": " + e.message)
         }
 
@@ -182,6 +277,7 @@ internal object NativeMineSidebarFilter {
                 e.javaClass.simpleName + ": " + e.message)
         }
         LogUtil.info("原生侧边菜单: 安装完成 hooks=" + installed +
-            " (APK=7.3.5.32; renderer=Jetpack Compose)")
+            " (APK=7.3.5.32; page=HongguoMineFunctionFragment" +
+            " extends AbsRightSlideFragment; renderer=Jetpack Compose)")
     }
 }
