@@ -634,6 +634,68 @@ internal object FullSeriesMediaInfo {
         return null
     }
 
+
+    /**
+     * Read-only current episode navigation state.  Never choose a preloaded
+     * model or an unrelated outer two-page ViewPager.  The video ID comes
+     * from the inner fragment's native list and is cross-checked against
+     * the active TTVideoEngine whenever the engine exposes an ID.
+     */
+    internal data class NavigationCandidate(
+        val fragment: Any,
+        val currentIndex: Int,
+        val listCount: Int,
+        val currentVideoId: String,
+        val previousVideoId: String?,
+        val nextVideoId: String?,
+        val seriesId: String?
+    )
+
+    fun navigationCandidate(activity: Activity?, engine: Any?): NavigationCandidate? {
+        if (activity?.javaClass?.name != ACTIVITY || engine == null) return null
+        val engineId = vid(engine) ?: call(engine, "getVideoID")?.toString()
+            ?.takeIf { it.isNotBlank() && it != "null" }
+        val seriesKey = observedForEngine(engine).seriesId
+        val candidates = currentFragmentEntries(activity, seriesKey, null)
+            .filter { engineId == null || vid(it.video) == engineId }
+            .sortedWith(compareByDescending<ActiveFragmentEntry> { it.score }
+                .thenByDescending { it.seriesVerified })
+        val best = candidates.firstOrNull() ?: return null
+        val runnerUp = candidates.getOrNull(1)
+        if (runnerUp != null && runnerUp.score == best.score &&
+            runnerUp.seriesVerified == best.seriesVerified &&
+            runnerUp.fragment !== best.fragment) return null
+        // With a missing engine ID, require a strongly foreground-selected
+        // fragment. Never infer the background player from a recycled page.
+        if (engineId == null && best.score < 6) return null
+        val dataList = call(best.fragment, "getDataList") as? List<*>
+            ?: return null
+        if (dataList.size != best.listCount || best.itemPosition !in dataList.indices ||
+            best.listCount !in 2..5000) return null
+        fun videoAt(index: Int): Any? {
+            if (index !in dataList.indices) return null
+            return call(dataList[index], "getVideoData")?.takeIf {
+                it.javaClass.name == DATA
+            }
+        }
+        val current = videoAt(best.itemPosition) ?: return null
+        val activeId = vid(current) ?: return null
+        if (engineId != null && activeId != engineId) return null
+        val key = seriesId(field(current, "episodesId"))
+        fun neighborId(index: Int): String? {
+            val model = videoAt(index) ?: return null
+            val neighborSeries = seriesId(field(model, "episodesId"))
+            if (key != null && neighborSeries != null && key != neighborSeries)
+                return null
+            return vid(model)?.takeIf { it != activeId }
+        }
+        return NavigationCandidate(
+            best.fragment, best.itemPosition, best.listCount, activeId,
+            neighborId(best.itemPosition - 1),
+            neighborId(best.itemPosition + 1), key
+        )
+    }
+
     fun read(activity: Activity?, engine: Any?): Info {
         if (activity?.javaClass?.name != ACTIVITY) return Info()
         val presenter = field(activity, "a")

@@ -42,6 +42,8 @@ internal object SystemMediaBridge {
     private const val CHANNEL = "xhongguo_system_media"
     private const val NOTIFICATION_ID = 790112
     private const val TOGGLE_ACTION = "xyz.kejiyu.hongguo.SYSTEM_MEDIA_TOGGLE"
+    private const val PREVIOUS_ACTION = "xyz.kejiyu.hongguo.SYSTEM_MEDIA_PREVIOUS"
+    private const val NEXT_ACTION = "xyz.kejiyu.hongguo.SYSTEM_MEDIA_NEXT"
     private const val BACKGROUND_PAUSE_GUARD_MS = 6500L
 
     private val handler = Handler(Looper.getMainLooper())
@@ -49,6 +51,7 @@ internal object SystemMediaBridge {
     private var notificationManager: NotificationManager? = null
     private var session: MediaSession? = null
     private var receiver: BroadcastReceiver? = null
+    private var lastEpisodeControls = EpisodeNavigator.Controls()
     private var controller = WeakReference<Any>(null)
     private var layer = WeakReference<Any>(null)
     private var videoContext = WeakReference<Any>(null)
@@ -199,6 +202,11 @@ internal object SystemMediaBridge {
             captureNativePlayEntity("periodic")
             updateSessionMetadata()
             updateSessionState(knownPlaying)
+            val available = EpisodeNavigator.controls(foregroundActivity.get(), videoEngine.get())
+            if (available != lastEpisodeControls && reportedCard) {
+                lastEpisodeControls = available
+                updateMediaNotification(knownPlaying)
+            }
             val activeActivity = foregroundActivity.get()
             val now = SystemClock.uptimeMillis()
             if (knownPlaying && activeActivity?.hasWindowFocus() == true &&
@@ -987,6 +995,12 @@ internal object SystemMediaBridge {
         }
         val stateChanged = knownPlaying != playing
         knownPlaying = playing
+        if (playing && EpisodeNavigator.onNativePlayback(
+                foregroundActivity.get(), videoEngine.get(), true)) {
+            captureNativePlayEntity("episode-native-confirmed")
+            readCurrentTimeline()
+            updateSessionMetadata()
+        }
         if (playing) {
             scheduleTimelinePoll(900L)
             if (!requestedBackgroundPlayback) resumeAttempts = 0
@@ -1147,6 +1161,12 @@ internal object SystemMediaBridge {
                 override fun onSeekTo(pos: Long) {
                     handler.post { requestSeek(pos, "system-seek") }
                 }
+                override fun onSkipToPrevious() {
+                    handler.post { requestEpisode(-1, "media-session") }
+                }
+                override fun onSkipToNext() {
+                    handler.post { requestEpisode(1, "media-session") }
+                }
             }, handler)
             launchIntent(ctx)?.let { intent ->
                 media.setSessionActivity(
@@ -1182,23 +1202,39 @@ internal object SystemMediaBridge {
         if (receiver != null) return
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == TOGGLE_ACTION) {
-                    requestTransport(!knownPlaying, "notification-action")
+                when (intent?.action) {
+                    TOGGLE_ACTION -> requestTransport(!knownPlaying, "notification-action")
+                    PREVIOUS_ACTION -> requestEpisode(-1, "notification-action")
+                    NEXT_ACTION -> requestEpisode(1, "notification-action")
                 }
             }
         }
         try {
             if (Build.VERSION.SDK_INT >= 33) {
-                ctx.registerReceiver(r, IntentFilter(TOGGLE_ACTION),
-                    Context.RECEIVER_NOT_EXPORTED)
+                ctx.registerReceiver(r, IntentFilter(TOGGLE_ACTION).apply {
+                    addAction(PREVIOUS_ACTION)
+                    addAction(NEXT_ACTION)
+                }, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 @Suppress("DEPRECATION")
-                ctx.registerReceiver(r, IntentFilter(TOGGLE_ACTION))
+                ctx.registerReceiver(r, IntentFilter(TOGGLE_ACTION).apply {
+                    addAction(PREVIOUS_ACTION)
+                    addAction(NEXT_ACTION)
+                })
             }
             receiver = r
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 注册通知按键失败 " + e.message)
         }
+    }
+
+    private fun requestEpisode(direction: Int, reason: String) {
+        if (!enabled) return
+        val accepted = EpisodeNavigator.navigate(
+            direction, foregroundActivity.get(), videoEngine.get())
+        LogUtil.info("系统媒体切集: request source=$reason" +
+            " direction=$direction accepted=$accepted")
+        updateSessionState(knownPlaying)
     }
 
     private fun requestTransport(play: Boolean, reason: String) {
@@ -1274,6 +1310,12 @@ internal object SystemMediaBridge {
             var actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
                 PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP
             if (canSeek) actions = actions or PlaybackState.ACTION_SEEK_TO
+            val episode = EpisodeNavigator.controls(
+                foregroundActivity.get(), videoEngine.get())
+            if (episode.previous)
+                actions = actions or PlaybackState.ACTION_SKIP_TO_PREVIOUS
+            if (episode.next)
+                actions = actions or PlaybackState.ACTION_SKIP_TO_NEXT
             val builder = PlaybackState.Builder()
                 .setActions(actions)
                 .setState(
@@ -1302,6 +1344,8 @@ internal object SystemMediaBridge {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val icon = if (playing) android.R.drawable.ic_media_pause
                 else android.R.drawable.ic_media_play
+            val episode = EpisodeNavigator.controls(
+                foregroundActivity.get(), videoEngine.get())
             val notification = Notification.Builder(ctx, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle(seriesTitle ?: "红果短剧")
@@ -1318,11 +1362,32 @@ internal object SystemMediaBridge {
                             .setPackage(ctx.packageName),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 )
-                .addAction(Notification.Action.Builder(
-                    icon, if (playing) "暂停" else "播放", toggleIntent).build())
-                .setStyle(Notification.MediaStyle()
-                    .setMediaSession(media.sessionToken)
-                    .setShowActionsInCompactView(0))
+                .apply {
+                    val actionIndices = ArrayList<Int>()
+                    var actionNumber = 0
+                    if (episode.previous) {
+                        val prev = PendingIntent.getBroadcast(ctx, 790116,
+                            Intent(PREVIOUS_ACTION).setPackage(ctx.packageName),
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                        addAction(Notification.Action.Builder(
+                            android.R.drawable.ic_media_previous, "上一集", prev).build())
+                        actionIndices.add(actionNumber++)
+                    }
+                    addAction(Notification.Action.Builder(
+                        icon, if (playing) "暂停" else "播放", toggleIntent).build())
+                    actionIndices.add(actionNumber++)
+                    if (episode.next) {
+                        val next = PendingIntent.getBroadcast(ctx, 790117,
+                            Intent(NEXT_ACTION).setPackage(ctx.packageName),
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                        addAction(Notification.Action.Builder(
+                            android.R.drawable.ic_media_next, "下一集", next).build())
+                        actionIndices.add(actionNumber++)
+                    }
+                    setStyle(Notification.MediaStyle()
+                        .setMediaSession(media.sessionToken)
+                        .setShowActionsInCompactView(*actionIndices.toIntArray()))
+                }
                 .apply {
                     // Fallback for older/expanded notifications; Android 13+
                     // media cards use ART/DISPLAY_ICON in MediaMetadata.
@@ -1354,6 +1419,8 @@ internal object SystemMediaBridge {
         resumeAttempts = 0
         knownPlaying = false
         reportedCard = false
+        lastEpisodeControls = EpisodeNavigator.Controls()
+        EpisodeNavigator.reset()
         try { notificationManager?.cancel(NOTIFICATION_ID) } catch (_: Throwable) {}
         try { session?.isActive = false; session?.release() } catch (_: Throwable) {}
         session = null
