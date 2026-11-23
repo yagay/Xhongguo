@@ -181,8 +181,72 @@ internal object OfficialPlaybackCoverage {
         return count
     }
 
+    private fun requestFields(o: Any?): String {
+        if (o == null) return ""
+        val parts = ArrayList<String>()
+        val scene = field(o, "drScene") as? String
+        if (scene != null) {
+            parts.add("drScene=" + (scene.takeIf {
+                it.matches(Regex("[a-zA-Z_]{1,24}"))
+            } ?: "other"))
+        }
+        val ids = field(o, "mixedVideoIdMap") as? Map<*, *>
+        if (ids != null) {
+            parts.add("videoGroups=" + ids.size)
+            parts.add("videoCount=" + ids.values.sumOf {
+                (it as? Collection<*>)?.size ?: 0
+            })
+        }
+        for (key in listOf("videoIds", "audioIds")) {
+            val list = field(o, key)
+            if (list is Collection<*>) parts.add(key + "Count=" + list.size)
+        }
+        val biz = field(o, "bizParam") ?: o
+        for (key in listOf("deviceLevel", "needAllVideoDefinition",
+                "useOsPlayer", "needMp4Align", "videoPlatform")) {
+            val v = field(biz, key)
+            if (v is Boolean || v is Number) parts.add(key + "=" + v)
+        }
+        return parts.joinToString(" ")
+    }
+
+    private fun hookDtoConstructors(module: MainHook, loader: ClassLoader,
+                                    className: String): Int {
+        val cls = try { Class.forName(className, false, loader) }
+            catch (_: Throwable) { return 0 }
+        var count = 0
+        for ((i, constructor) in cls.declaredConstructors.withIndex()) {
+            val key = className + "#constructor#" + i
+            if (!installed.add(key)) continue
+            try {
+                module.hook(constructor).setId("hgDeep_dto_" +
+                    cls.simpleName.take(26) + "_" + i)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        if (OfficialPlaybackProbe.isEnabled()) {
+                            try {
+                                emit("dto", "type=" + cls.simpleName.take(48) +
+                                    " fields=[" + requestFields(chain.thisObject) + "]")
+                            } catch (_: Throwable) {}
+                        }
+                        result
+                    })
+                count++
+            } catch (_: Throwable) { installed.remove(key) }
+        }
+        return count
+    }
+
     fun install(module: MainHook, loader: ClassLoader) {
         val installedNames = LinkedHashMap<String, Int>()
+
+        installedNames["dto"] = listOf(
+            "seriessdk.com.dragon.read.saas.rpc.model.MGetVideoModelV2Request",
+            "seriessdk.com.dragon.read.saas.rpc.model.GetVideoModelRequest",
+            "com.dragon.read.rpc.model.GetVideoModelRequest",
+            "com.dragon.read.rpc.model.MGetVideoModelLiteRequest"
+        ).sumOf { hookDtoConstructors(module, loader, it) }
 
         installedNames["builder"] = hook(module, loader,
             "com.bytedance.retrofit2.client.Request" + "$" + "Builder",
