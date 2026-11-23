@@ -163,6 +163,16 @@ object FeatureDiagnostics {
             ?: "未检测到 ACTIVE，可能是在 App 上下文初始化前安装，或没有读取到目标进程的设置"))
         val events = probeLines.filter { it.contains("HGPROBE EVENT") }
         appendLine("捕获网络事件=" + events.size)
+        val traces = probeLines.filter { it.contains("HGPROBE TRACE") }
+        appendLine("Hook 执行采样=" + traces.size)
+        if (events.isEmpty()) {
+            val trace = traces.lastOrNull()?.trim()?.take(270)
+            appendLine("零事件排查=" + when {
+                activatedProbe == null -> "未激活探针，核对设置同步/Activity 初始化"
+                traces.isEmpty() -> "已激活但无 Hook 调用采样，可能走了其他网络链路"
+                else -> "Hook 已调用但请求路径未命中，最近采样：" + trace
+            })
+        }
         for (group in listOf("v5", "video_tab", "lite", "legacy", "passport", "account", "device")) {
             val scoped = events.filter { it.contains("group=" + group + " ") }
             if (scoped.isEmpty()) continue
