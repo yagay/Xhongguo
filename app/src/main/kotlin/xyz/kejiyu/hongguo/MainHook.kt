@@ -93,7 +93,11 @@ class MainHook : XposedModule() {
             // Independent of playback/UI modifications and the master toggle.
             // On-demand, passive metadata probes never alter requests or bodies.
             try {
-                val app = android.app.ActivityThread.currentApplication()
+                val app = try {
+                    Class.forName("android.app.ActivityThread")
+                        .getDeclaredMethod("currentApplication").invoke(null)
+                        as? android.content.Context
+                } catch (_: Throwable) { null }
                 if (app != null) OfficialPlaybackProbe.attach(app.applicationContext)
                 val version = try {
                     @Suppress("DEPRECATION")
