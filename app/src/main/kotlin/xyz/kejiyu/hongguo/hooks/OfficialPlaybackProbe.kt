@@ -53,6 +53,8 @@ internal object OfficialPlaybackProbe {
     private fun enabledNow(): Boolean =
         prefs?.getBoolean("official_playback_probe", false) ?: enabled
 
+    internal fun isEnabled(): Boolean = enabledNow()
+
     private fun route(url: String): Pair<String, String>? {
         val parsed = try { Uri.parse(url) } catch (_: Throwable) { return null }
         val path = try { parsed.path.orEmpty() } catch (_: Throwable) { "" }
@@ -339,6 +341,12 @@ internal object OfficialPlaybackProbe {
                         .map { it.name.take(48) }
                         .take(16).joinToString(",") + "}"
             } catch (_: Throwable) { null }
+        }
+        // Install all stable, independent coverage hooks in one pass, including
+        // official TTVideoEngine model consumption and Retrofit build/finalization.
+        try { OfficialPlaybackCoverage.install(module, loader) }
+        catch (t: Throwable) {
+            LogUtil.warn("HGDEEP install error=" + t.javaClass.simpleName)
         }
         LogUtil.info(PREFIX + " INSTALLED pkg=" + pkg + " version=" + version +
             " retrofit=" + client + " network=" + network +
