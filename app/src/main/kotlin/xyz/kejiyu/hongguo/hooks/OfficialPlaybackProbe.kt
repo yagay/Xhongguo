@@ -151,6 +151,62 @@ internal object OfficialPlaybackProbe {
         return (len as? Number)?.toLong()?.takeIf { it >= 0L }
     }
 
+    private fun modelArgsSnapshot(call: Any?): String {
+        val args = field(call, "args") as? Array<*> ?: return ""
+        val parts = ArrayList<String>()
+        for (arg in args.take(8)) {
+            val kind = arg?.javaClass?.name.orEmpty()
+            if (!kind.endsWith(".MGetVideoModelV2Request") &&
+                !kind.endsWith(".GetVideoModelRequest") &&
+                !kind.endsWith(".MGetVideoModelLiteRequest")) continue
+            parts.add("type=" + kind.substringAfterLast('.'))
+            val scene = field(arg, "drScene") as? String
+            // Scene labels are non-secret controlled keywords, not IDs.
+            parts.add("drScene=" +
+                (scene?.takeIf { it.matches(Regex("[A-Za-z_]{1,24}")) } ?: "unknown"))
+            val group = field(arg, "mixedVideoIdMap") as? Map<*, *>
+            if (group != null) {
+                parts.add("idGroups=" + group.size)
+                val ids = group.values.sumOf { (it as? Collection<*>)?.size ?: 0 }
+                parts.add("episodeCount=" + ids)
+            }
+            for (key in listOf("videoIds", "audioIds")) {
+                val list = field(arg, key) as? Collection<*>
+                if (list != null) parts.add(key + "Count=" + list.size)
+            }
+            val biz = field(arg, "bizParam") ?: arg
+            for (key in listOf("deviceLevel", "needAllVideoDefinition",
+                "needMp4Align", "useOsPlayer", "source")) {
+                val v = field(biz, key)
+                if (v is Boolean || v is Number) parts.add(key + "=" + v)
+            }
+            parts.add("novelCommonParam=" +
+                (field(arg, "novelCommonParam") != null))
+        }
+        return if (parts.isEmpty()) "" else " modelFields=[" + parts.joinToString(",") + "]"
+    }
+
+    private fun modelResultSnapshot(response: Any?): String {
+        if (response == null) return ""
+        // SsResponse.body() is a parsed DTO getter, not a network stream read.
+        val body = get(response, "body") ?: return ""
+        val type = body.javaClass.name
+        if (!type.endsWith(".MGetVideoModelResponse") &&
+            !type.endsWith(".MGetVideoModelLiteResponse") &&
+            !type.endsWith(".GetVideoModelResponse")) return ""
+        val data = field(body, "data")
+        val code = field(body, "code")
+        val dataCount = when (data) {
+            is Map<*, *> -> data.size
+            is Collection<*> -> data.size
+            else -> null
+        }
+        return " modelResultType=" + type.substringAfterLast('.') +
+            " modelDataPresent=" + (data != null) +
+            " modelDataCount=" + (dataCount?.toString() ?: "unknown") +
+            " modelCodePresent=" + (code != null)
+    }
+
     private fun responseSnapshot(response: Any?): String {
         if (response == null) return "http=unknown length=unknown"
         val raw = get(response, "raw") ?: response
@@ -185,7 +241,8 @@ internal object OfficialPlaybackProbe {
                             else "exception=" + error.javaClass.simpleName.take(60)
                         LogUtil.info(PREFIX + " EVENT layer=" + label +
                             " elapsedMs=" + (SystemClock.elapsedRealtime() - started) +
-                            " " + reqInfo + " " + result)
+                            " " + reqInfo + modelArgsSnapshot(chain.thisObject) +
+                            " " + result + modelResultSnapshot(response))
                         LogUtil.incr("officialProbeEvent")
                     }
                 }
