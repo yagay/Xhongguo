@@ -23,6 +23,7 @@ internal object OfficialPlaybackProbe {
     @Volatile private var enabled = false
     @Volatile private var prefs: SharedPreferences? = null
     private val events = AtomicInteger(0)
+    private val hookInvocations = AtomicInteger(0)
     private const val MAX_EVENTS = 450
     private const val PREFIX = "HGPROBE"
     private val installed = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -241,8 +242,16 @@ internal object OfficialPlaybackProbe {
         } finally {
             try {
                 if (events.get() < MAX_EVENTS) {
+                    val hits = hookInvocations.incrementAndGet()
                     val req = request(chain.thisObject)
                     val reqInfo = requestSnapshot(req)
+                    // Low-frequency diagnostics: proves that the hook was
+                    // invoked even if no relevant URL could be extracted.
+                    if (reqInfo == null && (hits <= 12 || hits % 150 == 0)) {
+                        LogUtil.info(PREFIX + " TRACE layer=" + label +
+                            " invoked=" + hits + " requestPresent=" + (req != null) +
+                            " matchingPlaybackPath=false")
+                    }
                     if (reqInfo != null && events.incrementAndGet() <= MAX_EVENTS) {
                         val result = if (error == null) responseSnapshot(response)
                             else "exception=" + error.javaClass.simpleName.take(60)
