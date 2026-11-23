@@ -231,6 +231,9 @@ object FeatureDiagnostics {
             } else if (stage == "engineModel") {
                 appendLine("    提交模型到播放器=" +
                     matched.count { it.contains("modelPresent=true") })
+            } else if (stage == "dto") {
+                appendLine("    构造后字段仍不可见（不代表请求无参数）=" +
+                    matched.count { it.contains("fieldsDeferredPossible=true") })
             }
         }
         appendLine("最后几条独立取址及模型事件：")
@@ -238,6 +241,10 @@ object FeatureDiagnostics {
             it.contains("stage=dto ") || it.contains("stage=builder ") || it.contains("stage=parsedBody ") ||
                 it.contains("stage=engineModel ")
         }.takeLast(16).forEach { appendLine("  " + it.trim().take(430)) }
+        appendLine("诊断注释：builder 按视频请求/其他请求分别限额；" +
+            "fieldsAtConstruction 仅表示构造函数返回时的快照。")
+        appendLine("诊断注释：parsedBody=0 表示对应方法未观察到调用，" +
+            "并不表示服务端返回空模型；需结合 engineModel 观察。")
         appendLine("观察范围：Android/Java 请求构造、模型解析、TTVideoEngine。" +
             "Native Cronet 内部签名、TLS 明文和 DRM 密钥均未采集。")
         appendLine("模型已送入播放器≠已获得独立客户端可复用的账号播放接口。")
