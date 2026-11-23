@@ -162,7 +162,9 @@ object FeatureDiagnostics {
         appendLine("探针激活=" + (activatedProbe?.trim()?.take(160)
             ?: "未检测到 ACTIVE，可能是在 App 上下文初始化前安装，或没有读取到目标进程的设置"))
         val events = probeLines.filter { it.contains("HGPROBE EVENT") }
-        appendLine("捕获网络事件=" + events.size)
+        appendLine("捕获 Hook 事件=" + events.size + "（含各层重复记录）")
+        val transportEvents = events.filter { it.contains("layer=network ") }
+        appendLine("实际网络接口调用=" + transportEvents.size)
         val traces = probeLines.filter { it.contains("HGPROBE TRACE") }
         appendLine("Hook 执行采样=" + traces.size)
         if (events.isEmpty()) {
@@ -174,7 +176,9 @@ object FeatureDiagnostics {
             })
         }
         for (group in listOf("v5", "video_tab", "lite", "legacy", "passport", "account", "device")) {
-            val scoped = events.filter { it.contains("group=" + group + " ") }
+            // Count each transport request once. Retrofit and decode observations
+            // describe the same request, not extra network calls.
+            val scoped = transportEvents.filter { it.contains("group=" + group + " ") }
             if (scoped.isEmpty()) continue
             val hasSession = scoped.count { it.contains("loginSessionPresent=true") }
             val hasCookie = scoped.count { it.contains("cookiePresent=true") }
@@ -192,9 +196,10 @@ object FeatureDiagnostics {
         events.filter { it.contains("group=v5 ") || it.contains("group=video_tab ") ||
             it.contains("group=lite ") || it.contains("group=legacy ") }
             .takeLast(12).forEach { appendLine("  " + it.take(500)) }
-        appendLine("说明：loginSessionPresent=true 只能证明该观察层出现登录会话 Cookie；" +
-            "false 不足以证明真正匿名，Cronet 原生层仍可能附加认证。")
-        appendLine("说明：length=unknown 不等于空响应；不能据此判断接口失败。")
+        appendLine("说明：Cookie/Authorization/签名标志只反映 Retrofit Request 对象。" +
+            "下层 TTNet/Cronet 注入的认证或签名不在当前探针观察范围内。")
+        appendLine("说明：HTTP 200 不代表业务成功；length=unknown 不等于空响应。" +
+            "需结合 parsedModelType、businessCode、parsedDataPresent 再判断。")
         appendLine()
         appendLine("建议复现：播放首页视频→打开全集→长按→切后台→")
         appendLine("尝试通知栏播放/暂停→切回→立刻导出 ZIP。")
