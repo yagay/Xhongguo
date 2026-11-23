@@ -1,5 +1,7 @@
 package xyz.kejiyu.hongguo.hooks
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.SystemClock
 import io.github.libxposed.api.XposedInterface
@@ -19,6 +21,7 @@ import xyz.kejiyu.hongguo.MainHook
  */
 internal object OfficialPlaybackProbe {
     @Volatile private var enabled = false
+    @Volatile private var prefs: SharedPreferences? = null
     private val events = AtomicInteger(0)
     private const val MAX_EVENTS = 450
     private const val PREFIX = "HGPROBE"
@@ -33,11 +36,14 @@ internal object OfficialPlaybackProbe {
         "source", "from_video_id", "is_from_web"
     )
 
-    fun configure(on: Boolean) {
-        val changed = enabled != on
-        enabled = on
-        if (changed) LogUtil.info(PREFIX + " mode=" + if (on) "ON" else "OFF")
+    fun attach(context: Context) {
+        prefs = context.getSharedPreferences("lspilot_kejiyu", Context.MODE_PRIVATE)
+        enabled = prefs?.getBoolean("official_playback_probe", false) == true
+        LogUtil.info(PREFIX + " mode=" + if (enabled) "ON" else "OFF")
     }
+
+    private fun enabledNow(): Boolean =
+        prefs?.getBoolean("official_playback_probe", false) ?: enabled
 
     private fun route(url: String): Pair<String, String>? {
         val parsed = try { Uri.parse(url) } catch (_: Throwable) { return null }
@@ -157,7 +163,7 @@ internal object OfficialPlaybackProbe {
     }
 
     private fun observe(label: String, chain: XposedInterface.Chain): Any? {
-        if (!enabled) return chain.proceed()
+        if (!enabledNow()) return chain.proceed()
         val started = SystemClock.elapsedRealtime()
         // Inspect after the original call; never force early Retrofit request
         // creation, signing, cookie access or stream consumption.
