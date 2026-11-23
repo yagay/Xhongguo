@@ -201,6 +201,47 @@ object FeatureDiagnostics {
         appendLine("说明：HTTP 200 不代表业务成功；length=unknown 不等于空响应。" +
             "需结合 parsedModelType、businessCode、parsedDataPresent 再判断。")
         appendLine()
+        appendLine("官方完整链路覆盖（HGDEEP）")
+        val deepLines = evidence.lineSequence()
+            .filter { it.contains("HGDEEP ") }.toList()
+        val coverage = deepLines.lastOrNull { it.contains("HGDEEP COVERAGE") }
+        appendLine("安装明细=" + (coverage?.trim()?.take(360)
+            ?: "未发现。检查最新模块版本以及官方进程是否重启"))
+        val deepEvents = deepLines.filter { it.contains("HGDEEP stage=") &&
+            it.contains(" index=") }
+        for (stage in listOf("builder", "commonParams", "parsedBody",
+            "engineModel", "engineId", "engineDirect", "cachePut", "cacheGet",
+            "cookieStore")) {
+            val matched = deepEvents.filter { it.contains("stage=" + stage + " ") }
+            appendLine("  " + stage + "=" + matched.size)
+            if (stage == "builder") {
+                val media = matched.filter { it.contains("group=video_") }
+                appendLine("    播放取址请求=" + media.size)
+                appendLine("    带会话 Cookie=" +
+                    media.count { it.contains("loginSessionPresent=true") })
+                appendLine("    带认证头=" +
+                    media.count { it.contains("authPresent=true") })
+                appendLine("    带签名头=" +
+                    media.count { Regex("signCount=[1-9]").containsMatchIn(it) })
+            } else if (stage == "parsedBody") {
+                appendLine("    有视频模型数据=" +
+                    matched.count { it.contains("dataPresent=true") })
+                appendLine("    非空嵌套模型=" +
+                    matched.count { it.contains("nestedModelPresent=true") })
+            } else if (stage == "engineModel") {
+                appendLine("    提交模型到播放器=" +
+                    matched.count { it.contains("modelPresent=true") })
+            }
+        }
+        appendLine("最后几条独立取址及模型事件：")
+        deepEvents.filter {
+            it.contains("stage=builder ") || it.contains("stage=parsedBody ") ||
+                it.contains("stage=engineModel ")
+        }.takeLast(16).forEach { appendLine("  " + it.trim().take(430)) }
+        appendLine("观察范围：Android/Java 请求构造、模型解析、TTVideoEngine。" +
+            "Native Cronet 内部签名、TLS 明文和 DRM 密钥均未采集。")
+        appendLine("模型已送入播放器≠已获得独立客户端可复用的账号播放接口。")
+        appendLine()
         appendLine("建议复现：播放首页视频→打开全集→长按→切后台→")
         appendLine("尝试通知栏播放/暂停→切回→立刻导出 ZIP。")
         appendLine("未观测到不代表失败：可能没有复现、日志被轮换或 Root 未授权。")
