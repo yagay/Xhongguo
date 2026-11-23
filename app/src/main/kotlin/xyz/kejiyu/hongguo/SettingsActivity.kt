@@ -99,6 +99,7 @@ class SettingsActivity : Activity() {
         toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
 
         section("诊断与日志")
+        toggle("官方播放/账号接口诊断", "仅记录接口路径、参数名、账号 Cookie 是否存在、签名头是否存在、状态码、耗时和响应长度；不保存任何凭据或视频地址。无需开启模块总开关。", "official_playback_probe")
         action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
             ModuleDiagnostics.chooseDestination(this)
         }
