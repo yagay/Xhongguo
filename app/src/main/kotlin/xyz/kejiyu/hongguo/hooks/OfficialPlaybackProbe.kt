@@ -134,6 +134,8 @@ internal object OfficialPlaybackProbe {
             Uri.parse(fullUrl).queryParameterNames
                 .filter { it in relevantQueryKeys }.sorted().take(28).joinToString(",")
         } catch (_: Throwable) { "" }
+        val rawHeaders = get(req, "getHeaders")
+        val headerSlots = (rawHeaders as? Collection<*>)?.size ?: -1
         val headers = headerMap(req)
         val cookie = headers["cookie"].orEmpty()
         val session = Regex("(?i)(?:^|;\\s*)sessionid(?:_ss)?=").containsMatchIn(cookie)
@@ -146,6 +148,8 @@ internal object OfficialPlaybackProbe {
         }
         return "group=" + group + " method=" + method + " path=" + safePath +
             " queryKeys=[" + queryKeys + "]" +
+            " requestHeaderSlots=" + headerSlots +
+            " inspectedHeaderNames=" + headers.size +
             " cookiePresent=" + headers.containsKey("cookie") +
             " loginSessionPresent=" + session +
             " authPresent=" + auth +
@@ -155,12 +159,19 @@ internal object OfficialPlaybackProbe {
 
     private fun safeLength(body: Any?): Long? {
         if (body == null) return null
+        // Only inspect metadata. Never open/read TypedInput streams.
+        if (body is ByteArray) return body.size.toLong()
+        if (body is java.nio.ByteBuffer) return body.remaining().toLong()
         val len = get(body, "length") ?: get(body, "contentLength")
         return (len as? Number)?.toLong()?.takeIf { it >= 0L }
     }
 
     private fun modelArgsSnapshot(call: Any?): String {
         val args = field(call, "args") as? Array<*> ?: return ""
+        val types = args.take(6).joinToString(",") { arg ->
+            // Class names only: never log argument values or model IDs.
+            arg?.javaClass?.simpleName?.take(55) ?: "null"
+        }
         val parts = ArrayList<String>()
         for (arg in args.take(8)) {
             val kind = arg?.javaClass?.name.orEmpty()
@@ -191,28 +202,28 @@ internal object OfficialPlaybackProbe {
             parts.add("novelCommonParam=" +
                 (field(arg, "novelCommonParam") != null))
         }
-        return if (parts.isEmpty()) "" else " modelFields=[" + parts.joinToString(",") + "]"
+        return " rpcArgTypes=[" + types + "]" +
+            if (parts.isEmpty()) "" else " modelFields=[" + parts.joinToString(",") + "]"
     }
 
     private fun modelResultSnapshot(response: Any?): String {
-        if (response == null) return ""
+        if (response == null) return " parsedModel=unavailable"
         // SsResponse.body() is a parsed DTO getter, not a network stream read.
-        val body = get(response, "body") ?: return ""
-        val type = body.javaClass.name
-        if (!type.endsWith(".MGetVideoModelResponse") &&
-            !type.endsWith(".MGetVideoModelLiteResponse") &&
-            !type.endsWith(".GetVideoModelResponse")) return ""
+        val body = get(response, "body") ?: return " parsedModel=unavailable"
+        val type = body.javaClass.name.substringAfterLast('.').take(64)
         val data = field(body, "data")
-        val code = field(body, "code")
+        val code = (field(body, "code") as? Number)?.toInt()
         val dataCount = when (data) {
             is Map<*, *> -> data.size
             is Collection<*> -> data.size
             else -> null
         }
-        return " modelResultType=" + type.substringAfterLast('.') +
-            " modelDataPresent=" + (data != null) +
-            " modelDataCount=" + (dataCount?.toString() ?: "unknown") +
-            " modelCodePresent=" + (code != null)
+        // The DTO class is important evidence: some Retrofit methods produce
+        // a wrapper rather than MGetVideoModelResponse. No data is serialized.
+        return " parsedModelType=" + type +
+            " parsedDataPresent=" + (data != null) +
+            " parsedDataCount=" + (dataCount?.toString() ?: "unknown") +
+            " businessCode=" + (code?.takeIf { it in -1000..999999 }?.toString() ?: "unknown")
     }
 
     private fun responseSnapshot(response: Any?): String {
@@ -223,6 +234,7 @@ internal object OfficialPlaybackProbe {
         val body = get(raw, "getBody")
         return "http=" + (code?.toString() ?: "unknown") +
             " length=" + (safeLength(body)?.toString() ?: "unknown") +
+            " rawBodyType=" + (body?.javaClass?.simpleName?.take(48) ?: "none") +
             " responseType=" + response.javaClass.simpleName.take(50)
     }
 
@@ -255,10 +267,15 @@ internal object OfficialPlaybackProbe {
                     if (reqInfo != null && events.incrementAndGet() <= MAX_EVENTS) {
                         val result = if (error == null) responseSnapshot(response)
                             else "exception=" + error.javaClass.simpleName.take(60)
+                        val media = listOf("group=v5 ", "group=video_tab ",
+                            "group=lite ", "group=legacy ").any { reqInfo.startsWith(it) }
                         LogUtil.info(PREFIX + " EVENT layer=" + label +
                             " elapsedMs=" + (SystemClock.elapsedRealtime() - started) +
-                            " " + reqInfo + modelArgsSnapshot(chain.thisObject) +
-                            " " + result + modelResultSnapshot(response))
+                            " " + reqInfo +
+                            (if (media && label == "retrofit") modelArgsSnapshot(chain.thisObject) else "") +
+                            " " + result +
+                            (if (media && error == null && label != "network")
+                                modelResultSnapshot(response) else ""))
                         LogUtil.incr("officialProbeEvent")
                     }
                 }
