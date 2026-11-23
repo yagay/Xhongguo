@@ -151,6 +151,38 @@ object FeatureDiagnostics {
             appendLine((if (evidence.contains(signal)) "找到" else "未找到") + " - " + signal)
         }
         appendLine()
+        appendLine("官方账号与视频取址诊断（7.4.2.32 及兼容网络层）")
+        appendLine("--------------------------------")
+        val enabledProbe = pref.getBoolean("official_playback_probe", false)
+        appendLine("官方播放探针开关=" + enabledProbe)
+        val probeLines = evidence.lineSequence().filter { it.contains("HGPROBE ") }.toList()
+        val installedProbe = probeLines.lastOrNull { it.contains("HGPROBE INSTALLED") }
+        appendLine("探针安装=" + (installedProbe?.trim()?.take(400) ?: "未发现，检查作用域与重启目标 App"))
+        val events = probeLines.filter { it.contains("HGPROBE EVENT") }
+        appendLine("捕获网络事件=" + events.size)
+        for (group in listOf("v5", "video_tab", "lite", "legacy", "passport", "account", "device")) {
+            val scoped = events.filter { it.contains("group=" + group + " ") }
+            if (scoped.isEmpty()) continue
+            val hasSession = scoped.count { it.contains("sessionCookie=true") }
+            val hasCookie = scoped.count { it.contains("cookieHeader=true") }
+            val withAuth = scoped.count { it.contains("authorization=true") }
+            val statuses = scoped.mapNotNull {
+                Regex("http=(\\d{3})").find(it)?.groupValues?.get(1)
+            }.groupingBy { it }.eachCount()
+            appendLine("  " + group + ": count=" + scoped.size +
+                " sessionCookieObserved=" + hasSession +
+                " cookieHeaderObserved=" + hasCookie +
+                " authorizationObserved=" + withAuth +
+                " http=" + statuses.entries.joinToString { it.key + ":" + it.value })
+        }
+        appendLine("最近的视频接口事件（不含凭据、URL 参数值和响应正文）：")
+        events.filter { it.contains("group=v5 ") || it.contains("group=video_tab ") ||
+            it.contains("group=lite ") || it.contains("group=legacy ") }
+            .takeLast(12).forEach { appendLine("  " + it.take(500)) }
+        appendLine("说明：sessionCookie=true 只能证明该观察层出现登录 Cookie；" +
+            "false 不足以证明真正匿名，Cronet 原生层仍可能附加认证。")
+        appendLine("说明：length=unknown 不等于空响应；不能据此判断接口失败。")
+        appendLine()
         appendLine("建议复现：播放首页视频→打开全集→长按→切后台→")
         appendLine("尝试通知栏播放/暂停→切回→立刻导出 ZIP。")
         appendLine("未观测到不代表失败：可能没有复现、日志被轮换或 Root 未授权。")
