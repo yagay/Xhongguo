@@ -158,6 +158,9 @@ object FeatureDiagnostics {
         val probeLines = evidence.lineSequence().filter { it.contains("HGPROBE ") }.toList()
         val installedProbe = probeLines.lastOrNull { it.contains("HGPROBE INSTALLED") }
         appendLine("探针安装=" + (installedProbe?.trim()?.take(400) ?: "未发现，检查作用域与重启目标 App"))
+        val activatedProbe = probeLines.lastOrNull { it.contains("HGPROBE ACTIVE mode=") }
+        appendLine("探针激活=" + (activatedProbe?.trim()?.take(160)
+            ?: "未检测到 ACTIVE，可能是在 App 上下文初始化前安装，或没有读取到目标进程的设置"))
         val events = probeLines.filter { it.contains("HGPROBE EVENT") }
         appendLine("捕获网络事件=" + events.size)
         for (group in listOf("v5", "video_tab", "lite", "legacy", "passport", "account", "device")) {
