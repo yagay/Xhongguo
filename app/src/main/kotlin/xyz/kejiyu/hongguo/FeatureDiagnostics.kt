@@ -209,7 +209,7 @@ object FeatureDiagnostics {
             ?: "未发现。检查最新模块版本以及官方进程是否重启"))
         val deepEvents = deepLines.filter { it.contains("HGDEEP stage=") &&
             it.contains(" index=") }
-        for (stage in listOf("builder", "commonParams", "parsedBody",
+        for (stage in listOf("dto", "builder", "commonParams", "parsedBody",
             "engineModel", "engineId", "engineDirect", "cachePut", "cacheGet",
             "cookieStore")) {
             val matched = deepEvents.filter { it.contains("stage=" + stage + " ") }
@@ -235,7 +235,7 @@ object FeatureDiagnostics {
         }
         appendLine("最后几条独立取址及模型事件：")
         deepEvents.filter {
-            it.contains("stage=builder ") || it.contains("stage=parsedBody ") ||
+            it.contains("stage=dto ") || it.contains("stage=builder ") || it.contains("stage=parsedBody ") ||
                 it.contains("stage=engineModel ")
         }.takeLast(16).forEach { appendLine("  " + it.trim().take(430)) }
         appendLine("观察范围：Android/Java 请求构造、模型解析、TTVideoEngine。" +
