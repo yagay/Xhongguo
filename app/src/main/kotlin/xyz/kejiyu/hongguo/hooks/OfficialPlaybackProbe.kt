@@ -138,9 +138,9 @@ internal object OfficialPlaybackProbe {
         }
         return "group=" + group + " method=" + method + " path=" + safePath +
             " queryKeys=[" + queryKeys + "]" +
-            " cookieHeader=" + headers.containsKey("cookie") +
-            " sessionCookie=" + session +
-            " authorization=" + auth +
+            " cookiePresent=" + headers.containsKey("cookie") +
+            " loginSessionPresent=" + session +
+            " authPresent=" + auth +
             " signedHeaders=[" + sign.joinToString(",") + "]" +
             " bodyLength=" + length
     }
