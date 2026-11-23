@@ -163,23 +163,23 @@ object FeatureDiagnostics {
         for (group in listOf("v5", "video_tab", "lite", "legacy", "passport", "account", "device")) {
             val scoped = events.filter { it.contains("group=" + group + " ") }
             if (scoped.isEmpty()) continue
-            val hasSession = scoped.count { it.contains("sessionCookie=true") }
-            val hasCookie = scoped.count { it.contains("cookieHeader=true") }
-            val withAuth = scoped.count { it.contains("authorization=true") }
+            val hasSession = scoped.count { it.contains("loginSessionPresent=true") }
+            val hasCookie = scoped.count { it.contains("cookiePresent=true") }
+            val withAuth = scoped.count { it.contains("authPresent=true") }
             val statuses = scoped.mapNotNull {
                 Regex("http=(\\d{3})").find(it)?.groupValues?.get(1)
             }.groupingBy { it }.eachCount()
             appendLine("  " + group + ": count=" + scoped.size +
-                " sessionCookieObserved=" + hasSession +
-                " cookieHeaderObserved=" + hasCookie +
-                " authorizationObserved=" + withAuth +
+                " loginSessionObserved=" + hasSession +
+                " cookieObserved=" + hasCookie +
+                " authObserved=" + withAuth +
                 " http=" + statuses.entries.joinToString { it.key + ":" + it.value })
         }
         appendLine("最近的视频接口事件（不含凭据、URL 参数值和响应正文）：")
         events.filter { it.contains("group=v5 ") || it.contains("group=video_tab ") ||
             it.contains("group=lite ") || it.contains("group=legacy ") }
             .takeLast(12).forEach { appendLine("  " + it.take(500)) }
-        appendLine("说明：sessionCookie=true 只能证明该观察层出现登录 Cookie；" +
+        appendLine("说明：loginSessionPresent=true 只能证明该观察层出现登录会话 Cookie；" +
             "false 不足以证明真正匿名，Cronet 原生层仍可能附加认证。")
         appendLine("说明：length=unknown 不等于空响应；不能据此判断接口失败。")
         appendLine()
