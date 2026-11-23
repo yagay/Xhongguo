@@ -111,12 +111,29 @@ internal object OfficialPlaybackCoverage {
     }
 
     private fun emit(stage: String, event: String) {
-        val n = hitCounts.computeIfAbsent(stage) { AtomicInteger() }.incrementAndGet()
-        if (n <= CAP_PER_STAGE) {
-            LogUtil.info("HGDEEP stage=" + stage + " index=" + n + " " + event)
+        // A busy official app creates hundreds of account/Passport requests
+        // before playback starts. Never let those exhaust the video diagnostic
+        // budget. Keep independent, bounded counters for video and other work.
+        val video = event.contains("group=video_")
+        val bucket = when {
+            stage == "builder" && video -> "builder:video"
+            stage == "builder" -> "builder:other"
+            else -> stage
+        }
+        val cap = when (bucket) {
+            "builder:video" -> 100
+            "builder:other" -> 12
+            "cookieStore" -> 3
+            else -> CAP_PER_STAGE
+        }
+        val n = hitCounts.computeIfAbsent(bucket) { AtomicInteger() }.incrementAndGet()
+        if (n <= cap) {
+            LogUtil.info("HGDEEP stage=" + stage + " bucket=" + bucket +
+                " index=" + n + " " + event)
             LogUtil.incr("officialDeep_" + stage)
-        } else if (n == CAP_PER_STAGE + 1) {
-            LogUtil.info("HGDEEP stage=" + stage + " capReached=" + CAP_PER_STAGE)
+        } else if (n == cap + 1) {
+            LogUtil.info("HGDEEP stage=" + stage + " bucket=" + bucket +
+                " capReached=" + cap)
         }
     }
 
@@ -226,8 +243,11 @@ internal object OfficialPlaybackCoverage {
                         val result = chain.proceed()
                         if (OfficialPlaybackProbe.isEnabled()) {
                             try {
+                                val fields = requestFields(chain.thisObject)
                                 emit("dto", "type=" + cls.simpleName.take(48) +
-                                    " fields=[" + requestFields(chain.thisObject) + "]")
+                                    " fieldsAtConstruction=[" + fields + "]" +
+                                    " fieldsDeferredPossible=" + fields.isBlank() +
+                                    " constructorArgCount=" + chain.args.size)
                             } catch (_: Throwable) {}
                         }
                         result
