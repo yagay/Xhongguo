@@ -4,6 +4,7 @@ import android.util.Log
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
 import xyz.kejiyu.hongguo.hooks.Hooks
+import xyz.kejiyu.hongguo.hooks.OfficialPlaybackProbe
 import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Method
 
@@ -88,6 +89,19 @@ class MainHook : XposedModule() {
                 LogUtil.info("  ✓ 业务 Hook 安装完成")
             } catch (e: Exception) {
                 LogUtil.error("业务 Hook 安装失败", e)
+            }
+            // Independent of playback/UI modifications and the master toggle.
+            // On-demand, passive metadata probes never alter requests or bodies.
+            try {
+                val app = android.app.ActivityThread.currentApplication()
+                if (app != null) OfficialPlaybackProbe.attach(app.applicationContext)
+                val version = try {
+                    @Suppress("DEPRECATION")
+                    app?.packageManager?.getPackageInfo(pkg, 0)?.versionName ?: "unknown"
+                } catch (_: Throwable) { "unknown" }
+                OfficialPlaybackProbe.install(this, param.classLoader, pkg, version)
+            } catch (e: Throwable) {
+                LogUtil.warn("HGPROBE install skipped: " + e.javaClass.simpleName)
             }
         }
     }
