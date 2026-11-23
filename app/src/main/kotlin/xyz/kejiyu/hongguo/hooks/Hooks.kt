@@ -28,6 +28,7 @@ import android.widget.*
 import xyz.kejiyu.hongguo.ModuleSettingsStore
 import xyz.kejiyu.hongguo.LogUtil
 import xyz.kejiyu.hongguo.MainHook
+import xyz.kejiyu.hongguo.hooks.OfficialPlaybackProbe
 import xyz.kejiyu.hongguo.BuildConfig
 import xyz.kejiyu.hongguo.UpdateChecker
 import io.github.libxposed.api.XposedInterface
@@ -272,6 +273,11 @@ object Hooks {
             ensureSettingsObserver(ctx)
         }
 
+        // onPackageReady may happen before ActivityThread.currentApplication
+        // exists. Activity.onCreate/onResume always call initPrefs once a real
+        // Context is available, so attach the passive probe at this point.
+        // It remains independent of the master feature switch.
+        OfficialPlaybackProbe.attach(ctx.applicationContext)
         gMasterOn = prefs.getBoolean("master_on", false)
         gStatusOn = prefs.getBoolean("status_bar", false)
         gControlOn = prefs.getBoolean("control_hide", false)
