@@ -255,7 +255,14 @@ internal object OfficialPlaybackProbe {
             try {
                 if (events.get() < MAX_EVENTS) {
                     val hits = hookInvocations.incrementAndGet()
-                    val req = request(chain.thisObject)
+                    // In CallServerInterceptor.executeCall(SsCall) the actual
+                    // network-call Request can differ from mOriginalRequest.
+                    // The 7.4.2.32 SsCall interface exposes getRequest().
+                    val transportReq = if (label == "network")
+                        get(chain.getArg(0), "getRequest") else null
+                    val req = transportReq ?: request(chain.thisObject)
+                    val requestView = if (transportReq != null) "transport"
+                        else "original"
                     val reqInfo = requestSnapshot(req)
                     // Low-frequency diagnostics: proves that the hook was
                     // invoked even if no relevant URL could be extracted.
@@ -271,7 +278,7 @@ internal object OfficialPlaybackProbe {
                             "group=lite ", "group=legacy ").any { reqInfo.startsWith(it) }
                         LogUtil.info(PREFIX + " EVENT layer=" + label +
                             " elapsedMs=" + (SystemClock.elapsedRealtime() - started) +
-                            " " + reqInfo +
+                            " " + reqInfo + " requestView=" + requestView +
                             (if (media && label == "retrofit") modelArgsSnapshot(chain.thisObject) else "") +
                             " " + result +
                             (if (media && error == null && label != "network")
