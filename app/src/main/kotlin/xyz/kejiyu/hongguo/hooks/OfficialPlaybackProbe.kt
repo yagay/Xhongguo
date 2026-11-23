@@ -37,9 +37,16 @@ internal object OfficialPlaybackProbe {
     )
 
     fun attach(context: Context) {
-        prefs = context.getSharedPreferences("lspilot_kejiyu", Context.MODE_PRIVATE)
-        enabled = prefs?.getBoolean("official_playback_probe", false) == true
-        LogUtil.info(PREFIX + " mode=" + if (enabled) "ON" else "OFF")
+        val current = context.getSharedPreferences("lspilot_kejiyu", Context.MODE_PRIVATE)
+        val active = current.getBoolean("official_playback_probe", false)
+        val first = prefs == null
+        val changed = enabled != active
+        prefs = current
+        enabled = active
+        if (first || changed) {
+            LogUtil.info(PREFIX + " ACTIVE mode=" + if (active) "ON" else "OFF")
+            LogUtil.info(PREFIX + " ACTIVE source=target-prefs ready=true")
+        }
     }
 
     private fun enabledNow(): Boolean =
