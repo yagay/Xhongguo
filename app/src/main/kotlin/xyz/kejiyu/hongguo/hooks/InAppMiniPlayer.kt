@@ -38,6 +38,7 @@ internal object InAppMiniPlayer {
         var display: Activity? = null,
         var x: Float = 1f, var y: Float = 0.78f, var large: Boolean = false,
         var returnRequested: Boolean = false,
+        var minimizedSeries: Boolean = false,
         var controls: List<View> = emptyList(), var playButton: TextView? = null,
         var controlsGeneration: Int = 0
     )
@@ -48,6 +49,62 @@ internal object InAppMiniPlayer {
     @Volatile private var transitionUntil = 0L
     @Volatile private var transitionPause = false
     @Volatile private var manualCommand = false
+    private var mainPage = WeakReference<Activity>(null)
+    @Volatile private var retiredEngine = WeakReference<Any>(null)
+    @Volatile private var retiredUntil = 0L
+    @Volatile private var returningSeriesUntil = 0L
+    private const val SERIES_MINI_TAG = "XHONGGUO_SERIES_MINI_ENTRY"
+
+    fun ownsTransportCommand(): Boolean = manualCommand
+
+    // A native decoder can be replaced by the official app. Logical
+    // ownership is transferred before a new play, never by a delayed
+    // isPlaying() check (which misses asynchronous prepare).
+    private fun retire(engine: Any, reason: String) {
+        retiredEngine = WeakReference(engine)
+        retiredUntil = SystemClock.uptimeMillis() + 3000L
+        val sent = command(engine, false)
+        LogUtil.info("应用内小窗: 旧播放会话交接 reason=$reason pauseSent=$sent")
+        LogUtil.incr("inAppMiniHandoff")
+    }
+
+    fun beforeEnginePlay(candidate: Any?, activity: Activity?): Boolean {
+        if (!enabled || candidate == null || manualCommand) return false
+        val s = session
+        val now = SystemClock.uptimeMillis()
+        if (s != null && candidate === s.engine) return false
+        if (candidate === retiredEngine.get() && now < retiredUntil) {
+            LogUtil.incr("inAppMiniRetiredPlayIgnored")
+            return true
+        }
+        // Native Home may autoplay immediately as a minimized series
+        // returns to the existing Main Activity. Don't replace the series
+        // with that startup playback. Never guard indefinitely.
+        if (s?.minimizedSeries == true && activity?.javaClass?.name == MAIN &&
+            now < returningSeriesUntil) {
+            LogUtil.incr("inAppMiniReturnAutoplayIgnored")
+            return true
+        }
+        if (s != null) {
+            // A new actual play, not a prepare callback, supersedes mini.
+            if (onMain()) {
+                restore()
+                retire(s.engine, "new-native-play")
+            } else {
+                // Native engine calls can arrive off the UI thread.
+                // Pause the old exact instance now; only move Views on main.
+                retire(s.engine, "new-native-play-worker")
+                main.post { if (session === s) restore() }
+            }
+        }
+        return false
+    }
+
+    private fun endForNewPage(reason: String) {
+        val s = session ?: return
+        restore()
+        retire(s.engine, reason)
+    }
 
     private fun dp(a: Activity, n: Float) = (a.resources.displayMetrics.density * n + 0.5f).toInt()
     private fun shape(color: Int, radius: Float) = GradientDrawable().apply {
@@ -100,20 +157,11 @@ internal object InAppMiniPlayer {
                 LogUtil.info("应用内小窗: 原生引擎已观察 page=" +
                     (activity?.javaClass?.simpleName ?: "none") +
                     " state=" + playbackState(engine))
-            } else if (current != null && current.engine !== engine) {
-                // A different decoder actually playing supersedes the mini
-                // window. Ignore mere preparation; never start a second one.
-                main.postDelayed({
-                    if (session === current && isPlaying(engine) == true) {
-                        if (isPlaying(current.engine) == true) command(current.engine, false)
-                        restore()
-                        if (activity != null && isAlive(activity)) {
-                            engineRef = WeakReference(engine)
-                            engineActivity = WeakReference(activity)
-                        }
-                        LogUtil.incr("inAppMiniSuperseded")
-                    }
-                }, 250L)
+            } else if (current.engine !== engine) {
+                // beforeEnginePlay has already retired the old engine;
+                // the UI restore can still be queued from a worker thread.
+                engineRef = WeakReference(engine)
+                engineActivity = WeakReference(activity)
             }
         } else if (current != null && current.engine === engine) {
             if (action == "pause") {
@@ -308,27 +356,41 @@ internal object InAppMiniPlayer {
             intent.resolveActivity(activity.packageManager)
         }.getOrNull() ?: return
         if (target.packageName != activity.packageName ||
-            target.className in setOf(MAIN, SERIES) ||
             intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0) return
+        if (target.className in setOf(MAIN, SERIES)) {
+            val s = session
+            if (s != null && (s.returnRequested ||
+                s.minimizedSeries && target.className == MAIN &&
+                SystemClock.uptimeMillis() < returningSeriesUntil)) return
+            if (s != null) endForNewPage("launch-player-page")
+            else if (target.className == SERIES && activity.javaClass.name == MAIN &&
+                canDock(activity)) {
+                engineRef.get()?.let { retire(it, "feed-to-series") }
+            }
+            return
+        }
         if (session == null && canDock(activity)) dock(activity, host())
         else if (activeFor(activity)) armTransition()
     }
     fun onActivityResumed(activity: Activity) {
+        if (activity.javaClass.name == MAIN) mainPage = WeakReference(activity)
         val s = session ?: return
         if (!enabled || !isAlive(s.activity)) { restore(); return }
         if (activity.packageName != s.activity.packageName || activity.taskId != s.activity.taskId) return
-        if (s.returnRequested && activity === s.activity) {
+        if (activity === s.activity && (s.returnRequested ||
+                s.minimizedSeries && s.display !== activity)) {
             val home = activity.javaClass.name == MAIN
             restore()
             if (home) openHomeTab?.invoke(activity)
             return
         }
-        if (activity !== s.activity && activity.javaClass.name in setOf(MAIN, SERIES)) {
-            // A new video page owns its own playback. Never cover it with
-            // the previous session while it is creating a new decoder.
-            restore()
+        if (activity !== s.activity && activity.javaClass.name in setOf(MAIN, SERIES) &&
+            !(s.minimizedSeries && activity === mainPage.get())) {
+            endForNewPage("resume-player-page")
             return
         }
+        if (s.minimizedSeries && activity.javaClass.name == MAIN)
+            returningSeriesUntil = SystemClock.uptimeMillis() + 2200L
         if (!attach(s, activity)) {
             restore()
             return
@@ -336,6 +398,7 @@ internal object InAppMiniPlayer {
         main.postDelayed({ if (session === s) resumeAfterTabSwitch() }, 320L)
     }
     fun onActivityClosed(activity: Activity) {
+        if (mainPage.get() === activity) mainPage.clear()
         val s = session ?: return
         if (s.activity === activity) {
             // Native owner is going away: no forced retention or release suppression.
@@ -349,6 +412,59 @@ internal object InAppMiniPlayer {
             s.display = null
         }
     }
+    /** A deliberate minimize action keeps the native series Activity in
+     * the same task rather than intercepting release or ordinary finish(). */
+    fun minimizeSeries(activity: Activity, host: () -> View?): Boolean {
+        if (!enabled || !onMain() || activity.javaClass.name != SERIES ||
+            activity.isFinishing || activity.isDestroyed) return false
+        val home = mainPage.get()?.takeIf { isAlive(it) && it.taskId == activity.taskId }
+            ?: return false
+        if (session != null && session?.activity !== activity) endForNewPage("series-minimize")
+        if (session == null && !dock(activity, host())) return false
+        val s = session?.takeIf { it.activity === activity } ?: return false
+        s.minimizedSeries = true
+        returningSeriesUntil = SystemClock.uptimeMillis() + 3500L
+        armTransition()
+        return try {
+            activity.startActivity(Intent(activity, home.javaClass)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            LogUtil.incr("inAppMiniSeriesMinimize")
+            true
+        } catch (e: Throwable) {
+            s.minimizedSeries = false
+            returningSeriesUntil = 0L
+            restore()
+            LogUtil.warn("应用内小窗: 全集缩小失败 " + e.javaClass.simpleName)
+            false
+        }
+    }
+
+    fun installSeriesEntry(activity: Activity, host: () -> View?) {
+        if (activity.javaClass.name != SERIES || !isAlive(activity)) return
+        val root = content(activity) ?: return
+        val old = root.findViewWithTag<View>(SERIES_MINI_TAG)
+        val available = enabled && mainPage.get()?.let { isAlive(it) &&
+            it.taskId == activity.taskId } == true
+        if (!available) {
+            old?.let { root.removeView(it) }
+            return
+        }
+        if (old != null) { old.bringToFront(); return }
+        val entry = button(activity, "▣", "缩小到应用内小窗").apply {
+            tag = SERIES_MINI_TAG
+            setOnClickListener {
+                if (!minimizeSeries(activity, host))
+                    android.widget.Toast.makeText(activity, "当前播放容器尚未准备好",
+                        android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        root.addView(entry, FrameLayout.LayoutParams(dp(activity, 38f), dp(activity, 38f),
+            Gravity.TOP or Gravity.RIGHT).apply {
+            rightMargin = dp(activity, 14f)
+            topMargin = dp(activity, 78f)
+        })
+    }
+
     private fun button(a: Activity, label: String, description: String): TextView = TextView(a).apply {
         text = label; textSize = 20f; setTextColor(Color.WHITE)
         gravity = Gravity.CENTER; contentDescription = description
@@ -449,6 +565,7 @@ internal object InAppMiniPlayer {
     fun restore(): Boolean {
         val old = session ?: return false
         session = null
+        returningSeriesUntil = 0L
         transitionUntil = 0
         transitionPause = false
         return try {
