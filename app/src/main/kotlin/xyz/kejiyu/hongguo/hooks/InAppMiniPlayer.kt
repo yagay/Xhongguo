@@ -112,19 +112,9 @@ internal object InAppMiniPlayer {
                 retire(s.engine, "new-native-play-worker")
                 main.post { if (session === s) restore() }
             }
-        } else {
-            // The same ownership rule also covers native feed/series
-            // handoffs when a window is not currently attached.
-            val previous = engineRef.get()
-            val owner = engineActivity.get()
-            if (previous != null && previous !== candidate && owner != null &&
-                activity != null && owner !== activity &&
-                owner.taskId == activity.taskId &&
-                owner.javaClass.name in setOf(MAIN, SERIES) &&
-                activity.javaClass.name in setOf(MAIN, SERIES)) {
-                retire(previous, "cross-player-activity")
-            }
         }
+        // Without a docked mini session, leave native feed/series ownership
+        // to the host. Activity transitions do not identify decoder ownership.
         return false
     }
 
