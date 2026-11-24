@@ -5823,7 +5823,7 @@ object Hooks {
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
             var installed = 0
             for ((index, method) in engine.declaredMethods.filter {
-                it.name in setOf("play", "pause", "stop", "releaseAsync") &&
+                it.name in setOf("play", "start", "pause", "stop", "releaseAsync") &&
                     it.parameterCount == 0
             }.withIndex()) {
                 try {
@@ -5831,7 +5831,7 @@ object Hooks {
                         .setId("xhSystemMediaTTVideoEngine_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
-                            if (method.name == "play" && method.returnType == Void.TYPE &&
+                            if (method.name in setOf("play", "start") && method.returnType == Void.TYPE &&
                                 InAppMiniPlayer.beforeEnginePlay(chain.thisObject, gCurrentActivity)) {
                                 return@Hooker null
                             }
@@ -5846,7 +5846,7 @@ object Hooks {
                             try {
                                 InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
                                 SystemMediaBridge.onNativeEngineCommand(
-                                    chain.thisObject, method.name)
+                                    chain.thisObject, if (method.name == "start") "play" else method.name)
                             } catch (e: Throwable) {
                                 LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " +
                                     method.name + ": " + e.message)

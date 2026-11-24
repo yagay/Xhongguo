@@ -1,0 +1,5 @@
+# Mini window transport and vector icons
+
+APK 7.4.2.32 classes14.dex confirms TTVideoEngine.play(), start(), pause(), getPlaybackState(); controller.isPlaying compares engine playback state to 1. TTVideoEngineImpl.pause and start can post messages to engine looper; start reaches _doStart -> _play. play follows separate AOP path. Use start for a previously paused existing engine; allow one play fallback if state remains paused, never construct a decoder, switch video or alter source. UI tracks explicit pause separately from async state, with generation-bound confirmation, manual pause preservation, and native state callback. Native start is observed through the same ownership hook and system media bridge. New Canvas vector icons use a unified white glyph/circular translucent ripple style.
+
+Regression: feed mini and series mini, pause then resume after 0.2/3/30 seconds, quick alternating taps, pause during tab transition, pause via media card, close during pending resume, expand, new drama handoff. Inspect inAppMiniTransportConfirmed/Unconfirmed and inAppMiniResumeFallback. Static APK evidence and code review do not verify device playback.

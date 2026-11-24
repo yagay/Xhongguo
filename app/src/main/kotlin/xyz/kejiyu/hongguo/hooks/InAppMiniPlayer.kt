@@ -3,6 +3,12 @@ package xyz.kejiyu.hongguo.hooks
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
@@ -14,7 +20,7 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.FrameLayout
-import android.widget.TextView
+import android.widget.Toast
 import java.lang.ref.WeakReference
 import kotlin.math.abs
 import xyz.kejiyu.hongguo.LogUtil
@@ -39,8 +45,12 @@ internal object InAppMiniPlayer {
         var x: Float = 1f, var y: Float = 0.78f, var large: Boolean = false,
         var returnRequested: Boolean = false,
         var minimizedSeries: Boolean = false,
-        var controls: List<View> = emptyList(), var playButton: TextView? = null,
-        var controlsGeneration: Int = 0
+        var controls: List<View> = emptyList(), var playButton: IconButton? = null,
+        var controlsGeneration: Int = 0,
+        var desiredPlaying: Boolean = true,
+        var userPaused: Boolean = false,
+        var transportPending: Boolean = false,
+        var transportGeneration: Int = 0
     )
     @Volatile private var session: Session? = null
     @Volatile private var engineRef = WeakReference<Any>(null)
@@ -72,7 +82,13 @@ internal object InAppMiniPlayer {
         if (!enabled || candidate == null || manualCommand) return false
         val s = session
         val now = SystemClock.uptimeMillis()
-        if (s != null && candidate === s.engine) return false
+        if (s != null && candidate === s.engine) {
+            if (s.userPaused && !SystemMediaBridge.userTransportActive()) {
+                LogUtil.incr("inAppMiniUserPausePreserved")
+                return true
+            }
+            return false
+        }
         if (candidate === retiredEngine.get() && now < retiredUntil) {
             LogUtil.incr("inAppMiniRetiredPlayIgnored")
             return true
@@ -136,15 +152,18 @@ internal object InAppMiniPlayer {
         if (state == 2 || state == 0) return false
         return NativeMetadataAccess.call(engine, "isPlaying") as? Boolean
     }
-    private fun command(engine: Any, play: Boolean): Boolean {
+    private fun command(engine: Any, play: Boolean, startOnly: Boolean = false): Boolean {
         transitionUntil = 0
         transitionPause = false
         manualCommand = true
         return try {
             val method = engine.javaClass.methods.firstOrNull {
-                it.name == (if (play) "play" else "pause") && it.parameterCount == 0
+                it.name == (if (play && startOnly) "start" else if (play) "play" else "pause") &&
+                    it.parameterCount == 0 && it.returnType == Void.TYPE
             } ?: return false
             method.invoke(engine)
+            LogUtil.info("应用内小窗: 控制指令 method=" + method.name +
+                " nativeState=" + playbackState(engine))
             true
         } catch (e: Throwable) {
             LogUtil.warn("应用内小窗: 播放控制失败 " + e.javaClass.simpleName)
@@ -160,7 +179,14 @@ internal object InAppMiniPlayer {
     fun onEngineCommand(engine: Any?, action: String, activity: Activity?) {
         if (!enabled || engine == null) return
         val current = session
-        if (action == "play") {
+        if (action == "play" || action == "start") {
+            if (current != null && current.engine === engine) {
+                if (!manualCommand && SystemMediaBridge.userTransportActive()) {
+                    current.userPaused = false
+                    current.desiredPlaying = true
+                }
+                main.post { updatePlayButton(current) }
+            }
             if (current == null) {
                 // Play can be dispatched during the Splash-to-player handoff.
                 // Verify the visible owner when docking, not at play dispatch.
@@ -179,7 +205,13 @@ internal object InAppMiniPlayer {
             if (action == "pause") {
                 if (SystemClock.uptimeMillis() <= transitionUntil && !manualCommand &&
                     !SystemMediaBridge.userTransportActive()) transitionPause = true
-                else transitionPause = false
+                else {
+                    transitionPause = false
+                    if (!manualCommand && SystemMediaBridge.userTransportActive()) {
+                        current.userPaused = true
+                        current.desiredPlaying = false
+                    }
+                }
                 main.post { updatePlayButton(current) }
             } else if (action == "stop" || action.startsWith("release")) {
                 transitionUntil = 0
@@ -219,13 +251,13 @@ internal object InAppMiniPlayer {
     }
 
     private fun armTransition() {
-        if (session?.let { isPlaying(it.engine) } != true) return
+        if (session?.let { !it.userPaused && isPlaying(it.engine) == true } != true) return
         transitionUntil = SystemClock.uptimeMillis() + 1800L
         transitionPause = false
     }
     fun shouldKeepPlaying(controller: Any?): Boolean {
         val s = session ?: return false
-        if (!enabled || !isAlive(s.activity) || manualCommand ||
+        if (!enabled || !isAlive(s.activity) || s.userPaused || manualCommand ||
             SystemMediaBridge.userTransportActive() ||
             SystemClock.uptimeMillis() > transitionUntil) return false
         if (controller == null) return false
@@ -246,7 +278,7 @@ internal object InAppMiniPlayer {
         val s = session ?: return
         // A single recovery for a recorded transition pause, never a
         // repeating play loop or resume after a deliberate manual pause.
-        if (!enabled || !isAlive(s.activity) || !transitionPause ||
+        if (!enabled || !isAlive(s.activity) || s.userPaused || !transitionPause ||
             SystemClock.uptimeMillis() > transitionUntil ||
             SystemMediaBridge.userTransportActive()) return
         transitionPause = false
@@ -462,7 +494,7 @@ internal object InAppMiniPlayer {
             return
         }
         if (old != null) { old.bringToFront(); return }
-        val entry = button(activity, "▣", "缩小到应用内小窗").apply {
+        val entry = button(activity, Glyph.MINI, "缩小到应用内小窗").apply {
             tag = SERIES_MINI_TAG
             setOnClickListener {
                 if (!minimizeSeries(activity, host))
@@ -477,17 +509,134 @@ internal object InAppMiniPlayer {
         })
     }
 
-    private fun button(a: Activity, label: String, description: String): TextView = TextView(a).apply {
-        text = label; textSize = 20f; setTextColor(Color.WHITE)
-        gravity = Gravity.CENTER; contentDescription = description
-        background = shape(Color.argb(180, 16, 17, 19), dp(a, 20f).toFloat())
-        isClickable = true; isFocusable = true
+    private enum class Glyph { PLAY, PAUSE, EXPAND, CLOSE, MINI }
+
+    /** Resolution-independent Material-style glyphs, no Unicode/font dependency. */
+    private class IconButton(a: Activity, initial: Glyph, description: String) : View(a) {
+        var glyph: Glyph = initial
+            set(value) { field = value; invalidate() }
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        init {
+            contentDescription = description
+            isClickable = true
+            isFocusable = true
+            background = RippleDrawable(ColorStateList.valueOf(0x44FFFFFF),
+                GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xB8202020.toInt())
+                }, null)
+        }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val side = minOf(width, height) * 0.54f
+            val save = canvas.save()
+            canvas.translate((width - side) / 2f, (height - side) / 2f)
+            canvas.scale(side / 24f, side / 24f)
+            paint.style = Paint.Style.FILL
+            when (glyph) {
+                Glyph.PLAY -> {
+                    val triangle = Path().apply {
+                        moveTo(7f, 4f); lineTo(20f, 12f); lineTo(7f, 20f); close()
+                    }
+                    canvas.drawPath(triangle, paint)
+                }
+                Glyph.PAUSE -> {
+                    canvas.drawRoundRect(RectF(5.5f, 4.5f, 10f, 19.5f), 1f, 1f, paint)
+                    canvas.drawRoundRect(RectF(14f, 4.5f, 18.5f, 19.5f), 1f, 1f, paint)
+                }
+                Glyph.CLOSE -> {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 2.2f
+                    canvas.drawLine(6f, 6f, 18f, 18f, paint)
+                    canvas.drawLine(18f, 6f, 6f, 18f, paint)
+                }
+                Glyph.EXPAND -> {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 2f
+                    val corners = Path().apply {
+                        moveTo(4f, 10f); lineTo(4f, 4f); lineTo(10f, 4f)
+                        moveTo(14f, 4f); lineTo(20f, 4f); lineTo(20f, 10f)
+                        moveTo(20f, 14f); lineTo(20f, 20f); lineTo(14f, 20f)
+                        moveTo(10f, 20f); lineTo(4f, 20f); lineTo(4f, 14f)
+                    }
+                    canvas.drawPath(corners, paint)
+                }
+                Glyph.MINI -> {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 1.8f
+                    canvas.drawRoundRect(RectF(2.5f, 4.5f, 21.5f, 19.5f), 2f, 2f, paint)
+                    paint.style = Paint.Style.FILL
+                    canvas.drawRoundRect(RectF(12f, 11f, 19f, 17f), 1f, 1f, paint)
+                }
+            }
+            canvas.restoreToCount(save)
+        }
     }
+    private fun button(a: Activity, glyph: Glyph, description: String) =
+        IconButton(a, glyph, description)
+
     private fun updatePlayButton(s: Session) {
         if (session !== s) return
-        val playing = isPlaying(s.engine) == true
-        s.playButton?.text = if (playing) "Ⅱ" else "▶"
+        val playing = if (s.transportPending || s.userPaused) s.desiredPlaying
+            else isPlaying(s.engine) ?: s.desiredPlaying
+        s.playButton?.glyph = if (playing) Glyph.PAUSE else Glyph.PLAY
         s.playButton?.contentDescription = if (playing) "暂停" else "播放"
+    }
+
+    /**
+     * A pause command can complete before getPlaybackState changes. Keep
+     * user intent independent of that stale snapshot; never toggle the
+     * opposite command because of an async state read. Poll for confirmation
+     * only while this exact session and generation still own the decoder.
+     */
+    private fun requestMiniTransport(s: Session, play: Boolean) {
+        if (session !== s || !enabled) return
+        val generation = ++s.transportGeneration
+        s.desiredPlaying = play
+        s.userPaused = !play
+        s.transportPending = true
+        transitionUntil = 0
+        transitionPause = false
+        updatePlayButton(s)
+        val sent = command(s.engine, play, startOnly = play)
+        if (!sent && play) command(s.engine, true)
+        val startedAt = SystemClock.uptimeMillis()
+        var triedPlayFallback = !sent
+        fun confirm() {
+            if (session !== s || s.transportGeneration != generation) return
+            val actual = isPlaying(s.engine)
+            val elapsed = SystemClock.uptimeMillis() - startedAt
+            if (actual == play && elapsed >= 250L) {
+                s.transportPending = false
+                updatePlayButton(s)
+                LogUtil.info("应用内小窗: 控制已确认 play=$play state=" + playbackState(s.engine))
+                LogUtil.incr("inAppMiniTransportConfirmed")
+                return
+            }
+            if (play && !triedPlayFallback && actual == false && elapsed >= 850L &&
+                NativeMetadataAccess.call(s.engine, "isReleased") != true) {
+                triedPlayFallback = true
+                command(s.engine, true)
+                LogUtil.incr("inAppMiniResumeFallback")
+            }
+            if (elapsed >= 2800L) {
+                s.transportPending = false
+                updatePlayButton(s)
+                LogUtil.warn("应用内小窗: 控制未确认 play=$play state=" + playbackState(s.engine))
+                LogUtil.incr("inAppMiniTransportUnconfirmed")
+                // Leave the button in the native observed state, or offer
+                // another explicit play attempt if the engine is paused.
+                if (play && actual != true) Toast.makeText(s.display ?: s.activity,
+                    "播放尚未恢复，请再次点击播放", Toast.LENGTH_SHORT).show()
+                return
+            }
+            main.postDelayed({ confirm() }, 180L)
+        }
+        main.postDelayed({ confirm() }, 250L)
     }
     private fun showControls(s: Session, visible: Boolean) {
         if (session !== s) return
@@ -506,21 +655,32 @@ internal object InAppMiniPlayer {
         val overlay = s.overlay
         val gesture = View(a).apply { isClickable = true; contentDescription = "点击显示控制，拖动小窗" }
         overlay.addView(gesture, FrameLayout.LayoutParams(-1, -1))
-        val expand = button(a, "⤢", "返回播放页")
-        val close = button(a, "×", "关闭并暂停")
-        val play = button(a, "Ⅱ", "暂停")
+        val expand = button(a, Glyph.EXPAND, "返回播放页")
+        val close = button(a, Glyph.CLOSE, "关闭并暂停")
+        val play = button(a, Glyph.PAUSE, "暂停")
         s.playButton = play
         val size = dp(a, 34f)
-        overlay.addView(expand, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.LEFT))
-        overlay.addView(close, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.RIGHT))
-        overlay.addView(play, FrameLayout.LayoutParams(dp(a, 44f), dp(a, 44f), Gravity.CENTER))
+        overlay.addView(expand, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.LEFT).apply {
+            leftMargin = dp(a, 6f); topMargin = dp(a, 6f)
+        })
+        overlay.addView(close, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.RIGHT).apply {
+            rightMargin = dp(a, 6f); topMargin = dp(a, 6f)
+        })
+        overlay.addView(play, FrameLayout.LayoutParams(dp(a, 46f), dp(a, 46f), Gravity.CENTER))
         s.controls = listOf(expand, close, play)
         s.controls.forEach { it.visibility = View.GONE }
         expand.setOnClickListener { returnToVideo() }
-        close.setOnClickListener { command(s.engine, false); restore() }
+        close.setOnClickListener {
+            ++s.transportGeneration
+            s.userPaused = true
+            s.desiredPlaying = false
+            command(s.engine, false)
+            restore()
+        }
         play.setOnClickListener {
-            command(s.engine, isPlaying(s.engine) != true)
-            main.postDelayed({ updatePlayButton(s) }, 160L)
+            val currentlyPlaying = if (s.transportPending || s.userPaused) s.desiredPlaying
+                else isPlaying(s.engine) ?: s.desiredPlaying
+            requestMiniTransport(s, !currentlyPlaying)
             showControls(s, true)
         }
         var downX = 0f; var downY = 0f; var baseX = 0; var baseY = 0
