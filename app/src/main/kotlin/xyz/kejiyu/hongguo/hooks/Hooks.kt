@@ -5859,6 +5859,26 @@ object Hooks {
                         method.name + " Hook 失败: " + e.message)
                 }
             }
+            // Only defer native output changes while an explicit series
+            // mini owns a valid replacement Surface. Normal playback passes.
+            for ((index, method) in engine.declaredMethods.filter {
+                it.returnType == Void.TYPE && it.parameterCount > 0 &&
+                    it.name in setOf("setSurface", "setSurfaceSync",
+                        "setSurfaceHolder", "setSurfaceHolderSync") &&
+                    it.parameterTypes[0] in setOf(android.view.Surface::class.java,
+                        android.view.SurfaceHolder::class.java)
+            }.withIndex()) {
+                try {
+                    module.hook(method).setId("xhSeriesMiniOutput_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            if (InAppMiniPlayer.keepSeriesOutput(chain.thisObject, chain.getArg(0))) null
+                            else chain.proceed()
+                        })
+                } catch (e: Throwable) {
+                    LogUtil.warn("应用内小窗: 全集输出 Hook 失败 " + e.javaClass.simpleName)
+                }
+            }
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
@@ -6828,6 +6848,7 @@ object Hooks {
                         try {
                             BackgroundSeriesTransitionGuard.onActivityStopped(
                                 chain.thisObject as? Activity)
+                            InAppMiniPlayer.onOwnerStopped(chain.thisObject as? Activity)
                         } catch (e: Throwable) {
                             LogUtil.warn("后台切集守护: onStop 诊断失败 " + e.message)
                         }

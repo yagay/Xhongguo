@@ -45,6 +45,10 @@ internal object InAppMiniPlayer {
         var x: Float = 1f, var y: Float = 0.78f, var large: Boolean = false,
         var returnRequested: Boolean = false,
         var minimizedSeries: Boolean = false,
+        var seriesOutput: SeriesMiniOutput? = null,
+        var seriesTarget: Activity? = null,
+        var seriesTransfer: Boolean = false,
+        var seriesRecoveryDone: Boolean = false,
         var controls: List<View> = emptyList(), var playButton: IconButton? = null,
         var controlsGeneration: Int = 0,
         var desiredPlaying: Boolean = true,
@@ -63,6 +67,40 @@ internal object InAppMiniPlayer {
     private data class Handoff(val old: WeakReference<Any>, val deadline: Long)
     @Volatile private var pendingHandoff: Handoff? = null
     @Volatile private var returningSeriesUntil = 0L
+    private var lastFeedEngine = WeakReference<Any>(null)
+
+    fun keepSeriesOutput(candidate: Any?, supplied: Any?): Boolean {
+        val s = session ?: return false
+        val output = s.seriesOutput ?: return false
+        if (!enabled || candidate !== s.engine || !output.ownsOutput() ||
+            output.isOwnBinding(supplied)) return false
+        output.rememberNativeOutput(supplied)
+        LogUtil.incr("inAppMiniSeriesNativeSurfaceDeferred")
+        return true
+    }
+
+    private fun recoverSeries(s: Session, reason: String) {
+        if (session !== s || s.seriesOutput?.ownsOutput() != true ||
+            s.seriesRecoveryDone || s.userPaused || !s.desiredPlaying ||
+            SystemMediaBridge.userTransportActive() ||
+            NativeMetadataAccess.call(s.engine, "isReleased") == true ||
+            isPlaying(s.engine) != false) return
+        s.seriesRecoveryDone = true
+        val sent = command(s.engine, true, startOnly = true) || command(s.engine, true)
+        LogUtil.info("应用内小窗: 全集输出就绪恢复 reason=$reason sent=$sent")
+        LogUtil.incr("inAppMiniSeriesResume")
+    }
+
+    fun onOwnerStopped(activity: Activity?) {
+        val s = session ?: return
+        if (s.activity !== activity || s.seriesOutput == null) return
+        main.postDelayed({
+            if (session === s) {
+                s.seriesOutput?.rebind()
+                recoverSeries(s, "owner-stop")
+            }
+        }, 160L)
+    }
     private const val SERIES_MINI_TAG = "XHONGGUO_SERIES_MINI_ENTRY"
 
     fun ownsTransportCommand(): Boolean = manualCommand
@@ -112,10 +150,15 @@ internal object InAppMiniPlayer {
         // Native Home may autoplay immediately as a minimized series
         // returns to the existing Main Activity. Don't replace the series
         // with that startup playback. Never guard indefinitely.
-        if (s?.minimizedSeries == true && activity?.javaClass?.name == MAIN &&
-            now < returningSeriesUntil) {
+        if (s?.seriesTransfer == true && now < returningSeriesUntil &&
+            (candidate === lastFeedEngine.get() || activity === s.seriesTarget ||
+                activity?.javaClass?.name == MAIN)) {
             LogUtil.incr("inAppMiniReturnAutoplayIgnored")
             return true
+        }
+        if (s?.seriesTransfer == true && now < returningSeriesUntil) {
+            LogUtil.info("应用内小窗: 全集缩小过渡中观察其他引擎")
+            return false
         }
         if (s != null) {
             // Allow the official play call first. Only clean up a genuinely
@@ -185,6 +228,10 @@ internal object InAppMiniPlayer {
         if (!enabled || engine == null) return
         val current = session
         if (action == "play" || action == "start") {
+            if (activity?.javaClass?.name == MAIN && current?.engine !== engine)
+                lastFeedEngine = WeakReference(engine)
+            if (current?.seriesTransfer == true && current.engine !== engine &&
+                SystemClock.uptimeMillis() < returningSeriesUntil) return
             if (current != null && current.engine === engine) {
                 if (!manualCommand && SystemMediaBridge.userTransportActive()) {
                     current.userPaused = false
@@ -209,7 +256,7 @@ internal object InAppMiniPlayer {
             if (!manualCommand) confirmHandoff(engine)
         } else if (current != null && current.engine === engine) {
             if (action == "pause") {
-                if (SystemClock.uptimeMillis() <= transitionUntil && !manualCommand &&
+                if ((SystemClock.uptimeMillis() <= transitionUntil || current.seriesTransfer) && !manualCommand &&
                     !SystemMediaBridge.userTransportActive()) transitionPause = true
                 else {
                     transitionPause = false
@@ -223,7 +270,7 @@ internal object InAppMiniPlayer {
                 transitionUntil = 0
                 transitionPause = false
                 main.post {
-                    if (session === current) restore()
+                    if (session === current) restore("native-$action")
                 }
             }
         }
@@ -265,7 +312,8 @@ internal object InAppMiniPlayer {
         val s = session ?: return false
         if (!enabled || !isAlive(s.activity) || s.userPaused || manualCommand ||
             SystemMediaBridge.userTransportActive() ||
-            SystemClock.uptimeMillis() > transitionUntil) return false
+            (SystemClock.uptimeMillis() > transitionUntil &&
+                !(s.seriesTransfer && SystemClock.uptimeMillis() < returningSeriesUntil))) return false
         if (controller == null) return false
         if (controller !== s.engine) {
             if (controller !== controllerRef.get()) return false
@@ -284,9 +332,13 @@ internal object InAppMiniPlayer {
         val s = session ?: return
         // A single recovery for a recorded transition pause, never a
         // repeating play loop or resume after a deliberate manual pause.
-        if (!enabled || !isAlive(s.activity) || s.userPaused || !transitionPause ||
-            SystemClock.uptimeMillis() > transitionUntil ||
+        if (!enabled || !isAlive(s.activity) || s.userPaused ||
             SystemMediaBridge.userTransportActive()) return
+        if (s.seriesOutput != null) {
+            if (s.seriesTransfer) recoverSeries(s, "target-attached")
+            return
+        }
+        if (!transitionPause || SystemClock.uptimeMillis() > transitionUntil) return
         transitionPause = false
         if (isPlaying(s.engine) == false) {
             command(s.engine, true)
@@ -311,7 +363,7 @@ internal object InAppMiniPlayer {
     private fun content(a: Activity): FrameLayout? =
         a.findViewById<View>(android.R.id.content) as? FrameLayout
 
-    fun dock(activity: Activity, videoHost: View?): Boolean {
+    fun dock(activity: Activity, videoHost: View?, seriesTarget: Activity? = null): Boolean {
         if (!canDock(activity)) return false
         if (session != null) return activeFor(activity)
         val engine = engineRef.get() ?: return false
@@ -334,13 +386,30 @@ internal object InAppMiniPlayer {
             isClickable = true
         }
         val current = Session(activity, video, parent, index, original, overlay, engine)
+        if (seriesTarget != null) {
+            // Do not alter protected/secure output.
+            if (activity.window.attributes.flags and
+                android.view.WindowManager.LayoutParams.FLAG_SECURE != 0) return false
+            current.minimizedSeries = true
+            current.seriesTarget = seriesTarget
+            current.seriesTransfer = true
+            returningSeriesUntil = SystemClock.uptimeMillis() + 5000L
+        }
         session = current
         armTransition()
         return try {
-            parent.removeView(video)
-            overlay.addView(video, FrameLayout.LayoutParams(-1, -1))
+            if (seriesTarget != null) {
+                // Keep the original native renderer attached to the owner.
+                // Bind only a new in-app presentation to the same engine.
+                val output = SeriesMiniOutput(activity, engine)
+                current.seriesOutput = output
+                overlay.addView(output.view, FrameLayout.LayoutParams(-1, -1))
+            } else {
+                parent.removeView(video)
+                overlay.addView(video, FrameLayout.LayoutParams(-1, -1))
+            }
             addControls(current)
-            if (!attach(current, activity)) { restore(); false }
+            if (seriesTarget == null && !attach(current, activity)) { restore(); false }
             else {
                 LogUtil.incr("inAppMiniDock")
                 LogUtil.info("应用内小窗: 原生播放会话已绑定")
@@ -410,8 +479,7 @@ internal object InAppMiniPlayer {
         if (target.className in setOf(MAIN, SERIES)) {
             val s = session
             if (s != null && (s.returnRequested ||
-                s.minimizedSeries && target.className == MAIN &&
-                SystemClock.uptimeMillis() < returningSeriesUntil)) return
+                s.seriesTransfer && target.className == MAIN)) return
             if (s != null) endForNewPage("launch-player-page")
             // No mini session: do not touch normal feed-to-series playback.
             return
@@ -424,6 +492,7 @@ internal object InAppMiniPlayer {
         val s = session ?: return
         if (!enabled || !isAlive(s.activity)) { restore(); return }
         if (activity.packageName != s.activity.packageName || activity.taskId != s.activity.taskId) return
+        if (activity === s.activity && s.seriesTransfer) return
         if (activity === s.activity && (s.returnRequested ||
                 s.minimizedSeries && s.display !== activity)) {
             val home = activity.javaClass.name == MAIN
@@ -439,8 +508,21 @@ internal object InAppMiniPlayer {
         if (s.minimizedSeries && activity.javaClass.name == MAIN)
             returningSeriesUntil = SystemClock.uptimeMillis() + 2200L
         if (!attach(s, activity)) {
-            restore()
+            LogUtil.warn("应用内小窗: 挂载失败 owner=" + s.activity.javaClass.simpleName +
+                " target=" + activity.javaClass.simpleName +
+                " sameTask=" + (s.activity.taskId == activity.taskId))
+            restore("attach-failed")
             return
+        }
+        if (s.seriesTransfer && activity === s.seriesTarget) {
+            LogUtil.info("应用内小窗: 全集目标页面已挂载")
+            main.postDelayed({
+                if (session === s) {
+                    s.seriesOutput?.rebind()
+                    recoverSeries(s, "target-settled")
+                    s.seriesTransfer = false
+                }
+            }, 1400L)
         }
         main.postDelayed({ if (session === s) resumeAfterTabSwitch() }, 320L)
     }
@@ -452,6 +534,7 @@ internal object InAppMiniPlayer {
             session = null
             transitionUntil = 0
             transitionPause = false
+            s.seriesOutput?.close(false)
             (s.overlay.parent as? ViewGroup)?.removeView(s.overlay)
             LogUtil.incr("inAppMiniOwnerDestroyed")
         } else if (s.display === activity) {
@@ -467,15 +550,24 @@ internal object InAppMiniPlayer {
         val home = mainPage.get()?.takeIf { isAlive(it) && it.taskId == activity.taskId }
             ?: return false
         if (session != null && session?.activity !== activity) endForNewPage("series-minimize")
-        if (session == null && !dock(activity, host())) return false
+        if (session == null && !dock(activity, host(), home)) return false
         val s = session?.takeIf { it.activity === activity } ?: return false
         s.minimizedSeries = true
-        returningSeriesUntil = SystemClock.uptimeMillis() + 3500L
+        s.seriesTarget = home
+        s.seriesTransfer = true
+        returningSeriesUntil = SystemClock.uptimeMillis() + 5000L
         armTransition()
         return try {
             activity.startActivity(Intent(activity, home.javaClass)
                 .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
             LogUtil.incr("inAppMiniSeriesMinimize")
+            LogUtil.info("应用内小窗: 全集缩小请求已发送")
+            main.postDelayed({
+                if (session === s && s.seriesTransfer) {
+                    s.seriesTransfer = false
+                    if (s.display !== s.seriesTarget) restore("series-target-timeout")
+                }
+            }, 5000L)
             true
         } catch (e: Throwable) {
             s.minimizedSeries = false
@@ -737,18 +829,24 @@ internal object InAppMiniPlayer {
         }
     }
 
-    fun restore(): Boolean {
+    fun restore(reason: String = "explicit-or-page"): Boolean {
         val old = session ?: return false
         session = null
+        LogUtil.info("应用内小窗: 归位 reason=$reason owner=" +
+            old.activity.javaClass.simpleName + " target=" + old.display?.javaClass?.simpleName)
         returningSeriesUntil = 0L
         transitionUntil = 0
         transitionPause = false
         return try {
-            (old.source.parent as? ViewGroup)?.removeView(old.source)
-            if (isAlive(old.activity) && old.source.parent == null) {
-                old.originalParent.addView(old.source,
-                    old.originalIndex.coerceIn(0, old.originalParent.childCount), old.originalLayoutParams)
-                old.source.requestLayout()
+            if (old.seriesOutput != null) {
+                old.seriesOutput?.close(isAlive(old.activity))
+            } else {
+                (old.source.parent as? ViewGroup)?.removeView(old.source)
+                if (isAlive(old.activity) && old.source.parent == null) {
+                    old.originalParent.addView(old.source,
+                        old.originalIndex.coerceIn(0, old.originalParent.childCount), old.originalLayoutParams)
+                    old.source.requestLayout()
+                }
             }
             (old.overlay.parent as? ViewGroup)?.removeView(old.overlay)
             LogUtil.incr("inAppMiniRestore")
