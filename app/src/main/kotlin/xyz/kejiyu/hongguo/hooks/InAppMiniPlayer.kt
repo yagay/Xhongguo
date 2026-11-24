@@ -60,22 +60,42 @@ internal object InAppMiniPlayer {
     @Volatile private var transitionPause = false
     @Volatile private var manualCommand = false
     private var mainPage = WeakReference<Activity>(null)
-    @Volatile private var retiredEngine = WeakReference<Any>(null)
-    @Volatile private var retiredUntil = 0L
+    private data class Handoff(val old: WeakReference<Any>, val deadline: Long)
+    @Volatile private var pendingHandoff: Handoff? = null
     @Volatile private var returningSeriesUntil = 0L
     private const val SERIES_MINI_TAG = "XHONGGUO_SERIES_MINI_ENTRY"
 
     fun ownsTransportCommand(): Boolean = manualCommand
 
-    // A native decoder can be replaced by the official app. Logical
-    // ownership is transferred before a new play, never by a delayed
-    // isPlaying() check (which misses asynchronous prepare).
-    private fun retire(engine: Any, reason: String) {
-        retiredEngine = WeakReference(engine)
-        retiredUntil = SystemClock.uptimeMillis() + 3000L
-        val sent = command(engine, false)
-        LogUtil.info("应用内小窗: 旧播放会话交接 reason=$reason pauseSent=$sent")
-        LogUtil.incr("inAppMiniHandoff")
+    // Only a previously docked mini window can require duplicate cleanup.
+    // A page launch is NOT proof of decoder replacement: the first series
+    // episode can reuse the feed engine. Never pre-pause or blacklist it.
+    private fun rememberHandoff(old: Any, reason: String) {
+        pendingHandoff = Handoff(WeakReference(old), SystemClock.uptimeMillis() + 5000L)
+        LogUtil.info("应用内小窗: 等待原生播放器交接 reason=$reason")
+    }
+
+    private fun confirmHandoff(candidate: Any) {
+        val handoff = pendingHandoff ?: return
+        val old = handoff.old.get()
+        if (old == null || old === candidate || SystemClock.uptimeMillis() > handoff.deadline) {
+            if (pendingHandoff === handoff) pendingHandoff = null
+            if (old === candidate) LogUtil.info("应用内小窗: 原生复用同一引擎，不暂停")
+            return
+        }
+        for (delay in longArrayOf(300L, 850L, 1600L)) {
+            main.postDelayed({
+                if (!enabled || pendingHandoff !== handoff ||
+                    SystemClock.uptimeMillis() > handoff.deadline ||
+                    engineRef.get() !== candidate || session?.engine === old) return@postDelayed
+                if (isPlaying(candidate) == true && isPlaying(old) == true) {
+                    pendingHandoff = null
+                    val sent = command(old, false)
+                    LogUtil.info("应用内小窗: 不同引擎已播放，暂停旧小窗 pauseSent=$sent")
+                    LogUtil.incr("inAppMiniHandoff")
+                }
+            }, delay)
+        }
     }
 
     fun beforeEnginePlay(candidate: Any?, activity: Activity?): Boolean {
@@ -89,10 +109,6 @@ internal object InAppMiniPlayer {
             }
             return false
         }
-        if (candidate === retiredEngine.get() && now < retiredUntil) {
-            LogUtil.incr("inAppMiniRetiredPlayIgnored")
-            return true
-        }
         // Native Home may autoplay immediately as a minimized series
         // returns to the existing Main Activity. Don't replace the series
         // with that startup playback. Never guard indefinitely.
@@ -102,14 +118,13 @@ internal object InAppMiniPlayer {
             return true
         }
         if (s != null) {
-            // A new actual play, not a prepare callback, supersedes mini.
+            // Allow the official play call first. Only clean up a genuinely
+            // different old mini engine after the new one reports playing.
             if (onMain()) {
                 restore()
-                retire(s.engine, "new-native-play")
+                rememberHandoff(s.engine, "new-native-play")
             } else {
-                // Native engine calls can arrive off the UI thread.
-                // Pause the old exact instance now; only move Views on main.
-                retire(s.engine, "new-native-play-worker")
+                rememberHandoff(s.engine, "new-native-play-worker")
                 main.post { if (session === s) restore() }
             }
         }
@@ -121,7 +136,7 @@ internal object InAppMiniPlayer {
     private fun endForNewPage(reason: String) {
         val s = session ?: return
         restore()
-        retire(s.engine, reason)
+        rememberHandoff(s.engine, reason)
     }
 
     private fun dp(a: Activity, n: Float) = (a.resources.displayMetrics.density * n + 0.5f).toInt()
@@ -191,6 +206,7 @@ internal object InAppMiniPlayer {
                 engineRef = WeakReference(engine)
                 engineActivity = WeakReference(activity)
             }
+            if (!manualCommand) confirmHandoff(engine)
         } else if (current != null && current.engine === engine) {
             if (action == "pause") {
                 if (SystemClock.uptimeMillis() <= transitionUntil && !manualCommand &&
@@ -397,10 +413,7 @@ internal object InAppMiniPlayer {
                 s.minimizedSeries && target.className == MAIN &&
                 SystemClock.uptimeMillis() < returningSeriesUntil)) return
             if (s != null) endForNewPage("launch-player-page")
-            else if (target.className == SERIES && activity.javaClass.name == MAIN &&
-                canDock(activity)) {
-                engineRef.get()?.let { retire(it, "feed-to-series") }
-            }
+            // No mini session: do not touch normal feed-to-series playback.
             return
         }
         if (session == null && canDock(activity)) dock(activity, host())
