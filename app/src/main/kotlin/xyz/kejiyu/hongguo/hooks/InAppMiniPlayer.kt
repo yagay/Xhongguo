@@ -416,9 +416,6 @@ internal object InAppMiniPlayer {
             // No mini session: do not touch normal feed-to-series playback.
             return
         }
-        // The full-series Activity has an independent Surface lifecycle.
-        // Do not attempt cross-Activity reparenting for series navigation.
-        if (activity.javaClass.name == SERIES) return
         if (session == null && canDock(activity)) dock(activity, host())
         else if (activeFor(activity)) armTransition()
     }
@@ -448,7 +445,6 @@ internal object InAppMiniPlayer {
         main.postDelayed({ if (session === s) resumeAfterTabSwitch() }, 320L)
     }
     fun onActivityClosed(activity: Activity) {
-        SeriesPipPresentation.onActivityDestroyed(activity)
         if (mainPage.get() === activity) mainPage.clear()
         val s = session ?: return
         if (s.activity === activity) {
@@ -463,46 +459,49 @@ internal object InAppMiniPlayer {
             s.display = null
         }
     }
-    /** Presentation only, like YHongguo: never move a live full-series
-     * Surface into a different Activity or start/reorder Main to minimize. */
+    /** A deliberate minimize action keeps the native series Activity in
+     * the same task rather than intercepting release or ordinary finish(). */
     fun minimizeSeries(activity: Activity, host: () -> View?): Boolean {
         if (!enabled || !onMain() || activity.javaClass.name != SERIES ||
-            !SeriesPipPresentation.supported(activity)) return false
-        if (activity.isInPictureInPictureMode) return false
-        val shared = SystemMediaBridge.currentMiniEngine(activity)
-        val local = engineRef.get()?.takeIf { engineActivity.get() === activity }
-        val engine = shared ?: local ?: return false
-        if (NativeMetadataAccess.call(engine, "isReleased") == true) return false
-        val state = playbackState(engine)
-        if (state !in setOf(1, 2) && isPlaying(engine) != true) return false
-        val existing = session
-        if (existing != null) {
-            // Do not enter a second presentation while an old mini still
-            // owns its renderer. For the same owner restore the full view.
-            if (existing.activity !== activity) endForNewPage("series-pip-entry")
-            else restore()
+            activity.isFinishing || activity.isDestroyed) return false
+        val home = mainPage.get()?.takeIf { isAlive(it) && it.taskId == activity.taskId }
+            ?: return false
+        if (session != null && session?.activity !== activity) endForNewPage("series-minimize")
+        if (session == null && !dock(activity, host())) return false
+        val s = session?.takeIf { it.activity === activity } ?: return false
+        s.minimizedSeries = true
+        returningSeriesUntil = SystemClock.uptimeMillis() + 3500L
+        armTransition()
+        return try {
+            activity.startActivity(Intent(activity, home.javaClass)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            LogUtil.incr("inAppMiniSeriesMinimize")
+            true
+        } catch (e: Throwable) {
+            s.minimizedSeries = false
+            returningSeriesUntil = 0L
+            restore()
+            LogUtil.warn("应用内小窗: 全集缩小失败 " + e.javaClass.simpleName)
+            false
         }
-        val accepted = SeriesPipPresentation.enter(activity, engine, host(), isPlaying(engine) == true)
-        if (!accepted) LogUtil.warn("全集小窗: 保留原播放页，未进入系统画中画")
-        return accepted
     }
 
     fun installSeriesEntry(activity: Activity, host: () -> View?) {
         if (activity.javaClass.name != SERIES || !isAlive(activity)) return
         val root = content(activity) ?: return
         val old = root.findViewWithTag<View>(SERIES_MINI_TAG)
-        val available = enabled && SeriesPipPresentation.supported(activity) &&
-            !activity.isInPictureInPictureMode
+        val available = enabled && mainPage.get()?.let { isAlive(it) &&
+            it.taskId == activity.taskId } == true
         if (!available) {
             old?.let { root.removeView(it) }
             return
         }
         if (old != null) { old.bringToFront(); return }
-        val entry = button(activity, Glyph.MINI, "缩小到画中画").apply {
+        val entry = button(activity, Glyph.MINI, "缩小到应用内小窗").apply {
             tag = SERIES_MINI_TAG
             setOnClickListener {
                 if (!minimizeSeries(activity, host))
-                    android.widget.Toast.makeText(activity, "未能进入画中画，请检查系统权限与播放状态",
+                    android.widget.Toast.makeText(activity, "当前播放容器尚未准备好",
                         android.widget.Toast.LENGTH_SHORT).show()
             }
         }
