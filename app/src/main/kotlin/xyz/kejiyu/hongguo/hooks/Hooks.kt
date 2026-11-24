@@ -328,7 +328,7 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
-                        if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
+                        if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore("settings-observer-disabled")
                         if (isShoppingMallDisabled()) {
                             gNextShoppingTabScanAt = 0L
                             mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
@@ -1674,7 +1674,7 @@ object Hooks {
         LogUtil.incr("inAppMiniTabRecognized")
         if (tab == "首页") {
             if (InAppMiniPlayer.activeFor(act) && InAppMiniPlayer.ownerIs(act))
-                InAppMiniPlayer.restore()
+                InAppMiniPlayer.restore("feed-home-tab")
             return
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
@@ -3910,7 +3910,7 @@ object Hooks {
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
-                if (!it) InAppMiniPlayer.restore()
+                if (!it) InAppMiniPlayer.restore("mini-setting-disabled")
             }, "in_app_mini_player")
             addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
                 gDisableShoppingMall = it
@@ -5437,6 +5437,7 @@ object Hooks {
                         val a = chain.thisObject as? Activity
                         scheduleMiniEntry(a)
                         try {
+                            InAppMiniPlayer.onBeforeActivityResume(a)
                             if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                             if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                         } catch (_: Exception) {}
@@ -6787,6 +6788,10 @@ object Hooks {
                         ensureReceiver(a.applicationContext)
                     }
                 } catch (_: Exception) {}
+                try { InAppMiniPlayer.onBeforeActivityResume(a) }
+                catch (e: Throwable) {
+                    LogUtil.warn("应用内小窗: 目标恢复前挂载失败 " + e.javaClass.simpleName)
+                }
                 val result = chain.proceed()
                 try {
                     if (a != null) {

@@ -176,11 +176,11 @@ internal object InAppMiniPlayer {
             // Allow the official play call first. Only clean up a genuinely
             // different old mini engine after the new one reports playing.
             if (onMain()) {
-                restore()
+                restore("new-native-play")
                 rememberHandoff(s.engine, "new-native-play")
             } else {
                 rememberHandoff(s.engine, "new-native-play-worker")
-                main.post { if (session === s) restore() }
+                main.post { if (session === s && !s.seriesTransfer) restore("new-native-play-worker") }
             }
         }
         // Without a docked mini session, leave native feed/series ownership
@@ -190,7 +190,11 @@ internal object InAppMiniPlayer {
 
     private fun endForNewPage(reason: String) {
         val s = session ?: return
-        restore()
+        if (s.seriesTransfer && SystemClock.uptimeMillis() < returningSeriesUntil) {
+            LogUtil.info("应用内小窗: 全集交接期间延迟归位 reason=$reason")
+            return
+        }
+        restore(reason)
         rememberHandoff(s.engine, reason)
     }
 
@@ -466,8 +470,15 @@ internal object InAppMiniPlayer {
         }
     }
     private fun attach(s: Session, activity: Activity): Boolean {
-        if (!isAlive(s.activity) || !isAlive(activity) ||
-            activity.taskId != s.activity.taskId || activity.packageName != s.activity.packageName) return false
+        val transferring = s.seriesTransfer && s.seriesOutput != null &&
+            activity === s.seriesTarget && SystemClock.uptimeMillis() < returningSeriesUntil
+        if (s.activity.isDestroyed || (!transferring && !isAlive(s.activity)) ||
+            !isAlive(activity) || activity.taskId != s.activity.taskId ||
+            activity.packageName != s.activity.packageName) {
+            LogUtil.warn("应用内小窗: attach 拒绝 ownerFinishing=" + s.activity.isFinishing +
+                " ownerDestroyed=" + s.activity.isDestroyed + " transfer=$transferring")
+            return false
+        }
         val root = content(activity) ?: return false
         if (s.overlay.parent === root) { s.display = activity; return true }
         return try {
@@ -505,16 +516,38 @@ internal object InAppMiniPlayer {
         if (session == null && canDock(activity)) dock(activity, host())
         else if (activeFor(activity)) armTransition()
     }
+    /** Attach the explicit target before native Home resume can start its
+     * feed. The same method is retried on resume/focus after UI construction. */
+    fun onBeforeActivityResume(activity: Activity?) {
+        val s = session ?: return
+        if (activity == null || !s.seriesTransfer || s.seriesOutput == null ||
+            activity !== s.seriesTarget || !enabled || s.activity.isDestroyed ||
+            SystemClock.uptimeMillis() >= returningSeriesUntil) return
+        LogUtil.info("应用内小窗: 全集目标恢复前 ownerFinishing=" + s.activity.isFinishing +
+            " target=" + activity.javaClass.simpleName)
+        attach(s, activity)
+    }
+
     fun onActivityResumed(activity: Activity) {
         rememberMainPage(activity)
         val s = session ?: return
-        if (!enabled || !isAlive(s.activity)) { restore(); return }
+        if (!enabled) { restore("disabled-on-resume"); return }
+        if (s.activity.isDestroyed) { restore("owner-destroyed-on-resume"); return }
         if (activity.packageName != s.activity.packageName || activity.taskId != s.activity.taskId) return
+        if (s.seriesTransfer && SystemClock.uptimeMillis() < returningSeriesUntil) {
+            LogUtil.info("应用内小窗: 全集交接恢复 page=" + activity.javaClass.simpleName +
+                " target=" + (activity === s.seriesTarget) +
+                " ownerFinishing=" + s.activity.isFinishing)
+            if (activity !== s.seriesTarget) return
+        } else if (!isAlive(s.activity)) {
+            restore("owner-finishing-on-resume")
+            return
+        }
         if (activity === s.activity && s.seriesTransfer) return
         if (activity === s.activity && (s.returnRequested ||
                 s.minimizedSeries && s.display !== activity)) {
             val home = activity.javaClass.name == MAIN
-            restore()
+            restore("return-to-owner")
             if (home) openHomeTab?.invoke(activity)
             return
         }
@@ -526,6 +559,15 @@ internal object InAppMiniPlayer {
         if (s.minimizedSeries && activity.javaClass.name == MAIN)
             returningSeriesUntil = SystemClock.uptimeMillis() + 2200L
         if (!attach(s, activity)) {
+            if (s.seriesTransfer && activity === s.seriesTarget &&
+                SystemClock.uptimeMillis() < returningSeriesUntil) {
+                // The destination's content may not exist yet; retry from
+                // focus/layout, not by closing the valid pending session.
+                main.postDelayed({
+                    if (session === s && s.seriesTransfer) onActivityResumed(activity)
+                }, 180L)
+                return
+            }
             LogUtil.warn("应用内小窗: 挂载失败 owner=" + s.activity.javaClass.simpleName +
                 " target=" + activity.javaClass.simpleName +
                 " sameTask=" + (s.activity.taskId == activity.taskId))
@@ -538,7 +580,10 @@ internal object InAppMiniPlayer {
                 if (session === s) {
                     s.seriesOutput?.rebind()
                     recoverSeries(s, "target-settled")
-                    s.seriesTransfer = false
+                    if (s.seriesOutput?.ownsOutput() == true) {
+                        s.seriesTransfer = false
+                        LogUtil.info("应用内小窗: 全集交接完成")
+                    }
                 }
             }, 1400L)
         }
@@ -590,7 +635,8 @@ internal object InAppMiniPlayer {
             main.postDelayed({
                 if (session === s && s.seriesTransfer) {
                     s.seriesTransfer = false
-                    if (s.display !== s.seriesTarget) restore("series-target-timeout")
+                    if (s.display !== s.seriesTarget || s.seriesOutput?.ownsOutput() != true)
+                        restore("series-target-timeout")
                 }
             }, 5000L)
             true
@@ -879,7 +925,12 @@ internal object InAppMiniPlayer {
         val old = session ?: return false
         session = null
         LogUtil.info("应用内小窗: 归位 reason=$reason owner=" +
-            old.activity.javaClass.simpleName + " target=" + old.display?.javaClass?.simpleName)
+            old.activity.javaClass.simpleName + " target=" + old.display?.javaClass?.simpleName +
+            " transfer=" + old.seriesTransfer + " enabled=$enabled" +
+            " ownerFinishing=" + old.activity.isFinishing +
+            " ownerDestroyed=" + old.activity.isDestroyed +
+            " caller=" + Thread.currentThread().stackTrace.take(10)
+                .joinToString(">") { it.className.substringAfterLast('.') + "." + it.methodName })
         returningSeriesUntil = 0L
         transitionUntil = 0
         transitionPause = false
