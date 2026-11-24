@@ -428,7 +428,7 @@ internal object SystemMediaBridge {
         val title = if (isFullSeries)
             full.title ?: observed.title ?: ui.title ?: play.title
         else home.title ?: observed.title ?: play.title ?: ui.title
-        val episode = selectEpisodeLabel(full.episode,
+        val episode = selectEpisodeLabel(full.episode ?: home.episode ?: observed.episode,
             play.episode ?: ui.episode)
         // Only true native series posters: never use a playing frame still or
         // the video Surface as Android MediaMetadata art.

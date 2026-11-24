@@ -81,7 +81,7 @@ internal object FullSeriesMediaInfo {
         val poster = posterValue?.takeIf {
             it.isNotBlank() && it != episodeCover
         }?.let { MediaArtworkLoader.normalize(it) }
-        if (title == null && poster == null) return
+        if (title == null && poster == null && id == null) return
         val now = SystemClock.uptimeMillis()
         var newMetadata = false
         synchronized(detailLock) {
@@ -142,6 +142,7 @@ internal object FullSeriesMediaInfo {
         return Info(
             title = detail?.title ?: str(field(model, "seriesName")) ?:
                 cached?.title,
+            episode = episodeFromIndex(model, detail?.total),
             source = "home-native-current-item",
             artworkUrl = detail?.artworkUrl ?: modelCover ?: cached?.poster,
             seriesId = modelSeriesId
@@ -331,19 +332,9 @@ internal object FullSeriesMediaInfo {
         seriesKey: String?,
         total: Long?
     ): List<ActiveFragmentEntry> {
-        val manager = call(activity, "getSupportFragmentManager") ?: return emptyList()
         val entries = ArrayList<ActiveFragmentEntry>()
-        val seen = java.util.Collections.newSetFromMap(
-            java.util.IdentityHashMap<Any, Boolean>())
-        val tasks = java.util.ArrayDeque<Pair<Any, Int>>()
-        tasks.addLast(manager to 0)
-        var visitedManagers = 0
-        while (tasks.isNotEmpty() && visitedManagers++ < 20) {
-            val (fm, depth) = tasks.removeFirst()
-            val fragments = call(fm, "getFragments") as? List<*> ?: continue
-            for (fragment in fragments) {
-                if (fragment == null || !seen.add(fragment)) continue
-                if (fragment.javaClass.name == EPISODE_FRAGMENT) {
+        for (fragment in NativeMetadataAccess.episodeFragments(activity)) {
+                if (NativeMetadataAccess.isEpisodeFragment(fragment)) {
                     val visible = call(fragment, "isVisible") as? Boolean ?: false
                     val resumed = call(fragment, "isResumed") as? Boolean ?: false
                     val hidden = call(fragment, "isHidden") as? Boolean ?: false
@@ -357,8 +348,8 @@ internal object FullSeriesMediaInfo {
                             position >= 0 && position < list.size &&
                             list.size in 1..5000) {
                             val wrapper = list[position]
-                            val model = call(wrapper, "getVideoData")
-                            if (model?.javaClass?.name == DATA) {
+                            val model = NativeMetadataAccess.video(wrapper)
+                            if (model != null) {
                                 val modelId = seriesId(field(model, "episodesId"))
                                 val modelTotal = number(field(model,
                                     "episodesCount"))
@@ -388,11 +379,6 @@ internal object FullSeriesMediaInfo {
                         }
                     }
                 }
-                if (depth < 3 && call(fragment, "isAdded") == true) {
-                    val child = call(fragment, "getChildFragmentManager")
-                    if (child != null) tasks.addLast(child to (depth + 1))
-                }
-            }
         }
         return entries
     }
@@ -686,11 +672,10 @@ internal object FullSeriesMediaInfo {
         val cachedKey = if (cachedActivity.get() === activity) cachedSeriesKey else null
         val cachedCount = if (cachedActivity.get() === activity) cachedTotal else null
         val presenter = field(activity, "a")
-        val presenterKey = listOf("I", "z")
-            .mapNotNull { field(presenter, it) }
-            .filter { it.javaClass.name == DATA }
+        val presenterKey = NativeMetadataAccess.typedFields(presenter, DATA)
+            .filter { engineId != null && vid(it) == engineId }
             .mapNotNull { seriesId(field(it, "episodesId")) }
-            .firstOrNull()
+            .distinct().singleOrNull()
         val observedKey = observedForEngine(engine).seriesId
         val seriesKey = cachedKey ?: observedKey ?: presenterKey
 
@@ -755,9 +740,7 @@ internal object FullSeriesMediaInfo {
 
         fun videoAt(position: Int): Any? {
             if (position !in list.indices) return null
-            return call(list[position], "getVideoData")?.takeIf {
-                it.javaClass.name == DATA
-            }
+            return NativeMetadataAccess.video(list[position])
         }
         val selected = videoAt(index)
             ?: return rejectedNavigation("current-wrapper-unavailable",
@@ -815,15 +798,12 @@ internal object FullSeriesMediaInfo {
     fun read(activity: Activity?, engine: Any?): Info {
         if (activity?.javaClass?.name != ACTIVITY) return Info()
         val presenter = field(activity, "a")
-        val detailHolder = field(presenter, "x")
-        val detail = field(detailHolder, "b")?.takeIf(::isDetailModel)
+        val detail = NativeMetadataAccess.typedFields(presenter, DETAIL).singleOrNull()
         rememberDetail(detail)
         val videoId = call(engine, "getVideoID")?.toString()
             ?.takeIf { it.isNotBlank() && it != "null" }
 
-        val current = listOf("I", "z")
-            .mapNotNull { key -> field(presenter, key) }
-            .filter { it.javaClass.name == DATA }
+        val current = NativeMetadataAccess.typedFields(presenter, DATA)
         current.forEach(::observeVideoData)
 
         // A prepared next episode can coexist with the active video. Never
@@ -835,13 +815,11 @@ internal object FullSeriesMediaInfo {
         // IDs are frequently numeric strings; the title validator deliberately
         // rejects numeric names and must NOT be used to validate series IDs.
         val detailSeriesKey = seriesId(detailField(detail, "episodesId")) ?:
-            seriesId(field(active, "episodesId")) ?:
-            seriesId(field(current.firstOrNull(), "episodesId"))
+            seriesId(field(active, "episodesId"))
         val provisionalTotal = listOfNotNull(
             number(field(active, "episodesCount")),
             number(detailField(detail, "episodeTotalCnt")),
-            number(detailField(detail, "episodeCnt")),
-            number(field(current.firstOrNull(), "episodesCount"))
+            number(detailField(detail, "episodeCnt"))
         ).firstOrNull { it in 1..5000L }
         // The active fragment supplied the *correct current episode* in the
         // 16:41 diagnostics. Read its series name and art at the same time.
@@ -880,7 +858,6 @@ internal object FullSeriesMediaInfo {
             fragment.title ?:
             intentTitle ?:
             str(field(active, "title")) ?:
-            str(field(current.firstOrNull(), "seriesName")) ?:
             observedVideo.title
         // 7.3.5.32's official Saas model has URL strings for both full-sized
         // and compact series posters. The detail is a transient Runnable
@@ -888,7 +865,7 @@ internal object FullSeriesMediaInfo {
         // Prefer the explicitly named series poster in the detail model.
         // When transient detail is unavailable, SaasVideoData.cover is the
         // series image; episodeCover is the individual-video thumbnail.
-        val videoData = active ?: current.firstOrNull()
+        val videoData = active
         val seriesCover = field(videoData, "cover") as? String
         val episodeFrame = field(videoData, "episodeCover") as? String
         val safeDataCover = seriesCover?.takeIf {

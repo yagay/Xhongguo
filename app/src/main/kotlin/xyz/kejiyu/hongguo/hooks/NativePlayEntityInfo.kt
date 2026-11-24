@@ -97,6 +97,7 @@ internal object NativePlayEntityInfo {
 
     private fun metadata(entity: Any): Info {
         val business = invoke(entity, "getBusinessModel")
+        val modelInfo = FullSeriesMediaInfo.infoForVideoData(NativeMetadataAccess.video(business))
         val title = firstName(business, listOf(
             "getBookName", "getSeriesName", "getShortSeriesName",
             "getDramaName", "getBookTitle", "getSeriesTitle", "getTitle"
@@ -116,8 +117,9 @@ internal object NativePlayEntityInfo {
                 (invoke(business ?: entity, method) as? String)
                     ?.takeIf { it.isNotBlank() }
             } ?: extras.artworkUrl
-        return Info(cleanTitle ?: extras.title, episode ?: extras.episode,
-            "play-entity", artUrl)
+        return Info(modelInfo.title ?: cleanTitle ?: extras.title,
+            modelInfo.episode ?: episode ?: extras.episode,
+            "play-entity", modelInfo.artworkUrl ?: artUrl)
     }
 
     fun remember(entity: Any?) {

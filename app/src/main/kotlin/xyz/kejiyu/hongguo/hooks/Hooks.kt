@@ -5955,7 +5955,7 @@ object Hooks {
             val videoType = Class.forName(
                 "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData",
                 false, classLoader)
-            val nativeConsumers = listOf(
+            val nativeConsumers = mutableListOf(
                 "com.dragon.read.component.shortvideo.impl.v2.data.SingleSeriesDataCenter",
                 "com.dragon.read.component.shortvideo.impl.v2.data.LikeDataCenter",
                 "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
@@ -5968,9 +5968,22 @@ object Hooks {
                 "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDataWrapper",
                 "com.dragon.read.component.shortvideo.impl.videotabranklist.VideoFeedRankListModel",
             )
+            val episodeFragment = runCatching { Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                false, classLoader) }.getOrNull()
+            episodeFragment?.declaredMethods?.map { it.returnType }?.filter {
+                NativeMetadataAccess.extendsType(it,
+                    "androidx.recyclerview.widget.RecyclerView\$Adapter")
+            }?.forEach { type ->
+                var owner: Class<*>? = type
+                while (owner != null && owner.name.startsWith("com.dragon.read.component.shortvideo.")) {
+                    nativeConsumers.add(owner.name)
+                    owner = owner.superclass
+                }
+            }
             var detailBindings = 0
             var videoBindings = 0
-            for ((classIndex, className) in nativeConsumers.withIndex()) {
+            for ((classIndex, className) in nativeConsumers.distinct().withIndex()) {
                 val owner = try { Class.forName(className, false, classLoader) }
                     catch (_: Throwable) { continue }
                 val members = owner.declaredMethods.toList() +
@@ -6028,6 +6041,35 @@ object Hooks {
         } catch (e: Throwable) {
             LogUtil.warn("  system media typed series consumers unavailable: " +
                 e.javaClass.simpleName + ": " + e.message)
+        }
+
+        // Passive lifecycle registration supplements the manager tree.
+        try {
+            val fragment = Class.forName(
+                "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment",
+                false, classLoader)
+            var count = 0
+            for ((i, method) in fragment.declaredMethods.filter {
+                it.parameterCount == 0 && it.name in setOf("onResume",
+                    "onVisible", "onDataRefreshed", "onDestroyView")
+            }.withIndex()) {
+                module.hook(method).setId("xhMetadataLifecycle_$i")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val result = chain.proceed()
+                        if (method.name == "onDestroyView")
+                            NativeMetadataAccess.forgetFragment(chain.thisObject)
+                        else if (gMasterOn && gSystemMediaOn) {
+                            NativeMetadataAccess.observeFragment(chain.thisObject)
+                            SystemMediaBridge.onNativeSeriesMetadataAvailable()
+                        }
+                        result
+                    })
+                count++
+            }
+            LogUtil.info("系统媒体: 通用 Fragment 生命周期 hooks=$count")
+        } catch (e: Throwable) {
+            LogUtil.info("系统媒体: Fragment lifecycle unavailable=" + e.javaClass.simpleName)
         }
 
         // Capture the original VideoShop PlayEntity model rather than

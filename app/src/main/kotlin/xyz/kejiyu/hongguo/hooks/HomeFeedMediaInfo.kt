@@ -51,10 +51,7 @@ internal object HomeFeedMediaInfo {
         } catch (_: Throwable) { null }
 
     private fun data(input: Any?): Any? {
-        if (input == null) return null
-        if (input.javaClass.name == MODEL) return input
-        val wrapper = call(input, "getVideoData")
-        return wrapper?.takeIf { it.javaClass.name == MODEL }
+        return NativeMetadataAccess.video(input)
     }
 
     private fun vid(model: Any?): String? = try {
@@ -64,12 +61,11 @@ internal object HomeFeedMediaInfo {
     } catch (_: Throwable) { null }
 
     private fun nativeAdapter(adapter: Any?): Boolean {
-        var cl = adapter?.javaClass
-        while (cl != null && cl != Any::class.java) {
-            if (cl.name == ADAPTER_BASE) return true
-            cl = cl.superclass
-        }
-        return false
+        if (adapter == null) return false
+        return runCatching { adapter.javaClass.methods.any {
+            it.parameterCount == 1 && it.parameterTypes[0] == Integer.TYPE &&
+                it.returnType.name == MODEL
+        } }.getOrDefault(false)
     }
 
     private fun indexedModel(adapter: Any, position: Int): Any? {
@@ -92,8 +88,14 @@ internal object HomeFeedMediaInfo {
             pager.height < screenH * 0.38f) return null
         val adapter = call(pager, "getAdapter") ?: return null
         if (!nativeAdapter(adapter)) return null
-        val pos = (call(pager, "getCurrentItem") as? Number)?.toInt()
-            ?: return null
+        val recycler = NativeMetadataAccess.extendsType(pager.javaClass,
+            "androidx.recyclerview.widget.RecyclerView")
+        val pos = if (recycler) {
+            val manager = call(pager, "getLayoutManager") ?: return null
+            if ((call(manager, "getOrientation") as? Number)?.toInt() != 1) return null
+            (call(manager, "findFirstCompletelyVisibleItemPosition") as? Number)?.toInt()
+                ?.takeIf { it >= 0 } ?: return null
+        } else (call(pager, "getCurrentItem") as? Number)?.toInt() ?: return null
         val active = data(call(adapter, "getCurrentData"))
         val byIndex = indexedModel(adapter, pos)
         val activeId = vid(active)
@@ -123,11 +125,17 @@ internal object HomeFeedMediaInfo {
         val pending = ArrayDeque<View>()
         pending.add(root)
         var scanned = 0
+        var pagerSeen = 0
+        var recyclerSeen = 0
         val candidates = ArrayList<Candidate>(3)
         while (pending.isNotEmpty() && scanned++ < 4000) {
             val v = pending.removeFirst()
             if (!v.isShown) continue
-            if (v.javaClass.name == PAGER) {
+            val pager = NativeMetadataAccess.extendsType(v.javaClass, PAGER)
+            val recycler = NativeMetadataAccess.extendsType(v.javaClass,
+                "androidx.recyclerview.widget.RecyclerView")
+            if (pager || recycler) {
+                if (pager) pagerSeen++ else recyclerSeen++
                 inspectPager(v, screen.widthPixels, screen.heightPixels)
                     ?.let(candidates::add)
             }
@@ -158,7 +166,8 @@ internal object HomeFeedMediaInfo {
         if (now - lastProbeAt > 9000L) {
             lastProbeAt = now
             LogUtil.info("系统媒体: 首页当前播放器模型" +
-                " pagers=" + candidates.size +
+                " pagers=" + pagerSeen + " recyclers=" + recyclerSeen +
+                " candidates=" + candidates.size +
                 " currentItem=" + (selected?.position ?: -1) +
                 " source=" + (selected?.method ?: "none") +
                 " aligned=" + (selected?.aligned == true) +
