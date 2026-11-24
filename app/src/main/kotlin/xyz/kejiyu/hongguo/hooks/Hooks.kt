@@ -2694,6 +2694,25 @@ object Hooks {
         MineUiCleaner.scan(gCurrentActivity)
     }
 
+    private fun scheduleMiniEntry(activity: Activity?) {
+        if (activity == null) return
+        InAppMiniPlayer.rememberMainPage(activity)
+        if (activity.javaClass.name !=
+            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") return
+        for (delay in longArrayOf(0L, 350L, 1100L, 2200L)) {
+            mainHandler.postDelayed({
+                if (!activity.isFinishing && !activity.isDestroyed &&
+                    activity.hasWindowFocus()) {
+                    try {
+                        InAppMiniPlayer.installSeriesEntry(activity) { findLiveVideoHost(activity) }
+                    } catch (e: Throwable) {
+                        LogUtil.warn("应用内小窗: 全集入口检测异常 " + e.javaClass.simpleName)
+                    }
+                }
+            }, delay)
+        }
+    }
+
     private fun scanAllWindows() {
         try {
             if (gCurrentActivity == null) return
@@ -5416,6 +5435,7 @@ object Hooks {
                     val result = chain.proceed()
                     if (focused) {
                         val a = chain.thisObject as? Activity
+                        scheduleMiniEntry(a)
                         try {
                             if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                             if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
@@ -5464,6 +5484,10 @@ object Hooks {
                 )) {
                     ham(c, methodName, "seriesWindow_${classIndex}_$methodName") { chain ->
                         val result = chain.proceed()
+
+                        if (methodName == "onCreate" || methodName == "onResume" ||
+                            (methodName == "onWindowFocusChanged" && chain.getArg(0) == true))
+                            scheduleMiniEntry(chain.thisObject as? Activity)
 
                         val shouldRefreshLayout = methodName == "onConfigurationChanged" ||
                             methodName == "onMultiWindowModeChanged" ||
@@ -5861,6 +5885,7 @@ object Hooks {
             }
             // Only defer native output changes while an explicit series
             // mini owns a valid replacement Surface. Normal playback passes.
+            var seriesOutputHooks = 0
             for ((index, method) in engine.declaredMethods.filter {
                 it.returnType == Void.TYPE && it.parameterCount > 0 &&
                     it.name in setOf("setSurface", "setSurfaceSync",
@@ -5875,10 +5900,12 @@ object Hooks {
                             if (InAppMiniPlayer.keepSeriesOutput(chain.thisObject, chain.getArg(0))) null
                             else chain.proceed()
                         })
+                    seriesOutputHooks++
                 } catch (e: Throwable) {
                     LogUtil.warn("应用内小窗: 全集输出 Hook 失败 " + e.javaClass.simpleName)
                 }
             }
+            LogUtil.info("应用内小窗: 全集入口 v2 / Surface hooks=$seriesOutputHooks")
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
@@ -6707,6 +6734,7 @@ object Hooks {
                     if (a != null) {
 
                         gCurrentActivity = a
+                        InAppMiniPlayer.rememberMainPage(a)
                         appCtx = a.applicationContext
                         refreshTargetVersionFromActivity(a)
                         initPrefs(a.applicationContext)
@@ -6740,6 +6768,7 @@ object Hooks {
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
                 gCurrentActivity = a
+                scheduleMiniEntry(a)
 
                 scheduleSettingsEntryInjection(a)
 
@@ -6766,10 +6795,7 @@ object Hooks {
                         SystemMediaBridge.onActivityResumed(a, preserveBackground)
                         if (!preserveBackground) {
                             InAppMiniPlayer.onActivityResumed(a)
-                            mainHandler.postDelayed({
-                                if (!a.isFinishing && !a.isDestroyed && gCurrentActivity === a)
-                                    InAppMiniPlayer.installSeriesEntry(a) { findLiveVideoHost(a) }
-                            }, 450L)
+                            scheduleMiniEntry(a)
                         }
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()

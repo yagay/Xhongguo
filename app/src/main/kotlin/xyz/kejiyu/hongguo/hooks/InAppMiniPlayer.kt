@@ -64,6 +64,18 @@ internal object InAppMiniPlayer {
     @Volatile private var transitionPause = false
     @Volatile private var manualCommand = false
     private var mainPage = WeakReference<Activity>(null)
+    private val entryReports = java.util.WeakHashMap<Activity, String>()
+
+    fun rememberMainPage(activity: Activity?) {
+        if (activity?.javaClass?.name == MAIN && isAlive(activity))
+            mainPage = WeakReference(activity)
+    }
+
+    private fun entryReport(activity: Activity, status: String) {
+        if (entryReports[activity] == status) return
+        entryReports[activity] = status
+        LogUtil.info("应用内小窗: 全集入口 $status")
+    }
     private data class Handoff(val old: WeakReference<Any>, val deadline: Long)
     @Volatile private var pendingHandoff: Handoff? = null
     @Volatile private var returningSeriesUntil = 0L
@@ -280,7 +292,7 @@ internal object InAppMiniPlayer {
         }
     }
 
-    fun canDock(activity: Activity): Boolean {
+    fun canDock(activity: Activity, allowPaused: Boolean = false): Boolean {
         if (!enabled || !onMain() || !isAlive(activity) ||
             activity.javaClass.name !in setOf(MAIN, SERIES)) return false
         val shared = SystemMediaBridge.currentMiniEngine(activity)
@@ -290,8 +302,12 @@ internal object InAppMiniPlayer {
             (owner.packageName == activity.packageName && owner.taskId == activity.taskId &&
                 (owner.isDestroyed || owner.isFinishing ||
                     owner.javaClass.name !in setOf(MAIN, SERIES)))
-        val engine = shared?.takeIf { isPlaying(it) == true } ?:
-            local?.takeIf { localAllowed && isPlaying(it) == true }
+        fun usable(candidate: Any): Boolean =
+            NativeMetadataAccess.call(candidate, "isReleased") != true &&
+                (isPlaying(candidate) == true ||
+                    allowPaused && playbackState(candidate) == 2)
+        val engine = shared?.takeIf(::usable) ?:
+            local?.takeIf { localAllowed && usable(it) }
         LogUtil.info("应用内小窗: 启动校验 page=" + activity.javaClass.simpleName +
             " shared=" + (shared != null) + " local=" + (local != null) +
             " owner=" + (owner?.javaClass?.simpleName ?: "none") +
@@ -364,7 +380,7 @@ internal object InAppMiniPlayer {
         a.findViewById<View>(android.R.id.content) as? FrameLayout
 
     fun dock(activity: Activity, videoHost: View?, seriesTarget: Activity? = null): Boolean {
-        if (!canDock(activity)) return false
+        if (!canDock(activity, allowPaused = seriesTarget != null)) return false
         if (session != null) return activeFor(activity)
         val engine = engineRef.get() ?: return false
         val video = videoHost ?: return false
@@ -390,6 +406,8 @@ internal object InAppMiniPlayer {
             // Do not alter protected/secure output.
             if (activity.window.attributes.flags and
                 android.view.WindowManager.LayoutParams.FLAG_SECURE != 0) return false
+            current.desiredPlaying = isPlaying(engine) == true
+            current.userPaused = !current.desiredPlaying
             current.minimizedSeries = true
             current.seriesTarget = seriesTarget
             current.seriesTransfer = true
@@ -488,7 +506,7 @@ internal object InAppMiniPlayer {
         else if (activeFor(activity)) armTransition()
     }
     fun onActivityResumed(activity: Activity) {
-        if (activity.javaClass.name == MAIN) mainPage = WeakReference(activity)
+        rememberMainPage(activity)
         val s = session ?: return
         if (!enabled || !isAlive(s.activity)) { restore(); return }
         if (activity.packageName != s.activity.packageName || activity.taskId != s.activity.taskId) return
@@ -547,10 +565,17 @@ internal object InAppMiniPlayer {
     fun minimizeSeries(activity: Activity, host: () -> View?): Boolean {
         if (!enabled || !onMain() || activity.javaClass.name != SERIES ||
             activity.isFinishing || activity.isDestroyed) return false
+        LogUtil.info("应用内小窗: 全集入口点击")
         val home = mainPage.get()?.takeIf { isAlive(it) && it.taskId == activity.taskId }
-            ?: return false
+        if (home == null) {
+            LogUtil.warn("应用内小窗: 全集缩小拒绝 reason=no-live-home-same-task")
+            return false
+        }
         if (session != null && session?.activity !== activity) endForNewPage("series-minimize")
-        if (session == null && !dock(activity, host(), home)) return false
+        if (session == null && !dock(activity, host(), home)) {
+            LogUtil.warn("应用内小窗: 全集缩小拒绝 reason=dock-failed")
+            return false
+        }
         val s = session?.takeIf { it.activity === activity } ?: return false
         s.minimizedSeries = true
         s.seriesTarget = home
@@ -580,28 +605,49 @@ internal object InAppMiniPlayer {
 
     fun installSeriesEntry(activity: Activity, host: () -> View?) {
         if (activity.javaClass.name != SERIES || !isAlive(activity)) return
-        val root = content(activity) ?: return
+        // DecorView is stable even if the host replaces android.R.id.content.
+        // Keep the entry above the native fullscreen UI but within this window.
+        val root = (activity.window.decorView as? FrameLayout) ?: content(activity)
+        if (root == null) { entryReport(activity, "root-unavailable"); return }
         val old = root.findViewWithTag<View>(SERIES_MINI_TAG)
-        val available = enabled && mainPage.get()?.let { isAlive(it) &&
-            it.taskId == activity.taskId } == true
-        if (!available) {
-            old?.let { root.removeView(it) }
+        if (!enabled) {
+            (old?.parent as? ViewGroup)?.removeView(old)
+            entryReport(activity, "disabled")
             return
         }
-        if (old != null) { old.bringToFront(); return }
+        if (!root.isAttachedToWindow || root.width <= 0 || root.height <= 0) {
+            entryReport(activity, "waiting-for-window")
+            return
+        }
+        val homeReady = mainPage.get()?.let { isAlive(it) && it.taskId == activity.taskId } == true
+        if (old != null && old.parent === root) {
+            if (old.visibility != View.VISIBLE) old.visibility = View.VISIBLE
+            old.bringToFront()
+            return
+        }
+        (old?.parent as? ViewGroup)?.removeView(old)
         val entry = button(activity, Glyph.MINI, "缩小到应用内小窗").apply {
             tag = SERIES_MINI_TAG
+            elevation = dp(activity, 32f).toFloat()
+            translationZ = dp(activity, 8f).toFloat()
             setOnClickListener {
                 if (!minimizeSeries(activity, host))
-                    android.widget.Toast.makeText(activity, "当前播放容器尚未准备好",
-                        android.widget.Toast.LENGTH_SHORT).show()
+                    Toast.makeText(activity, "当前播放容器尚未准备好",
+                        Toast.LENGTH_SHORT).show()
             }
         }
-        root.addView(entry, FrameLayout.LayoutParams(dp(activity, 38f), dp(activity, 38f),
-            Gravity.TOP or Gravity.RIGHT).apply {
-            rightMargin = dp(activity, 14f)
-            topMargin = dp(activity, 78f)
-        })
+        try {
+            root.addView(entry, FrameLayout.LayoutParams(dp(activity, 40f), dp(activity, 40f),
+                Gravity.TOP or Gravity.RIGHT).apply {
+                rightMargin = dp(activity, 14f)
+                topMargin = dp(activity, 78f)
+            })
+            entry.bringToFront()
+            entryReport(activity, "installed homeReady=$homeReady root=" + root.javaClass.simpleName)
+            LogUtil.incr("inAppMiniSeriesEntryInstalled")
+        } catch (e: Throwable) {
+            entryReport(activity, "install-failed=" + e.javaClass.simpleName)
+        }
     }
 
     private enum class Glyph { PLAY, PAUSE, EXPAND, CLOSE, MINI }
