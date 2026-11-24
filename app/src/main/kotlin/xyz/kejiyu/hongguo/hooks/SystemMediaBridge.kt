@@ -1257,6 +1257,15 @@ internal object SystemMediaBridge {
         updateSessionState(knownPlaying)
     }
 
+    /** Share the already observed engine with the in-app mini window only
+     * for the current player Activity. The caller verifies native state and
+     * a visible renderer before reparenting. */
+    internal fun currentMiniEngine(activity: Activity): Any? {
+        if (!enabled || foregroundActivity.get() !== activity ||
+            activity.isFinishing || activity.isDestroyed) return null
+        return videoEngine.get()
+    }
+
     internal fun userTransportActive(): Boolean = userCommandInProgress
 
     private fun requestTransport(play: Boolean, reason: String) {

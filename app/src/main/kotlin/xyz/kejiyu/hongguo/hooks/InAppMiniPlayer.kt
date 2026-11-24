@@ -56,11 +56,17 @@ internal object InAppMiniPlayer {
     }
     private fun isAlive(a: Activity) = !a.isFinishing && !a.isDestroyed
     private fun onMain() = Looper.myLooper() == Looper.getMainLooper()
-    private fun isPlaying(engine: Any?): Boolean? = try {
-        engine?.javaClass?.methods?.firstOrNull {
-            it.name == "isPlaying" && it.parameterCount == 0
-        }?.invoke(engine) as? Boolean
-    } catch (_: Throwable) { null }
+    private fun playbackState(engine: Any?): Int? =
+        (NativeMetadataAccess.call(engine, "getPlaybackState") as? Number)?.toInt()
+
+    private fun isPlaying(engine: Any?): Boolean? {
+        if (engine == null || NativeMetadataAccess.call(engine, "isReleased") == true)
+            return false
+        val state = playbackState(engine)
+        if (state == 1) return true
+        if (state == 2 || state == 0) return false
+        return NativeMetadataAccess.call(engine, "isPlaying") as? Boolean
+    }
     private fun command(engine: Any, play: Boolean): Boolean {
         transitionUntil = 0
         transitionPause = false
@@ -86,10 +92,14 @@ internal object InAppMiniPlayer {
         if (!enabled || engine == null) return
         val current = session
         if (action == "play") {
-            if (current == null && activity != null &&
-                activity.javaClass.name in setOf(MAIN, SERIES)) {
+            if (current == null) {
+                // Play can be dispatched during the Splash-to-player handoff.
+                // Verify the visible owner when docking, not at play dispatch.
                 engineRef = WeakReference(engine)
                 engineActivity = WeakReference(activity)
+                LogUtil.info("应用内小窗: 原生引擎已观察 page=" +
+                    (activity?.javaClass?.simpleName ?: "none") +
+                    " state=" + playbackState(engine))
             } else if (current != null && current.engine !== engine) {
                 // A different decoder actually playing supersedes the mini
                 // window. Ignore mere preparation; never start a second one.
@@ -125,9 +135,28 @@ internal object InAppMiniPlayer {
         }
     }
 
-    fun canDock(activity: Activity): Boolean =
-        enabled && onMain() && isAlive(activity) && engineActivity.get() === activity &&
-            isPlaying(engineRef.get()) == true
+    fun canDock(activity: Activity): Boolean {
+        if (!enabled || !onMain() || !isAlive(activity) ||
+            activity.javaClass.name !in setOf(MAIN, SERIES)) return false
+        val shared = SystemMediaBridge.currentMiniEngine(activity)
+        val local = engineRef.get()
+        val owner = engineActivity.get()
+        val localAllowed = owner === activity || owner == null ||
+            (owner.packageName == activity.packageName && owner.taskId == activity.taskId &&
+                (owner.isDestroyed || owner.isFinishing ||
+                    owner.javaClass.name !in setOf(MAIN, SERIES)))
+        val engine = shared?.takeIf { isPlaying(it) == true } ?:
+            local?.takeIf { localAllowed && isPlaying(it) == true }
+        LogUtil.info("应用内小窗: 启动校验 page=" + activity.javaClass.simpleName +
+            " shared=" + (shared != null) + " local=" + (local != null) +
+            " owner=" + (owner?.javaClass?.simpleName ?: "none") +
+            " localState=" + playbackState(local) + " sharedState=" + playbackState(shared) +
+            " ownerAllowed=$localAllowed accepted=" + (engine != null))
+        if (engine == null) return false
+        engineRef = WeakReference(engine)
+        engineActivity = WeakReference(activity)
+        return true
+    }
 
     private fun armTransition() {
         if (session?.let { isPlaying(it.engine) } != true) return

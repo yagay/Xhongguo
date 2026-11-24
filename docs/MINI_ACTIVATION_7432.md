@@ -1,0 +1,3 @@
+# In-app mini activation regression (7.4.2.32)
+
+21:58:35 native play is observed, 21:58:40 theater tab recognized twice, then native pause; no video host scan or docking. Module and mini setting enabled. Previous gate required engine Activity identity and a boolean isPlaying getter, which can fail during startup handoff or on TTVideoEngine. Native playback state 1 is observed on the active engine before pause. Use existing system-media engine for the current Activity, native state validation, and local observation across startup handoff. Keep visible renderer checks and scoped pause guard; log each gate decision. Verify with mini alone and mini plus system media, theater/mine tabs, explicit pause, search and return. Static fix; not device verified.
