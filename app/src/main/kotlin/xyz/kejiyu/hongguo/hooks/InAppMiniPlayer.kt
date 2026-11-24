@@ -105,7 +105,7 @@ internal object InAppMiniPlayer {
                     }
                 }, 250L)
             }
-        } else if (current?.engine === engine) {
+        } else if (current != null && current.engine === engine) {
             if (action == "pause") {
                 if (SystemClock.uptimeMillis() <= transitionUntil && !manualCommand &&
                     !SystemMediaBridge.userTransportActive()) transitionPause = true
@@ -139,8 +139,16 @@ internal object InAppMiniPlayer {
         if (!enabled || !isAlive(s.activity) || manualCommand ||
             SystemMediaBridge.userTransportActive() ||
             SystemClock.uptimeMillis() > transitionUntil) return false
-        if (controller !== s.engine && controller !== controllerRef.get()) return false
         if (controller == null) return false
+        if (controller !== s.engine) {
+            if (controller !== controllerRef.get()) return false
+            val boundEngine = runCatching {
+                controller.javaClass.methods.firstOrNull {
+                    it.name == "getVideoEngine" && it.parameterCount == 0
+                }?.invoke(controller)
+            }.getOrNull()
+            if (boundEngine !== s.engine) return false
+        }
         LogUtil.incr("inAppMiniPauseIntercept")
         return true
     }
