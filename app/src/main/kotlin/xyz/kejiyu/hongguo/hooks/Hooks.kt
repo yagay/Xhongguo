@@ -3888,7 +3888,7 @@ object Hooks {
                 gSystemMediaOn = it
                 SystemMediaBridge.configure(act, it && gMasterOn)
             }, "system_media_playback")
-            addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
+            addSwitch("应用内小窗继续播放", "刷剧使用应用内小窗；全集小窗按钮使用原生系统画中画，保留原播放页面", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
                 if (!it) InAppMiniPlayer.restore()
@@ -5838,7 +5838,8 @@ object Hooks {
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
                                 !InAppMiniPlayer.ownsTransportCommand() &&
-                                (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
+                                (SeriesPipPresentation.shouldProtectPause(chain.thisObject) ||
+                                    InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
                                     SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject))) {
                                 return@Hooker null
                             }
@@ -6772,27 +6773,29 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onResume")
-            // Scope Back to the existing full-series Activity. A supported
-            // explicit mini button is also available for hosts which override
-            // Android's legacy onBackPressed / predictive-back dispatcher.
+            // Observe the real native PiP mode callback; the official
+            // Activity remains responsible for its own video and UI.
             try {
                 val series = Class.forName(
                     "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity", false, classLoader)
-                val back = series.methods.firstOrNull {
-                    it.name == "onBackPressed" && it.parameterCount == 0
-                }
-                if (back != null) module.hook(back).setId("xhSeriesBackMini")
+                val mode = series.getDeclaredMethod("onPictureInPictureModeChanged", Boolean::class.javaPrimitiveType)
+                module.hook(mode).setId("xhSeriesNativePipMode")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
+                        val result = chain.proceed()
                         val activity = chain.thisObject as? Activity
-                        if (activity != null && gMasterOn && gMiniPlayerOn &&
-                            activity.javaClass.name == series.name &&
-                            InAppMiniPlayer.minimizeSeries(activity) { findLiveVideoHost(activity) }) null
-                        else chain.proceed()
+                        val inPip = chain.getArg(0) as? Boolean
+                        if (activity != null && inPip != null) {
+                            SeriesPipPresentation.onModeChanged(activity, inPip)
+                            InAppMiniPlayer.installSeriesEntry(activity) { findLiveVideoHost(activity) }
+                        }
+                        result
                     })
             } catch (e: Throwable) {
-                LogUtil.info("应用内小窗: 全集返回 Hook 未安装 " + e.javaClass.simpleName)
+                LogUtil.warn("全集小窗: PiP 状态 Hook 未安装 " + e.javaClass.simpleName)
             }
+            // Keep normal Back behavior; use the explicit mini button for
+            // PiP so a navigation gesture cannot accidentally shrink a page.
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
                 // Probe before native onPause can detach the video engine.
