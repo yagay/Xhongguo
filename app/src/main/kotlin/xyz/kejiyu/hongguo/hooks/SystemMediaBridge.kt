@@ -1257,6 +1257,8 @@ internal object SystemMediaBridge {
         updateSessionState(knownPlaying)
     }
 
+    internal fun userTransportActive(): Boolean = userCommandInProgress
+
     private fun requestTransport(play: Boolean, reason: String) {
         if (!enabled) return
         val latestEngine = videoEngine.get()

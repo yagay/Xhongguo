@@ -1450,7 +1450,8 @@ object Hooks {
     // Mini-player activation uses only a confirmed native video rendering host.
     // Never remove or resize the whole feed holder or the bottom tabs.
     private fun findLiveVideoHost(act: Activity): View? {
-        if (act.javaClass.name != MAIN_TAB_ACTIVITY) return null
+        if (act.javaClass.name != MAIN_TAB_ACTIVITY &&
+            act.javaClass.name != "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") return null
         val candidates = ArrayList<View>()
         val inspected = java.util.Collections.newSetFromMap(
             java.util.IdentityHashMap<View, Boolean>()
@@ -1672,6 +1673,7 @@ object Hooks {
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
         if (InAppMiniPlayer.activeFor(act)) return
+        if (!InAppMiniPlayer.canDock(act)) return
         val player = findLiveVideoHost(act)
         if (player == null) {
             LogUtil.warn("应用内小窗未启动: Tab 已识别，但找不到正在显示的视频渲染容器")
@@ -3880,7 +3882,7 @@ object Hooks {
                 gSystemMediaOn = it
                 SystemMediaBridge.configure(act, it && gMasterOn)
             }, "system_media_playback")
-            addSwitch("应用内小窗继续播放", "实验功能：切换底部页面时复用原视频并显示可拖动小窗；默认关闭", { gMiniPlayerOn }, {
+            addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
                 if (!it) InAppMiniPlayer.restore()
@@ -5825,11 +5827,13 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
-                                SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)) {
+                                (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
+                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject))) {
                                 return@Hooker null
                             }
                             val result = chain.proceed()
                             try {
+                                InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
                                 SystemMediaBridge.onNativeEngineCommand(
                                     chain.thisObject, method.name)
                             } catch (e: Throwable) {
@@ -6729,6 +6733,7 @@ object Hooks {
                         val preserveBackground =
                             BackgroundSeriesTransitionGuard.onActivityResumed(a)
                         SystemMediaBridge.onActivityResumed(a, preserveBackground)
+                        if (!preserveBackground) InAppMiniPlayer.onActivityResumed(a)
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6836,8 +6841,13 @@ object Hooks {
                     null
                 } else {
                     try {
+                        val source = chain.thisObject as? Activity
+                        if (source != null && gMasterOn && gMiniPlayerOn)
+                            InAppMiniPlayer.beforePageChange(source, chain.getArg(0) as? Intent) {
+                                findLiveVideoHost(source)
+                            }
                         BackgroundSeriesTransitionGuard.onLaunchRequested(
-                            chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                            source, chain.getArg(0) as? Intent)
                     } catch (_: Throwable) {}
                     chain.proceed()
                 }
@@ -6849,8 +6859,13 @@ object Hooks {
                     null
                 } else {
                     try {
+                        val source = chain.thisObject as? Activity
+                        if (source != null && gMasterOn && gMiniPlayerOn)
+                            InAppMiniPlayer.beforePageChange(source, chain.getArg(0) as? Intent) {
+                                findLiveVideoHost(source)
+                            }
                         BackgroundSeriesTransitionGuard.onLaunchRequested(
-                            chain.thisObject as? Activity, chain.getArg(0) as? Intent)
+                            source, chain.getArg(0) as? Intent)
                     } catch (_: Throwable) {}
                     chain.proceed()
                 }
