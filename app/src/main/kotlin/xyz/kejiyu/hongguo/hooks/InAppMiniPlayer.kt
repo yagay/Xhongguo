@@ -65,6 +65,58 @@ internal object InAppMiniPlayer {
     @Volatile private var manualCommand = false
     private var mainPage = WeakReference<Activity>(null)
     private val entryReports = java.util.WeakHashMap<Activity, String>()
+    private val entryTouchReports = java.util.WeakHashMap<Activity, Boolean>()
+    private data class EntryTouch(val owner: Activity, val button: View,
+        val downTime: Long, val x: Float, val y: Float, var cancelled: Boolean = false)
+    private var entryTouch: EntryTouch? = null
+
+    /** Route only taps beginning inside our own visible series mini button.
+     * The official series Activity overrides dispatchTouchEvent, so ordinary
+     * View listeners alone may not receive the gesture. No other gestures
+     * or native playback commands are intercepted here. */
+    fun handleSeriesEntryTouch(activity: Activity?, event: MotionEvent?): Boolean {
+        if (!enabled || activity == null || event == null ||
+            activity.javaClass.name != SERIES || !isAlive(activity)) return false
+        val action = event.actionMasked
+        if (action == MotionEvent.ACTION_DOWN) {
+            entryTouch?.button?.isPressed = false
+            entryTouch = null
+            val button = activity.window.decorView.findViewWithTag<View>(SERIES_MINI_TAG)
+                ?: return false
+            val visible = android.graphics.Rect()
+            if (!button.isShown || !button.isEnabled || !button.isAttachedToWindow ||
+                !button.getGlobalVisibleRect(visible)) return false
+            val location = IntArray(2)
+            button.getLocationOnScreen(location)
+            val hit = event.rawX >= location[0] && event.rawX < location[0] + button.width &&
+                event.rawY >= location[1] && event.rawY < location[1] + button.height
+            if (entryTouchReports.put(activity, true) == null)
+                LogUtil.info("应用内小窗: 全集触摸分发有效 buttonShown=true hit=$hit")
+            if (!hit || event.pointerCount != 1 || button.width <= 0 || button.height <= 0)
+                return false
+            entryTouch = EntryTouch(activity, button, event.downTime, event.rawX, event.rawY)
+            button.isPressed = true
+            LogUtil.info("应用内小窗: 全集按钮触摸 DOWN")
+            return true
+        }
+        val touch = entryTouch ?: return false
+        if (touch.owner !== activity || touch.downTime != event.downTime) return false
+        val slop = ViewConfiguration.get(activity).scaledTouchSlop
+        if (event.pointerCount > 1 || abs(event.rawX - touch.x) > slop ||
+            abs(event.rawY - touch.y) > slop || action == MotionEvent.ACTION_POINTER_DOWN) {
+            touch.cancelled = true
+            touch.button.isPressed = false
+        }
+        if (action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_UP) {
+            entryTouch = null
+            touch.button.isPressed = false
+            val click = action == MotionEvent.ACTION_UP && !touch.cancelled &&
+                touch.button.isShown && touch.button.isAttachedToWindow
+            LogUtil.info("应用内小窗: 全集按钮触摸结束 click=$click")
+            if (click) touch.button.performClick()
+        }
+        return true
+    }
 
     fun rememberMainPage(activity: Activity?) {
         if (activity?.javaClass?.name == MAIN && isAlive(activity))
@@ -690,6 +742,14 @@ internal object InAppMiniPlayer {
             })
             entry.bringToFront()
             entryReport(activity, "installed homeReady=$homeReady root=" + root.javaClass.simpleName)
+            entry.post {
+                if (entry.isAttachedToWindow) {
+                    val loc = IntArray(2)
+                    entry.getLocationOnScreen(loc)
+                    LogUtil.info("应用内小窗: 全集按钮布局 x=" + loc[0] + " y=" + loc[1] +
+                        " w=" + entry.width + " h=" + entry.height + " shown=" + entry.isShown)
+                }
+            }
             LogUtil.incr("inAppMiniSeriesEntryInstalled")
         } catch (e: Throwable) {
             entryReport(activity, "install-failed=" + e.javaClass.simpleName)

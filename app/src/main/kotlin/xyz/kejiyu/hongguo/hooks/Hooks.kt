@@ -5906,7 +5906,7 @@ object Hooks {
                     LogUtil.warn("应用内小窗: 全集输出 Hook 失败 " + e.javaClass.simpleName)
                 }
             }
-            LogUtil.info("应用内小窗: 全集入口 v2 / Surface hooks=$seriesOutputHooks")
+            LogUtil.info("应用内小窗: 全集入口 v3 touch-routing / Surface hooks=$seriesOutputHooks")
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
@@ -6673,6 +6673,8 @@ object Hooks {
                 .intercept(Hooker { chain ->
                     val ev = chain.getArg(0) as? android.view.MotionEvent
                     val activity = chain.thisObject as? Activity
+                    if (InAppMiniPlayer.handleSeriesEntryTouch(activity, ev))
+                        return@Hooker true
                     try { observeNativeTabTouch(ev, activity) } catch (e: Throwable) {
                         LogUtil.warn("应用内小窗触摸导航检测失败: " + e.message)
                     }
@@ -6708,9 +6710,11 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val activity = chain.thisObject as? Activity
+                            val event = chain.getArg(0) as? android.view.MotionEvent
+                            if (InAppMiniPlayer.handleSeriesEntryTouch(activity, event))
+                                return@Hooker true
                             try {
-                                observeVideoLongPress(chain.getArg(0) as? android.view.MotionEvent,
-                                    activity)
+                                observeVideoLongPress(event, activity)
                             } catch (e: Throwable) {
                                 LogUtil.warn("全集长按触摸观察异常: " + e.message)
                             }
