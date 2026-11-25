@@ -284,7 +284,9 @@ object Hooks {
         gVideoLongPressSettingsOn = prefs.getBoolean("video_longpress_settings", true)
         gDisableShoppingMall = prefs.getBoolean("disable_shopping_mall", true)
         gMiniPlayerOn = prefs.getBoolean("in_app_mini_player", false)
-        InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn
+        InAppPlaybackContinuity.configure(ctx, gMasterOn &&
+            prefs.getBoolean("in_app_continuous_playback", false))
+        InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
         gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
         SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
         gPlayerOn = prefs.getBoolean("player_bar", false)
@@ -1570,7 +1572,7 @@ object Hooks {
         ev: android.view.MotionEvent?, act: Activity?,
     ) {
         val activity = act ?: return
-        if (!gMasterOn || !gMiniPlayerOn || ev == null ||
+        if (!gMasterOn || (!gMiniPlayerOn && !InAppPlaybackContinuity.enabled) || ev == null ||
             activity.javaClass.name != MAIN_TAB_ACTIVITY) return
         when (ev.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
@@ -1663,7 +1665,12 @@ object Hooks {
     }
 
     private fun beforeNativeTabAction(act: Activity, tab: String, source: String) {
-        if (!gMasterOn || !gMiniPlayerOn) return
+        if (!gMasterOn) return
+        if (InAppPlaybackContinuity.enabled) {
+            if (tab != "商城" || !isShoppingMallDisabled()) InAppPlaybackContinuity.beforeTab(act, tab)
+            return
+        }
+        if (!gMiniPlayerOn) return
         LogUtil.info("应用内小窗 Tab: $tab, event=$source, active=" +
             InAppMiniPlayer.activeFor(act))
         LogUtil.incr("inAppMiniTabRecognized")
@@ -3865,7 +3872,9 @@ object Hooks {
             content.addView(sectionTitle(act, "核心", p))
             addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
                 gMasterOn = it
-                InAppMiniPlayer.enabled = it && gMiniPlayerOn
+                InAppPlaybackContinuity.configure(act, it &&
+                    (gPrefs?.getBoolean("in_app_continuous_playback", false) == true))
+                InAppMiniPlayer.enabled = it && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
                 SystemMediaBridge.configure(act, it && gSystemMediaOn)
                 if (!it) {
                     InAppMiniPlayer.restore()
@@ -3884,9 +3893,16 @@ object Hooks {
             }, "system_media_playback")
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
-                InAppMiniPlayer.enabled = it && gMasterOn
+                InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled
                 if (!it) InAppMiniPlayer.restore()
             }, "in_app_mini_player")
+            addSwitch("应用内持续播放（无小窗）", "优先使用官方无Surface/音频共享机制；开启后不显示应用内小窗，手动暂停仍有效。实验功能", {
+                gPrefs?.getBoolean("in_app_continuous_playback", false) == true
+            }, {
+                InAppPlaybackContinuity.configure(act, it && gMasterOn)
+                InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
+                if (it) InAppMiniPlayer.restore()
+            }, "in_app_continuous_playback")
             addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
                 gDisableShoppingMall = it
                 if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
@@ -5790,7 +5806,8 @@ object Hooks {
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
                         if (method.name == "pause" &&
-                            SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
+                            (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject) ||
+                                SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject))) {
                             return@Hooker null
                         }
                         val result = chain.proceed()
@@ -5812,6 +5829,58 @@ object Hooks {
         // The real 7.3.5.x player can reach the low-level TTVideoEngine
         // without calling VideoContext.onVideoPlay, as confirmed by the new
         // diagnostic ZIP. Observe actual engine commands, not just installation.
+        // Optional native audio continuation. Observe only existing wrappers;
+        // the exact inspected APK signatures are verified by the resolver.
+        try {
+            val wrapper = InAppPlaybackContinuity.resolve(classLoader)
+            if (wrapper != null) {
+                hac(wrapper, "continuityWrapper") { chain ->
+                    val result = chain.proceed()
+                    InAppPlaybackContinuity.observeWrapper(chain.thisObject)
+                    result
+                }
+                ham(wrapper, "resume", "continuityResumeObserve") { chain ->
+                    InAppPlaybackContinuity.observeWrapper(chain.thisObject)
+                    chain.proceed()
+                }
+                ham(wrapper, "pause", "continuityWrapperPause") { chain ->
+                    if (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)) null
+                    else chain.proceed()
+                }
+                val presenter = Class.forName("nt4.a1", false, classLoader)
+                val callback = Class.forName("kotlin.jvm.functions.Function0", false, classLoader)
+                val exit = presenter.getDeclaredMethod("c", callback)
+                val series = Class.forName(
+                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity", false, classLoader)
+                val args = series.getDeclaredMethod("S3")
+                val fragment = Class.forName(
+                    "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment", false, classLoader)
+                val audioMode = fragment.getDeclaredMethod("Eh")
+                require(exit.returnType == Void.TYPE && args.returnType == android.os.Bundle::class.java &&
+                    audioMode.returnType == Boolean::class.javaPrimitiveType)
+                module.hook(exit).setId("continuityOfficialExit")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        val scoped = InAppPlaybackContinuity.beginNativeExit(chain.thisObject)
+                        try { chain.proceed() } finally {
+                            if (scoped) InAppPlaybackContinuity.endNativeExit()
+                        }
+                    })
+                module.hook(args).setId("continuityExitArgs")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        InAppPlaybackContinuity.exitArgs(chain.thisObject, chain.proceed())
+                    })
+                module.hook(audioMode).setId("continuityExitAudioMode")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (InAppPlaybackContinuity.exitAudioMode(chain.thisObject)) true else chain.proceed()
+                    })
+                LogUtil.info("持续播放: 原生无Surface及音频共享退出 Hook 已安装")
+            } else LogUtil.info("持续播放: 原生包装层未识别，仅观察通用导航")
+        } catch (e: Throwable) {
+            LogUtil.warn("持续播放: 原生 Hook 安装失败 " + e.javaClass.simpleName)
+        }
         try {
             val engine = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
@@ -5827,12 +5896,14 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
-                                (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
+                                (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject) ||
+                                    InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
                                     SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject))) {
                                 return@Hooker null
                             }
                             val result = chain.proceed()
                             try {
+                                InAppPlaybackContinuity.observeEngine(chain.thisObject, method.name, gCurrentActivity)
                                 InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
                                 SystemMediaBridge.onNativeEngineCommand(
                                     chain.thisObject, method.name)
@@ -6152,7 +6223,9 @@ object Hooks {
                 module.hook(method).setId("miniHoldPause_" + index)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
-                        if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
+                        if (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)) {
+                            null
+                        } else if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
                             LogUtil.incr("inAppMiniPauseIntercept")
                             null
                         } else if (SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
@@ -6733,7 +6806,10 @@ object Hooks {
                         val preserveBackground =
                             BackgroundSeriesTransitionGuard.onActivityResumed(a)
                         SystemMediaBridge.onActivityResumed(a, preserveBackground)
-                        if (!preserveBackground) InAppMiniPlayer.onActivityResumed(a)
+                        if (!preserveBackground) {
+                            InAppPlaybackContinuity.onResumed(a)
+                            InAppMiniPlayer.onActivityResumed(a)
+                        }
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6825,6 +6901,7 @@ object Hooks {
                         (chain.thisObject as? Activity)?.let { activity ->
                             InAppMiniPlayer.onActivityClosed(activity)
                             SystemMediaBridge.onActivityDestroyed(activity)
+                            InAppPlaybackContinuity.onDestroyed(activity)
                         }
                         chain.proceed()
                     })
@@ -6842,7 +6919,8 @@ object Hooks {
                 } else {
                     try {
                         val source = chain.thisObject as? Activity
-                        if (source != null && gMasterOn && gMiniPlayerOn)
+                        InAppPlaybackContinuity.beforeLaunch(source, chain.getArg(0) as? Intent)
+                        if (source != null && gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled)
                             InAppMiniPlayer.beforePageChange(source, chain.getArg(0) as? Intent) {
                                 findLiveVideoHost(source)
                             }
@@ -6860,7 +6938,8 @@ object Hooks {
                 } else {
                     try {
                         val source = chain.thisObject as? Activity
-                        if (source != null && gMasterOn && gMiniPlayerOn)
+                        InAppPlaybackContinuity.beforeLaunch(source, chain.getArg(0) as? Intent)
+                        if (source != null && gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled)
                             InAppMiniPlayer.beforePageChange(source, chain.getArg(0) as? Intent) {
                                 findLiveVideoHost(source)
                             }
