@@ -722,7 +722,6 @@ internal object SystemMediaBridge {
                 " wasPlaying=" + lastLifecyclePauseWasPlaying)
         }
         if (action == "play") {
-            AudioFocusCoordinator.onPlaying(candidate, foregroundActivity.get())
             lastLifecyclePauseWasPlaying = false
             onNativePlayback(true, "TTVideoEngine#play", candidate)
             captureNativePlayEntity("engine-play")
@@ -740,10 +739,8 @@ internal object SystemMediaBridge {
                 }, delay)
             }
         } else if (action == "pause" || action == "stop") {
-            AudioFocusCoordinator.onEngineEnded(candidate, action)
             onNativePlayback(false, "TTVideoEngine#$action", candidate)
         } else if (action.startsWith("release") && videoEngine.get() === candidate) {
-            AudioFocusCoordinator.onEngineEnded(candidate, action)
             videoEngine.clear()
             onNativePlayback(false, "TTVideoEngine#$action", null)
         }
@@ -1300,9 +1297,9 @@ internal object SystemMediaBridge {
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
         val target = audioFocusEngine()
-        if (target != null && NativePlaybackSession.playing(target))
-            requestTransport(false, "audio-interruption")
-        else if (knownPlaying) onNativePlayback(false, "audio-interruption:$reason", target)
+        // The independent coordinator owns native pause and confirmation.
+        if (target != null && !NativePlaybackSession.playing(target) && knownPlaying)
+            onNativePlayback(false, "audio-interruption:$reason", target)
         LogUtil.info("系统媒体: 音频中断已取消后台保活和自动恢复 reason=$reason")
     }
 
@@ -1491,7 +1488,6 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
-        AudioFocusCoordinator.stop()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }

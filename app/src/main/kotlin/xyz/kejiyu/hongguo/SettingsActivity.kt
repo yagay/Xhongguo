@@ -87,6 +87,9 @@ class SettingsActivity : Activity() {
         toggle("音频焦点丢失时暂停", "其他应用抢占音频焦点时暂停短剧", "audio_focus_pause", true)
         toggle("通话时自动暂停", "监听系统铃声、通话和语音通信模式", "audio_call_pause", true)
         toggle("焦点恢复后自动播放", "仅临时中断且同一视频，默认关闭", "audio_focus_auto_resume")
+        toggle("通话结束自动恢复", "仅恢复同一视频；永久失焦仍需手动播放", "audio_call_auto_resume", true)
+        toggle("降低音量请求时暂停", "默认不额外暂停普通提示音", "audio_focus_pause_duck")
+        toggle("其他应用音频检测", "高级模式：需 LSPosed 系统框架作用域，默认关闭", "audio_external_pause")
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")

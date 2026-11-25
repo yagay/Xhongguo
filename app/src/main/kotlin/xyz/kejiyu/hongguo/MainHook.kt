@@ -31,6 +31,7 @@ class MainHook : XposedModule() {
         LogUtil.info("══════════════════════════════")
         log(Log.INFO, TAG, "模块已加载 | 进程=${param.processName} | API=${apiVersion}")
 
+        if (param.isSystemServer) return // no network/update checks in system_server
         try {
             val ver = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
             LogUtil.info("更新检查启动 | 当前版本=$ver")
@@ -112,6 +113,7 @@ class MainHook : XposedModule() {
 
     override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
         LogUtil.info("system_server 启动")
+        xyz.kejiyu.hongguo.hooks.SystemAudioActivity.install()
     }
 
     override fun onHotReloading(param: XposedModuleInterface.HotReloadingParam): Boolean {

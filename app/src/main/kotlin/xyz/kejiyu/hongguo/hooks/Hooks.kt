@@ -369,10 +369,13 @@ object Hooks {
 
     private fun configureAudioFocus(ctx: Context) {
         val p = gPrefs ?: return
-        AudioFocusCoordinator.configure(ctx, gMasterOn && gSystemMediaOn,
+        AudioFocusCoordinator.configure(ctx, gMasterOn,
             p.getBoolean("audio_focus_pause", true),
             p.getBoolean("audio_call_pause", true),
-            p.getBoolean("audio_focus_auto_resume", false))
+            p.getBoolean("audio_focus_auto_resume", false),
+            p.getBoolean("audio_call_auto_resume", true),
+            p.getBoolean("audio_focus_pause_duck", false),
+            p.getBoolean("audio_external_pause", false))
     }
 
     private fun savePref(key: String, value: Boolean) {
@@ -383,7 +386,8 @@ object Hooks {
         appCtx?.let {
             ModuleSettingsStore.pushFromTarget(it, key, value)
             if (key in setOf("master_on", "system_media_playback", "audio_focus_pause",
-                    "audio_call_pause", "audio_focus_auto_resume")) configureAudioFocus(it)
+                    "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume",
+                    "audio_focus_pause_duck", "audio_external_pause")) configureAudioFocus(it)
         }
     }
 
@@ -2608,6 +2612,10 @@ object Hooks {
         FeatureFaultGuard.run("media-observer") {
             SystemMediaBridge.onNativeEngineCommand(engine, action)
         }
+        FeatureFaultGuard.run("audio-coordinator") {
+            if (action == "play" || action == "start") AudioFocusCoordinator.onPlaying(engine, activity)
+            else AudioFocusCoordinator.onEngineEnded(engine, action)
+        }
         if (action == "play" && TargetNames.isUniversal(gNames)) {
             if (gCurrentActivity === activity) {
                 setVideoPaused(false, "confirmed-native-engine")
@@ -3943,6 +3951,15 @@ object Hooks {
             addSwitch("焦点恢复后自动播放", "仅临时中断且同一视频；永久焦点丢失需手动播放", {
                 gPrefs?.getBoolean("audio_focus_auto_resume", false) ?: false
             }, {}, "audio_focus_auto_resume")
+            addSwitch("通话结束自动恢复", "仅恢复通话前正在播放的同一视频；永久失焦仍需手动播放", {
+                gPrefs?.getBoolean("audio_call_auto_resume", true) ?: true
+            }, {}, "audio_call_auto_resume")
+            addSwitch("降低音量请求时暂停", "普通提示音通常只请求短时降低音量；默认不额外暂停", {
+                gPrefs?.getBoolean("audio_focus_pause_duck", false) ?: false
+            }, {}, "audio_focus_pause_duck")
+            addSwitch("其他应用音频检测", "高级模式：需 LSPosed 系统框架作用域；检测实际媒体音频，默认关闭", {
+                gPrefs?.getBoolean("audio_external_pause", false) ?: false
+            }, {}, "audio_external_pause")
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled
