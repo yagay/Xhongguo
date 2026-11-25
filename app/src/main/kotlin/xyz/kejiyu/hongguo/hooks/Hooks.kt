@@ -2586,12 +2586,15 @@ object Hooks {
     }
 
     private fun publishNativeEngine(engine: Any, action: String, activity: Activity?) {
-        try { InAppPlaybackContinuity.observeEngine(engine, action, activity) }
-        catch (ex: Throwable) { LogUtil.warn("持续播放: 观察异常 " + ex) }
-        try { InAppMiniPlayer.onEngineCommand(engine, action, activity) }
-        catch (ex: Throwable) { LogUtil.warn("小窗: 观察异常 " + ex) }
-        try { SystemMediaBridge.onNativeEngineCommand(engine, action) }
-        catch (ex: Throwable) { LogUtil.warn("系统媒体: 观察异常 " + ex) }
+        FeatureFaultGuard.run("continuity-observer") {
+            InAppPlaybackContinuity.observeEngine(engine, action, activity)
+        }
+        FeatureFaultGuard.run("mini-observer") {
+            InAppMiniPlayer.onEngineCommand(engine, action, activity)
+        }
+        FeatureFaultGuard.run("media-observer") {
+            SystemMediaBridge.onNativeEngineCommand(engine, action)
+        }
         if (action == "play" && TargetNames.isUniversal(gNames)) {
             if (gCurrentActivity === activity) {
                 setVideoPaused(false, "confirmed-native-engine")
@@ -4955,6 +4958,7 @@ object Hooks {
         gTargetVersionCode = detected.second
 
         gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
+        FeatureFaultGuard.reset()
         RuntimeCapabilities.inspect(classLoader, pkg, detected.first)
         // Re-read settings now the target version is known.
         appCtx?.let { initPrefs(it) }
@@ -5911,9 +5915,13 @@ object Hooks {
                         .intercept(Hooker { chain ->
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
-                                (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject) ||
-                                    InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
-                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject))) {
+                                (FeatureFaultGuard.test("continuity-pause") {
+                                    InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)
+                                } || FeatureFaultGuard.test("mini-pause") {
+                                    InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)
+                                } || FeatureFaultGuard.test("background-pause") {
+                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)
+                                })) {
                                 return@Hooker null
                             }
                             val result = chain.proceed()

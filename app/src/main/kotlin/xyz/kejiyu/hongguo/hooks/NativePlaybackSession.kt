@@ -43,13 +43,12 @@ internal object NativePlaybackSession {
             ?.takeIf { it.isNotBlank() && it != "null" }
 
     fun boundEngine(candidate: Any?): Any? {
-        if (isEngine(candidate)) return candidate
-        return NativeMetadataAccess.call(candidate, "getVideoEngine")?.takeIf(::isEngine)
+        return NativeBusinessResolver.boundEngine(candidate)
     }
     fun matches(candidate: Any?, engine: Any): Boolean = boundEngine(candidate) === engine
 
-    private fun player(a: Activity?) = a != null && !a.isDestroyed && !a.isFinishing &&
-        a.javaClass.name in setOf(MAIN, SERIES)
+    private fun player(a: Activity?, engine: Any? = null) =
+        NativeBusinessResolver.page(a, engine) != NativeBusinessResolver.Page.UNKNOWN
 
     fun observe(candidate: Any?, action: String, activity: Activity?,
                 foreground: () -> Activity?,
@@ -62,8 +61,8 @@ internal object NativePlaybackSession {
             return
         }
         if (action == "play" || action == "start") {
-            val page = activity?.takeIf(::player) ?: owner()?.takeIf { engine() === candidate }
-                ?: return
+            val page = activity?.takeIf { player(it, candidate) }
+                ?: owner()?.takeIf { engine() === candidate } ?: return
             val previous = current
             val id = videoId(candidate)
             if (previous?.engine?.get() === candidate && previous.owner.get() === page &&
@@ -77,10 +76,9 @@ internal object NativePlaybackSession {
                 if (ticket != serial) return
                 val actual = weak.get() ?: return
                 val a = weakPage.get() ?: return
-                if (!player(a)) return
+                if (!player(a, actual)) return
                 val front = foreground()
-                // Never adopt a delayed callback from a previous player page.
-                if (player(front) && front !== a) return
+                if (front !== a && (engine() !== actual || player(front, actual))) return
                 if (!playing(actual)) return
                 val before = current
                 val vid = videoId(actual)

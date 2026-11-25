@@ -194,7 +194,8 @@ internal object EpisodeNavigator {
             reportCapability("not-main-thread", activity, engine)
             return null
         }
-        if (activity?.javaClass?.name != SERIES_ACTIVITY ||
+        if (activity == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.SERIES ||
             activity.isFinishing || activity.isDestroyed) {
             reportCapability("not-active-series-activity", activity, engine)
             return null

@@ -255,9 +255,7 @@ internal object FullSeriesMediaInfo {
         // uo4.y0.h is j25.d, which extends j25.e -> AndroidX ViewPager.
         // getCurrentItem() is an actual selected page, unlike the cached
         // uo4.y0.z model that is only set during presenter initialization.
-        val pager = field(presenter, "h") ?: return PagerState()
-        if (!pager.javaClass.name.contains("ViewPager") &&
-            !pager.javaClass.name.startsWith("j25.")) return PagerState()
+        val pager = NativeBusinessResolver.pager(presenter) ?: return PagerState()
         val item = number(call(pager, "getCurrentItem"))?.toInt()
             ?.takeIf { it in 0..5000 }
         val adapter = call(pager, "getAdapter")
@@ -659,7 +657,8 @@ internal object FullSeriesMediaInfo {
     }
 
     fun navigationCandidate(activity: Activity?, engine: Any?): NavigationCandidate? {
-        if (activity?.javaClass?.name != ACTIVITY || engine == null ||
+        if (activity == null || engine == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.SERIES ||
             activity.isFinishing || activity.isDestroyed)
             return rejectedNavigation("inactive-activity-or-engine")
 
@@ -671,7 +670,7 @@ internal object FullSeriesMediaInfo {
         // requiring observedForEngine(engine) to have a direct ID mapping.
         val cachedKey = if (cachedActivity.get() === activity) cachedSeriesKey else null
         val cachedCount = if (cachedActivity.get() === activity) cachedTotal else null
-        val presenter = field(activity, "a")
+        val presenter = NativeBusinessResolver.seriesPresenter(activity, engine)
         val presenterKey = NativeMetadataAccess.typedFields(presenter, DATA)
             .filter { engineId != null && vid(it) == engineId }
             .mapNotNull { seriesId(field(it, "episodesId")) }
@@ -796,8 +795,9 @@ internal object FullSeriesMediaInfo {
     }
 
     fun read(activity: Activity?, engine: Any?): Info {
-        if (activity?.javaClass?.name != ACTIVITY) return Info()
-        val presenter = field(activity, "a")
+        if (activity == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.SERIES) return Info()
+        val presenter = NativeBusinessResolver.seriesPresenter(activity, engine)
         val detail = NativeMetadataAccess.typedFields(presenter, DETAIL).singleOrNull()
         rememberDetail(detail)
         val videoId = call(engine, "getVideoID")?.toString()

@@ -22,9 +22,8 @@ internal object NativeMetadataAccess {
     }
 
     fun call(target: Any?, name: String): Any? = try {
-        target?.javaClass?.methods?.firstOrNull {
-            it.name == name && it.parameterCount == 0 && !Modifier.isStatic(it.modifiers)
-        }?.invoke(target)
+        if (target == null) null
+        else NativeBusinessResolver.noArg(target.javaClass, name)?.invoke(target)
     } catch (_: Throwable) { null }
 
     fun video(input: Any?): Any? {
@@ -38,30 +37,16 @@ internal object NativeMetadataAccess {
         } catch (_: Throwable) { null }
     }
 
-    fun typedFields(owner: Any?, type: String): List<Any> {
-        if (owner == null) return emptyList()
-        val result = ArrayList<Any>()
-        var c: Class<*>? = owner.javaClass
-        repeat(5) {
-            val cls = c ?: return@repeat
-            for (field in runCatching { cls.declaredFields }.getOrDefault(emptyArray())) {
-                if (Modifier.isStatic(field.modifiers) || !extendsType(field.type, type)) continue
-                runCatching { field.isAccessible = true; field.get(owner) }.getOrNull()?.let { value ->
-                    if (result.none { it === value }) result.add(value)
-                }
-            }
-            c = cls.superclass
-        }
-        return result
-    }
+    fun typedFields(owner: Any?, type: String): List<Any> =
+        NativeBusinessResolver.fieldsOf(owner, type)
 
     fun isEpisodeFragment(fragment: Any): Boolean {
         if (!extendsType(fragment.javaClass, "androidx.fragment.app.Fragment")) return false
-        val methods = runCatching { fragment.javaClass.methods }.getOrDefault(emptyArray())
-        return methods.any { it.name == "getCurrentPosition" &&
-            it.parameterCount == 0 && it.returnType == Integer.TYPE } &&
-            methods.any { it.name == "getDataList" && it.parameterCount == 0 &&
-                List::class.java.isAssignableFrom(it.returnType) }
+        return NativeBusinessResolver.noArg(fragment.javaClass, "getCurrentPosition") {
+            it == Integer.TYPE
+        } != null && NativeBusinessResolver.noArg(fragment.javaClass, "getDataList") {
+            List::class.java.isAssignableFrom(it)
+        } != null
     }
 
     @Synchronized fun observeFragment(fragment: Any?) {
