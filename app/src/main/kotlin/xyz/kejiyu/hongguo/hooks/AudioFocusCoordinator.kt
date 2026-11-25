@@ -12,7 +12,6 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.ref.WeakReference
@@ -42,7 +41,8 @@ internal object AudioFocusCoordinator {
     private var retryGeneration = 0L
     private var interruptionGeneration = 0L
     private var permanentlyInterrupted = false
-    private var focusOwnerObserved = false
+    @Volatile private var focusOwnerObserved = false
+    private var resumeAuthorized = false
     @Volatile private var focusLost = false
     @Volatile private var callActive = false
     @Volatile private var manualHold = false
@@ -85,6 +85,7 @@ internal object AudioFocusCoordinator {
                 manualHold = false
                 ticket = null
                 permanentlyInterrupted = false
+                resumeAuthorized = false
                 ++retryGeneration
                 ++interruptionGeneration
                 lastRequestEngine.clear()
@@ -97,7 +98,7 @@ internal object AudioFocusCoordinator {
                 registerMode()
                 manager?.let { onMode(runCatching { it.mode }.getOrDefault(AudioManager.MODE_NORMAL)) }
             }
-            if (!autoResume && !resumeCalls) ticket = null
+            if (!autoResume && !resumeCalls) { ticket = null; resumeAuthorized = false }
             NativePlaybackSession.engine()?.let { engine ->
                 if (NativePlaybackSession.playing(engine)) onPlaying(engine, NativePlaybackSession.owner())
             }
@@ -130,8 +131,12 @@ internal object AudioFocusCoordinator {
                 }
             }
             val filter = IntentFilter(SystemAudioActivity.ACTION)
-            if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(receiver, filter, SystemAudioActivity.SENDER_PERMISSION, main, Context.RECEIVER_EXPORTED)
-            else @Suppress("DEPRECATION") ctx.registerReceiver(receiver, filter, SystemAudioActivity.SENDER_PERMISSION, main)
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(receiver, filter, SystemAudioActivity.SENDER_PERMISSION, main, Context.RECEIVER_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                ctx.registerReceiver(receiver, filter, SystemAudioActivity.SENDER_PERMISSION, main)
+            }
             externalReceiver = receiver
             externalContext = ctx
             LogUtil.info("音频协调: 高级音频活动接收器已启用，等待系统框架信号")
@@ -245,8 +250,14 @@ internal object AudioFocusCoordinator {
             if (!temporary) {
                 permanentlyInterrupted = true
                 ticket = null
-            } else if (allowResume && !permanentlyInterrupted && playing && engine != null && ticket == null)
-                ticket = ResumeTicket(WeakReference(engine), id, epoch)
+                resumeAuthorized = false
+            } else if (!permanentlyInterrupted) {
+                // A transient focus callback can precede the call-mode event.
+                // Capture once, then let either enabled policy authorize resume.
+                if (playing && engine != null && ticket == null)
+                    ticket = ResumeTicket(WeakReference(engine), id, epoch)
+                if (allowResume && ticket != null) resumeAuthorized = true
+            }
             ++retryGeneration
             LogUtil.info("音频协调: 中断 $reason playing=$playing resume=$allowResume")
             LogUtil.incr("audioFocusInterruption")
@@ -292,8 +303,10 @@ internal object AudioFocusCoordinator {
     private fun gained(reason: String) {
         if (!enabled || hardInterrupted()) return
         val resume = ticket
+        val authorized = resumeAuthorized
         ticket = null
-        if (permanentlyInterrupted || resume == null) {
+        resumeAuthorized = false
+        if (permanentlyInterrupted || !authorized || resume == null) {
             LogUtil.info("音频协调: $reason 等待用户主动播放")
             return
         }
@@ -320,6 +333,7 @@ internal object AudioFocusCoordinator {
             return false
         if (callActive || externalActive) return false
         ticket = null
+        resumeAuthorized = false
         ++interruptionGeneration
         if (pauseFocus) {
             val existing = nativeRequest
@@ -339,7 +353,7 @@ internal object AudioFocusCoordinator {
                 } catch (_: Throwable) { AudioManager.AUDIOFOCUS_REQUEST_FAILED }
                 if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return false
                 focusLost = false
-            } else if (!hasObservableNativeFocus() && (own == null || focusLost) && !acquire()) {
+            } else if (existing == null && (own == null || focusLost) && !acquire()) {
                 return false
             }
         }
@@ -349,6 +363,7 @@ internal object AudioFocusCoordinator {
     }
     fun userPaused() {
         ticket = null
+        resumeAuthorized = false
         manualHold = true
         permanentlyInterrupted = true
         ++retryGeneration
@@ -379,7 +394,7 @@ internal object AudioFocusCoordinator {
                 return
             }
         }
-        if (!pauseFocus || own != null || hasObservableNativeFocus()) return
+        if (!pauseFocus || own != null || nativeRequest != null) return
         val id = NativePlaybackSession.videoId(engine)
         if (lastRequestEngine.get() === engine && lastRequestVideo == id) return
         lastRequestEngine = WeakReference(engine)
@@ -388,17 +403,20 @@ internal object AudioFocusCoordinator {
         fun attempt() {
             if (generation != retryGeneration || interrupted() || !enabled || !pauseFocus ||
                 SystemMediaBridge.audioFocusEngine() !== engine ||
-                !NativePlaybackSession.playing(engine) || own != null || hasObservableNativeFocus()) return
+                !NativePlaybackSession.playing(engine) || own != null || nativeRequest != null) return
             // Do not steal focus with a new background request.
             if (activity?.hasWindowFocus() != true) return
             if (acquire()) ++retryGeneration
         }
         attempt()
         for (delay in longArrayOf(250L, 800L, 1800L, 3500L)) main.postDelayed({ attempt() }, delay)
+        main.postDelayed({
+            if (generation == retryGeneration && own == null && nativeRequest == null) {
+                lastRequestEngine.clear()
+                LogUtil.warn("音频协调: 补充焦点重试结束，等待新的真实播放事件")
+            }
+        }, 4000L)
     }
-
-    private fun hasObservableNativeFocus(): Boolean =
-        nativeRequest != null && nativeListener != null && focusOwnerObserved
 
     private fun registerGranted(request: Any, listener: Any?, gain: Int, observable: Boolean) {
         synchronized(focusLock) {
@@ -410,10 +428,12 @@ internal object AudioFocusCoordinator {
             nativeListener = listener
             nativeLegacyGain = gain
             focusOwnerObserved = observable
+            if (!observable) LogUtil.warn("音频协调: 原生焦点已获批但回调不可观察；不抢占原生焦点")
         }
     }
 
     private fun unregisterGranted(request: Any?) {
+        if (request == null) return
         val changed = synchronized(focusLock) {
             grantedClients.remove(request)
             if (nativeRequest !== request) false
@@ -435,7 +455,7 @@ internal object AudioFocusCoordinator {
     fun onEngineEnded(engine: Any, action: String) {
         if (!enabled) return
         if (action == "stop" || action.startsWith("release")) {
-            if (ticket?.engine?.get() === engine) ticket = null
+            if (ticket?.engine?.get() === engine) { ticket = null; resumeAuthorized = false }
             if (lastRequestEngine.get() === engine) lastRequestEngine.clear()
             if (SystemMediaBridge.audioFocusEngine() === engine || SystemMediaBridge.audioFocusEngine() == null) releaseOwn()
         } else if (action == "pause") {
@@ -453,6 +473,7 @@ internal object AudioFocusCoordinator {
     fun stop() {
         releaseOwn()
         ticket = null
+        resumeAuthorized = false
         lastRequestEngine.clear()
         ++retryGeneration
     }
@@ -470,7 +491,7 @@ internal object AudioFocusCoordinator {
                 module.hook(method).setId("xhAudioFocusListener_" + method.declaringClass.name.hashCode())
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
-                        if (nativeListener === chain.thisObject) {
+                        if (focusOwnerObserved && nativeListener === chain.thisObject) {
                             val change = chain.getArg(0) as? Int
                             if (change != null) onFocus(change, "native")
                         }
@@ -526,12 +547,12 @@ internal object AudioFocusCoordinator {
                     val observable = observeListener(module, listener)
                     val result = chain.proceed()
                     if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                        if (own != null && observable) releaseOwn()
+                        if (own != null) releaseOwn()
                         registerGranted(request, listener, AudioManager.AUDIOFOCUS_GAIN, observable)
                         // A new granted request is evidence of real focus gain.
                         // Keep manualHold; a background request alone does not
                         // authorize automatic playback after an interruption.
-                        if (!hardInterrupted() && !manualHold) focusLost = false
+                        focusLost = false // grant is real; manualHold still blocks background recovery
                         LogUtil.info("音频协调: 原生媒体焦点已确认 observable=$observable")
                     }
                     result
@@ -547,9 +568,9 @@ internal object AudioFocusCoordinator {
                     val observable = observeListener(module, listener)
                     val result = chain.proceed()
                     if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED && listener != null) {
-                        if (own != null && observable) releaseOwn()
+                        if (own != null) releaseOwn()
                         registerGranted(listener, listener, chain.getArg(2) as? Int ?: AudioManager.AUDIOFOCUS_GAIN, observable)
-                        if (!hardInterrupted() && !manualHold) focusLost = false
+                        focusLost = false // grant is real; manualHold still blocks background recovery
                     }
                     result
                 })

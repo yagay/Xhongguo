@@ -28,3 +28,8 @@ VoIP, media apps, notifications, focus denied/reacquisition, media card off,
 native engine replacement, user pause, auto-next during call; both resume toggles;
 system scope off/on. Look for 音频协调 and XhongguoAudio logs. Device validation
 is required; static review cannot establish real ColorOS behavior.
+
+A transient focus loss can precede the ringtone/mode callback: the first active
+session is captured once and either enabled temporary resume policy may authorize
+it. Unobservable but granted native focus is not replaced by a competing client;
+the optional system listener covers such cases where supported.
