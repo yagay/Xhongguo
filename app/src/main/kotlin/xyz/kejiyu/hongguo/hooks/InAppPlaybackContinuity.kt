@@ -34,7 +34,8 @@ internal object InAppPlaybackContinuity {
     }
 
     private fun playerPage(activity: Activity?) =
-        activity?.javaClass?.name in setOf(MAIN, SERIES)
+        NativeBusinessResolver.page(activity, NativePlaybackSession.engine()) !=
+            NativeBusinessResolver.Page.UNKNOWN
 
     private fun playing(engine: Any?) = engine != null &&
         NativeMetadataAccess.call(engine, "isReleased") != true &&
@@ -96,7 +97,11 @@ internal object InAppPlaybackContinuity {
             intent.resolveActivity(activity.packageManager)
         }.getOrNull() ?: return
         if (target.packageName != activity.packageName) return
-        if (target.className in setOf(MAIN, SERIES)) {
+        val targetType = runCatching {
+            Class.forName(target.className, false, activity.classLoader)
+        }.getOrNull()
+        if (NativeBusinessResolver.knownPage(targetType) != NativeBusinessResolver.Page.UNKNOWN ||
+            target.className in setOf(MAIN, SERIES)) {
             // This must happen before the first feed pause and series resume.
             clear("native-player-launch")
             playerNavigationUntil = SystemClock.uptimeMillis() + 5000L
@@ -108,10 +113,14 @@ internal object InAppPlaybackContinuity {
         // Limit to explicit browse destinations; unknown playback routes
         // are deliberately untouched.
         val name = target.className.substringAfterLast('.').lowercase()
-        if (listOf("search", "detail", "setting", "favorite", "history", "profile", "mine")
-                .none { name.contains(it) }) return
-        if (listOf("player", "playactivity", "fullscreen", "shortseries", "videoactivity")
-                .any { name.contains(it) }) return
+        if (targetType == null ||
+            listOf("search", "detail", "setting", "favorite", "history", "profile", "mine")
+                .none { name.contains(it) } ||
+            listOf("player", "playactivity", "fullscreen", "shortseries", "videoactivity")
+                .any { name.contains(it) }) {
+            clear("unknown-or-player-route")
+            return
+        }
         begin(activity, "activity:" + target.className.substringAfterLast('.'))
     }
 

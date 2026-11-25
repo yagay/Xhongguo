@@ -116,7 +116,8 @@ internal object HomeFeedMediaInfo {
     }
 
     fun read(activity: Activity?, engine: Any?): FullSeriesMediaInfo.Info {
-        if (activity?.javaClass?.name != PAGE ||
+        if (activity == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.FEED ||
             Looper.myLooper() != Looper.getMainLooper())
             return FullSeriesMediaInfo.Info()
         val root = try { activity.window?.decorView }

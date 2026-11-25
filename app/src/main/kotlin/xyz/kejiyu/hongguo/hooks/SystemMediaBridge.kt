@@ -414,8 +414,8 @@ internal object SystemMediaBridge {
     private fun resolveCurrentMedia(
         activity: Activity?, engine: Any, reason: String, includeUi: Boolean
     ): FullSeriesMediaInfo.Info {
-        val isFullSeries = activity?.javaClass?.name ==
-            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+        val isFullSeries = NativeBusinessResolver.page(activity, engine) ==
+            NativeBusinessResolver.Page.SERIES
         val full = if (isFullSeries) FullSeriesMediaInfo.read(activity, engine)
             else FullSeriesMediaInfo.Info()
         val home = if (!isFullSeries) HomeFeedMediaInfo.read(activity, engine)
@@ -513,11 +513,9 @@ internal object SystemMediaBridge {
         } catch (_: Throwable) { null }
         if (videoId != null && currentEngineVideoIdentity != null &&
             videoId != currentEngineVideoIdentity) {
-            val incoming = when (activity?.javaClass?.name) {
-                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ->
-                    FullSeriesMediaInfo.read(activity, engine)
-                "com.dragon.read.pages.main.MainFragmentActivity" ->
-                    HomeFeedMediaInfo.read(activity, engine)
+            val incoming = when (NativeBusinessResolver.page(activity, engine)) {
+                NativeBusinessResolver.Page.SERIES -> FullSeriesMediaInfo.read(activity, engine)
+                NativeBusinessResolver.Page.FEED -> HomeFeedMediaInfo.read(activity, engine)
                 else -> FullSeriesMediaInfo.observedForEngine(engine)
             }
             val sameSeries = incoming.seriesId != null &&
@@ -546,10 +544,10 @@ internal object SystemMediaBridge {
 
     private fun captureVisibleMediaInfo(activity: Activity?) {
         if (!enabled || activity == null) return
-        val isFullSeries = activity.javaClass.name ==
-            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
-        if (!isFullSeries && !activity.hasWindowFocus()) return
         val engine = videoEngine.get() ?: return
+        val isFullSeries = NativeBusinessResolver.page(activity, engine) ==
+            NativeBusinessResolver.Page.SERIES
+        if (!isFullSeries && !activity.hasWindowFocus()) return
         resolveCurrentMedia(activity, engine, "visible", includeUi = true)
     }
 
@@ -659,11 +657,9 @@ internal object SystemMediaBridge {
                 // the SAME drama. Preserve its official poster and title
                 // until a native series ID actually changes.
                 val activity = foregroundActivity.get()
-                val incomingSeries = when (activity?.javaClass?.name) {
-                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity" ->
-                        FullSeriesMediaInfo.read(activity, candidate).seriesId
-                    "com.dragon.read.pages.main.MainFragmentActivity" ->
-                        HomeFeedMediaInfo.read(activity, candidate).seriesId
+                val incomingSeries = when (NativeBusinessResolver.page(activity, candidate)) {
+                    NativeBusinessResolver.Page.SERIES -> FullSeriesMediaInfo.read(activity, candidate).seriesId
+                    NativeBusinessResolver.Page.FEED -> HomeFeedMediaInfo.read(activity, candidate).seriesId
                     else -> FullSeriesMediaInfo.observedForEngine(candidate).seriesId
                 }
                 val sameSeries = incomingSeries != null &&
@@ -715,9 +711,8 @@ internal object SystemMediaBridge {
         LogUtil.incr("systemMediaNativeEngineCommand")
         // Track the actual active engine's pause on BOTH player pages.
         // Recovery is allowed only after ActivityManager confirms background.
-        val playerPage = foregroundActivity.get()?.javaClass?.name
-        if (action == "pause" && (playerPage?.contains("MainFragmentActivity") == true ||
-            playerPage?.contains("ShortSeriesActivity") == true)) {
+        val playerPage = NativeBusinessResolver.page(foregroundActivity.get(), candidate)
+        if (action == "pause" && playerPage != NativeBusinessResolver.Page.UNKNOWN) {
             lastLifecyclePauseAt = SystemClock.uptimeMillis()
             lastLifecyclePauseEngine = WeakReference(candidate)
             lastLifecyclePauseWasPlaying = knownPlaying
@@ -810,14 +805,13 @@ internal object SystemMediaBridge {
     fun onActivityPaused(activity: Activity?) {
         if (!enabled || activity == null) return
         if (activity.packageName != appContext?.packageName) return
-        val isPlayerActivity = activity.javaClass.name.contains("MainFragmentActivity") ||
-            activity.javaClass.name.contains("ShortSeriesActivity")
+        val isPlayerActivity = NativeBusinessResolver.page(activity, videoEngine.get()) !=
+            NativeBusinessResolver.Page.UNKNOWN
         if (isPlayerActivity) lastPlayerActivityPauseAt = SystemClock.uptimeMillis()
         discoverPlayingVideo(activity, "beforeActivityPause")
         captureVisibleMediaInfo(activity)
         val name = activity.javaClass.simpleName
-        val isPlayerPage = activity.javaClass.name.contains("MainFragmentActivity") ||
-            activity.javaClass.name.contains("ShortSeriesActivity")
+        val isPlayerPage = isPlayerActivity
         val recentUserLeave = isPlayerPage &&
             SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..3000L &&
             lastUserLeaveWasPlaying &&

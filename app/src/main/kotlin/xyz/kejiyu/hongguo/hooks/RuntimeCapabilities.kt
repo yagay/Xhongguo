@@ -71,9 +71,11 @@ internal object RuntimeCapabilities {
             Result("TTVideoEngine video identity",
                 hasMethod(engine, "getVideoID", 0), "TTVideoEngine#getVideoID"),
             Result("Native playback resolution",
-                resolution != null && (hasMethod(videoContext, "setResolution") ||
-                    hasMethod(engine, "setResolution")),
-                "VideoShop/TTVideoEngine#setResolution"),
+                resolution != null && hasMethod(engine, "getVideoModel", 0) &&
+                    hasMethod(engine, "getCurrentResolution", 0) &&
+                    hasMethod(engine, "findMaxQualityResolution", 2) &&
+                    hasMethod(engine, "configResolution", 1),
+                "TTVideoEngine model/current/native max selector/configResolution"),
             Result("Native speed control",
                 hasMethod(engine, "setPlaybackParams") ||
                     hasMethod(engine, "setSpeed") ||
@@ -82,7 +84,7 @@ internal object RuntimeCapabilities {
             Result("Full-series current episode",
                 seriesActivity != null && hasMethod(seriesFragment, "getCurrentPosition", 0) &&
                     hasMethod(seriesFragment, "getDataList", 0),
-                "ShortSeriesSingleFragment#getCurrentPosition/getDataList"),
+                "ShortSeriesSingleFragment#getCurrentPosition/getDataList; runtime structural fallback"),
             Result("Official series title/poster",
                 hasField(detail, "episodesId") &&
                     hasField(detail, "episodesTitle") &&
