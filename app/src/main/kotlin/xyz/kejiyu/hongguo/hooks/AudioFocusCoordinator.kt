@@ -37,10 +37,11 @@ internal object AudioFocusCoordinator {
     @Volatile private var own: AudioFocusRequest? = null
     @Volatile private var nativeRequest = WeakReference<Any>(null)
     @Volatile private var nativeListener = WeakReference<Any>(null)
+    @Volatile private var nativeLegacyGain = AudioManager.AUDIOFOCUS_GAIN
     private val builderListeners = WeakHashMap<Any, WeakReference<Any>>()
     private val requestListeners = WeakHashMap<Any, WeakReference<Any>>()
     private val hooked = HashSet<Method>()
-    private val internal = ThreadLocal<Boolean>()
+    private val internalRequest = ThreadLocal<Boolean>()
     private var lastRequestEngine = WeakReference<Any>(null)
     private var lastRequestVideo: String? = null
     private data class ResumeTicket(val engine: WeakReference<Any>, val video: String?, val epoch: Long)
@@ -114,10 +115,10 @@ internal object AudioFocusCoordinator {
     private fun releaseOwn() {
         val previous = own ?: return
         own = null
-        internal.set(true)
+        internalRequest.set(true)
         try { manager?.abandonAudioFocusRequest(previous) }
         catch (e: Throwable) { LogUtil.warn("音频协调: 释放补充焦点失败 " + e) }
-        finally { internal.remove() }
+        finally { internalRequest.remove() }
     }
     private fun acquire(): Boolean {
         if (!enabled || !pauseFocus || callActive || Build.VERSION.SDK_INT < 26) return false
@@ -138,8 +139,8 @@ internal object AudioFocusCoordinator {
                 .setOnAudioFocusChangeListener(listener, main)
                 .build()
             own = request
-            internal.set(true)
-            val result = try { audio.requestAudioFocus(request) } finally { internal.remove() }
+            internalRequest.set(true)
+            val result = try { audio.requestAudioFocus(request) } finally { internalRequest.remove() }
             if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 own = null
                 LogUtil.warn("音频协调: 补充焦点未获批准 result=$result")
@@ -213,17 +214,43 @@ internal object AudioFocusCoordinator {
             return false
         if (callActive) return false
         ticket = null
-        if (focusLost && pauseFocus && !acquire()) return false
+        if (pauseFocus) {
+            val existing = nativeRequest.get()
+            if (focusLost && existing != null) {
+                // An explicit user action can re-request the original focus
+                // client. Do not make a competing client steal its focus.
+                val audio = manager ?: return false
+                val result = try {
+                    when (existing) {
+                        is AudioFocusRequest -> audio.requestAudioFocus(existing)
+                        is AudioManager.OnAudioFocusChangeListener -> {
+                            @Suppress("DEPRECATION")
+                            audio.requestAudioFocus(existing, AudioManager.STREAM_MUSIC, nativeLegacyGain)
+                        }
+                        else -> AudioManager.AUDIOFOCUS_REQUEST_FAILED
+                    }
+                } catch (_: Throwable) { AudioManager.AUDIOFOCUS_REQUEST_FAILED }
+                if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return false
+                focusLost = false
+            } else if (existing == null && (own == null || focusLost) && !acquire()) {
+                return false
+            }
+        }
         manualHold = false
         return true
     }
     fun userPaused() {
         ticket = null
         manualHold = true
+        lastRequestEngine.clear()
+        lastRequestVideo = null
         releaseOwn()
     }
     fun onPlaying(engine: Any, activity: Activity?) {
         if (!enabled) return
+        if (pauseCall) manager?.let { audio ->
+            onMode(runCatching { audio.mode }.getOrDefault(AudioManager.MODE_NORMAL))
+        }
         if (interrupted()) {
             // A confirmed new foreground play after gain is allowed. A native
             // background auto-resume after interruption is not module recovery.
@@ -329,7 +356,7 @@ internal object AudioFocusCoordinator {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     val request = chain.getArg(0) as? AudioFocusRequest
-                    if (internal.get() == true || request == null ||
+                    if (internalRequest.get() == true || request == null ||
                         request.audioAttributes.usage != AudioAttributes.USAGE_MEDIA) return@Hooker chain.proceed()
                     val listener = listenerFor(request)
                     observeListener(module, listener)
@@ -339,6 +366,10 @@ internal object AudioFocusCoordinator {
                     if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                         nativeRequest = WeakReference(request)
                         nativeListener = WeakReference(listener)
+                        // A new granted request is evidence of real focus gain.
+                        // Keep manualHold; a background request alone does not
+                        // authorize automatic playback after an interruption.
+                        focusLost = false
                         LogUtil.info("音频协调: 原生媒体焦点已确认 listener=" + (listener != null))
                     }
                     result
@@ -349,7 +380,7 @@ internal object AudioFocusCoordinator {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
                     val listener = chain.getArg(0)
-                    if (internal.get() == true || chain.getArg(1) != AudioManager.STREAM_MUSIC)
+                    if (internalRequest.get() == true || chain.getArg(1) != AudioManager.STREAM_MUSIC)
                         return@Hooker chain.proceed()
                     observeListener(module, listener)
                     if (own != null) releaseOwn()
@@ -357,6 +388,8 @@ internal object AudioFocusCoordinator {
                     if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED && listener != null) {
                         nativeRequest = WeakReference(listener)
                         nativeListener = WeakReference(listener)
+                        nativeLegacyGain = chain.getArg(2) as? Int ?: AudioManager.AUDIOFOCUS_GAIN
+                        focusLost = false
                     }
                     result
                 })
@@ -366,7 +399,7 @@ internal object AudioFocusCoordinator {
                 .intercept(Hooker { chain ->
                     val request = chain.getArg(0)
                     val result = chain.proceed()
-                    if (internal.get() != true && nativeRequest.get() === request) {
+                    if (internalRequest.get() != true && nativeRequest.get() === request) {
                         nativeRequest.clear()
                         nativeListener.clear()
                     }
@@ -378,7 +411,7 @@ internal object AudioFocusCoordinator {
                 .intercept(Hooker { chain ->
                     val listener = chain.getArg(0)
                     val result = chain.proceed()
-                    if (internal.get() != true && nativeListener.get() === listener) {
+                    if (internalRequest.get() != true && nativeListener.get() === listener) {
                         nativeRequest.clear()
                         nativeListener.clear()
                     }
