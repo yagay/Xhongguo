@@ -328,7 +328,7 @@ object Hooks {
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
                         initPrefs(context)
-                        if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore("settings-observer-disabled")
+                        if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
                         if (isShoppingMallDisabled()) {
                             gNextShoppingTabScanAt = 0L
                             mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
@@ -1674,7 +1674,7 @@ object Hooks {
         LogUtil.incr("inAppMiniTabRecognized")
         if (tab == "首页") {
             if (InAppMiniPlayer.activeFor(act) && InAppMiniPlayer.ownerIs(act))
-                InAppMiniPlayer.restore("feed-home-tab")
+                InAppMiniPlayer.restore()
             return
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
@@ -2692,25 +2692,6 @@ object Hooks {
         if (!force && now < gNextMineUiScanAt) return
         gNextMineUiScanAt = now + 750L
         MineUiCleaner.scan(gCurrentActivity)
-    }
-
-    private fun scheduleMiniEntry(activity: Activity?) {
-        if (activity == null) return
-        InAppMiniPlayer.rememberMainPage(activity)
-        if (activity.javaClass.name !=
-            "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") return
-        for (delay in longArrayOf(0L, 350L, 1100L, 2200L)) {
-            mainHandler.postDelayed({
-                if (!activity.isFinishing && !activity.isDestroyed &&
-                    activity.hasWindowFocus()) {
-                    try {
-                        InAppMiniPlayer.installSeriesEntry(activity) { findLiveVideoHost(activity) }
-                    } catch (e: Throwable) {
-                        LogUtil.warn("应用内小窗: 全集入口检测异常 " + e.javaClass.simpleName)
-                    }
-                }
-            }, delay)
-        }
     }
 
     private fun scanAllWindows() {
@@ -3910,7 +3891,7 @@ object Hooks {
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn
-                if (!it) InAppMiniPlayer.restore("mini-setting-disabled")
+                if (!it) InAppMiniPlayer.restore()
             }, "in_app_mini_player")
             addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
                 gDisableShoppingMall = it
@@ -5435,9 +5416,7 @@ object Hooks {
                     val result = chain.proceed()
                     if (focused) {
                         val a = chain.thisObject as? Activity
-                        scheduleMiniEntry(a)
                         try {
-                            InAppMiniPlayer.onBeforeActivityResume(a)
                             if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                             if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                         } catch (_: Exception) {}
@@ -5485,10 +5464,6 @@ object Hooks {
                 )) {
                     ham(c, methodName, "seriesWindow_${classIndex}_$methodName") { chain ->
                         val result = chain.proceed()
-
-                        if (methodName == "onCreate" || methodName == "onResume" ||
-                            (methodName == "onWindowFocusChanged" && chain.getArg(0) == true))
-                            scheduleMiniEntry(chain.thisObject as? Activity)
 
                         val shouldRefreshLayout = methodName == "onConfigurationChanged" ||
                             methodName == "onMultiWindowModeChanged" ||
@@ -5884,29 +5859,6 @@ object Hooks {
                         method.name + " Hook 失败: " + e.message)
                 }
             }
-            // Only defer native output changes while an explicit series
-            // mini owns a valid replacement Surface. Normal playback passes.
-            var seriesOutputHooks = 0
-            for ((index, method) in engine.declaredMethods.filter {
-                it.returnType == Void.TYPE && it.parameterCount > 0 &&
-                    it.name in setOf("setSurface", "setSurfaceSync",
-                        "setSurfaceHolder", "setSurfaceHolderSync") &&
-                    it.parameterTypes[0] in setOf(android.view.Surface::class.java,
-                        android.view.SurfaceHolder::class.java)
-            }.withIndex()) {
-                try {
-                    module.hook(method).setId("xhSeriesMiniOutput_$index")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            if (InAppMiniPlayer.keepSeriesOutput(chain.thisObject, chain.getArg(0))) null
-                            else chain.proceed()
-                        })
-                    seriesOutputHooks++
-                } catch (e: Throwable) {
-                    LogUtil.warn("应用内小窗: 全集输出 Hook 失败 " + e.javaClass.simpleName)
-                }
-            }
-            LogUtil.info("应用内小窗: 全集入口 v3 touch-routing / Surface hooks=$seriesOutputHooks")
             LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
         } catch (e: Throwable) {
             LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
@@ -6673,8 +6625,6 @@ object Hooks {
                 .intercept(Hooker { chain ->
                     val ev = chain.getArg(0) as? android.view.MotionEvent
                     val activity = chain.thisObject as? Activity
-                    if (InAppMiniPlayer.handleSeriesEntryTouch(activity, ev))
-                        return@Hooker true
                     try { observeNativeTabTouch(ev, activity) } catch (e: Throwable) {
                         LogUtil.warn("应用内小窗触摸导航检测失败: " + e.message)
                     }
@@ -6710,11 +6660,9 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             val activity = chain.thisObject as? Activity
-                            val event = chain.getArg(0) as? android.view.MotionEvent
-                            if (InAppMiniPlayer.handleSeriesEntryTouch(activity, event))
-                                return@Hooker true
                             try {
-                                observeVideoLongPress(event, activity)
+                                observeVideoLongPress(chain.getArg(0) as? android.view.MotionEvent,
+                                    activity)
                             } catch (e: Throwable) {
                                 LogUtil.warn("全集长按触摸观察异常: " + e.message)
                             }
@@ -6739,7 +6687,6 @@ object Hooks {
                     if (a != null) {
 
                         gCurrentActivity = a
-                        InAppMiniPlayer.rememberMainPage(a)
                         appCtx = a.applicationContext
                         refreshTargetVersionFromActivity(a)
                         initPrefs(a.applicationContext)
@@ -6773,7 +6720,6 @@ object Hooks {
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
                 gCurrentActivity = a
-                scheduleMiniEntry(a)
 
                 scheduleSettingsEntryInjection(a)
 
@@ -6792,10 +6738,6 @@ object Hooks {
                         ensureReceiver(a.applicationContext)
                     }
                 } catch (_: Exception) {}
-                try { InAppMiniPlayer.onBeforeActivityResume(a) }
-                catch (e: Throwable) {
-                    LogUtil.warn("应用内小窗: 目标恢复前挂载失败 " + e.javaClass.simpleName)
-                }
                 val result = chain.proceed()
                 try {
                     if (a != null) {
@@ -6804,7 +6746,10 @@ object Hooks {
                         SystemMediaBridge.onActivityResumed(a, preserveBackground)
                         if (!preserveBackground) {
                             InAppMiniPlayer.onActivityResumed(a)
-                            scheduleMiniEntry(a)
+                            mainHandler.postDelayed({
+                                if (!a.isFinishing && !a.isDestroyed && gCurrentActivity === a)
+                                    InAppMiniPlayer.installSeriesEntry(a) { findLiveVideoHost(a) }
+                            }, 450L)
                         }
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
@@ -6883,7 +6828,6 @@ object Hooks {
                         try {
                             BackgroundSeriesTransitionGuard.onActivityStopped(
                                 chain.thisObject as? Activity)
-                            InAppMiniPlayer.onOwnerStopped(chain.thisObject as? Activity)
                         } catch (e: Throwable) {
                             LogUtil.warn("后台切集守护: onStop 诊断失败 " + e.message)
                         }
