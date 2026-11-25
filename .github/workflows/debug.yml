@@ -2,7 +2,7 @@ name: Debug APK
 
 on:
   push:
-    branches: [main, feature/module-settings-app]
+    branches: [main, feature/module-settings-app, experiment/native-series-mini]
   pull_request:
     branches: [main]
   workflow_dispatch:

@@ -82,6 +82,7 @@ class SettingsActivity : Activity() {
         toggle("禁用商城", "隐藏底部「商城」Tab，并阻止打开独立商城页面；不影响剧场", "disable_shopping_mall", true)
         toggle("隐藏我的快捷入口", "隐藏「福利、订单、消息」整排，保留账号、收藏和历史", "hide_mine_shortcuts", true)
         toggle("应用内小窗继续播放", "实验功能：跨应用内页面复用原播放器；整窗拖动贴边、点击控制、双击缩放；原播放页面销毁时安全退出", "in_app_mini_player")
+        toggle("全集小窗：原生容器绑定（实验）", "默认关闭，刷剧保持原方案。仅支持已分析的 7.4.2.32；失败时不强制接管播放器，建议切换后重启红果", "native_series_mini_experimental")
         toggle("系统媒体后台播放", "实验功能：使用红果原播放器，通知栏显示系统媒体卡片（播放/暂停/返回），无悬浮图标；后台仍可能受原生播放器生命周期限制", "system_media_playback")
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 

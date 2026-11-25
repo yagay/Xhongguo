@@ -20,6 +20,7 @@ object ModuleSettingsStore {
         "default_speed", "double_tap_comment", "oled_protect",
         "notification_menu", "download_limit_unlimit", "video_longpress_settings",
         "disable_shopping_mall", "in_app_mini_player", "system_media_playback",
+        "native_series_mini_experimental",
         "hide_mine_shortcuts", "hide_all_ads", "official_playback_probe"
     )
     val FLOATS = setOf("default_speed_value")

@@ -285,6 +285,8 @@ object Hooks {
         gDisableShoppingMall = prefs.getBoolean("disable_shopping_mall", true)
         gMiniPlayerOn = prefs.getBoolean("in_app_mini_player", false)
         InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn
+        NativeSeriesHost.enabled = InAppMiniPlayer.enabled &&
+            prefs.getBoolean("native_series_mini_experimental", false)
         gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
         SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
         gPlayerOn = prefs.getBoolean("player_bar", false)
@@ -5818,6 +5820,26 @@ object Hooks {
         // The real 7.3.5.x player can reach the low-level TTVideoEngine
         // without calling VideoContext.onVideoPlay, as confirmed by the new
         // diagnostic ZIP. Observe actual engine commands, not just installation.
+        try {
+            val wrapper = NativeSeriesHost.resolve(classLoader)
+            if (wrapper != null) {
+                hac(wrapper, "nativeSeriesMiniWrapper") { chain ->
+                    val result = chain.proceed()
+                    NativeSeriesHost.observe(chain.thisObject)
+                    result
+                }
+                for (name in listOf("z", "isPlaying", "resume", "getSurfaceHolder")) {
+                    ham(wrapper, name, "nativeSeriesMiniObserve_$name") { chain ->
+                        val result = chain.proceed()
+                        NativeSeriesHost.observe(chain.thisObject)
+                        result
+                    }
+                }
+                LogUtil.info("原生小窗: 包装层签名验证成功")
+            } else LogUtil.info("原生小窗: 未识别包装层，实验不可用")
+        } catch (e: Throwable) {
+            LogUtil.warn("原生小窗: 包装层观察安装失败 " + e.javaClass.simpleName)
+        }
         try {
             val engine = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
