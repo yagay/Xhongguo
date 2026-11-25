@@ -446,37 +446,30 @@ object Hooks {
     private fun applyUniversalSpeed(reason: String): Boolean {
         if (!TargetNames.isUniversal(gNames) || !defaultSpeedEnabledNow()) return false
         val activity = gCurrentActivity ?: return false
+        val engine = NativePlaybackSession.currentFor(activity) ?: return false
+        if (!NativePlaybackSession.playing(engine)) return false
         return try {
             val loader = activity.classLoader
             val klass = Class.forName(
                 "com.ss.android.videoshop.context.VideoContext", false, loader)
-            val context = try {
+            val context = runCatching {
                 klass.getMethod("getResumedVideoContext").invoke(null)
-            } catch (_: Throwable) { null } ?: klass
-                .getMethod("getVideoContext", Context::class.java)
-                .invoke(null, activity) ?: return false
-            val playing = try {
-                context.javaClass.getMethod("isPlaying").invoke(context) as? Boolean
-            } catch (_: Throwable) { null }
-            if (playing != true) return false
+            }.getOrNull() ?: return false
+            if (!NativePlaybackSession.matches(context, engine)) return false
             val ptype = Class.forName("com.ss.ttm.player.PlaybackParams", false, loader)
-            val existing = try {
-                context.javaClass.getMethod("getPlayBackParams").invoke(context)
-            } catch (_: Throwable) { null }
-            val params = existing ?: ptype.getDeclaredConstructor().newInstance()
-            val old = try {
-                (ptype.getMethod("getSpeed").invoke(params) as? Number)?.toFloat()
-            } catch (_: Throwable) { null }
-            if (old != null && kotlin.math.abs(old - gDefaultSpeed) < 0.005f)
-                return true
+            // Preserve native pitch and fallback parameters; never change a
+            // different context's speed or fabricate unavailable parameters.
+            val params = klass.getMethod("getPlayBackParams").invoke(context) ?: return false
+            val old = (ptype.getMethod("getSpeed").invoke(params) as? Number)?.toFloat()
+            if (old != null && kotlin.math.abs(old - gDefaultSpeed) < 0.005f) return true
+            if (NativePlaybackSession.currentFor(activity) !== engine) return false
             ptype.getMethod("setSpeed", java.lang.Float.TYPE).invoke(params, gDefaultSpeed)
-            context.javaClass.getMethod("setPlayBackParams", ptype)
-                .invoke(context, params)
+            klass.getMethod("setPlayBackParams", ptype).invoke(context, params)
             LogUtil.info("通用默认倍速: ${formatSpeed(gDefaultSpeed)} source=$reason")
             LogUtil.incr("defaultSpeedUniversalApply")
             true
-        } catch (e: Throwable) {
-            LogUtil.debug("通用默认倍速暂不可用: " + e.javaClass.simpleName)
+        } catch (ex: Throwable) {
+            LogUtil.debug("通用默认倍速暂不可用: " + ex.javaClass.simpleName)
             false
         }
     }
@@ -493,11 +486,16 @@ object Hooks {
         if (Looper.myLooper() == Looper.getMainLooper()) run.run() else mainHandler.post(run)
     }
 
+    private var speedScheduleGeneration = 0L
     private fun scheduleDefaultSpeedApply(reason: String) {
         if (!defaultSpeedEnabledNow()) return
-        mainHandler.post { applyDefaultSpeedNow("$reason/0") }
-        mainHandler.postDelayed({ applyDefaultSpeedNow("$reason/120") }, 120L)
-        mainHandler.postDelayed({ applyDefaultSpeedNow("$reason/420") }, 420L)
+        val ticket = ++speedScheduleGeneration
+        val epoch = NativePlaybackSession.generation()
+        for (delay in longArrayOf(0L, 120L, 420L)) mainHandler.postDelayed({
+            if (ticket == speedScheduleGeneration &&
+                (!TargetNames.isUniversal(gNames) || NativePlaybackSession.generation() == epoch))
+                applyDefaultSpeedNow("$reason/$delay")
+        }, delay)
     }
 
     private fun saveDownloadLimitValues(episode: Int, series: Int, total: Int) {
@@ -2587,6 +2585,31 @@ object Hooks {
         }, 60L)
     }
 
+    private fun publishNativeEngine(engine: Any, action: String, activity: Activity?) {
+        try { InAppPlaybackContinuity.observeEngine(engine, action, activity) }
+        catch (ex: Throwable) { LogUtil.warn("持续播放: 观察异常 " + ex) }
+        try { InAppMiniPlayer.onEngineCommand(engine, action, activity) }
+        catch (ex: Throwable) { LogUtil.warn("小窗: 观察异常 " + ex) }
+        try { SystemMediaBridge.onNativeEngineCommand(engine, action) }
+        catch (ex: Throwable) { LogUtil.warn("系统媒体: 观察异常 " + ex) }
+        if (action == "play" && TargetNames.isUniversal(gNames)) {
+            if (gCurrentActivity === activity) {
+                setVideoPaused(false, "confirmed-native-engine")
+                scheduleDefaultSpeedApply("confirmed-native-engine")
+            }
+            val generation = NativePlaybackSession.generation()
+            for (delay in longArrayOf(100L, 550L, 1500L)) mainHandler.postDelayed({
+                if (gMasterOn && gMaxQualityOn && NativePlaybackSession.engine() === engine &&
+                    NativePlaybackSession.generation() == generation)
+                    NativePlaybackQuality.apply()
+            }, delay)
+        }
+    }
+
+    private fun observeNativeEngine(engine: Any?, action: String, activity: Activity?) {
+        NativePlaybackSession.observe(engine, action, activity, { gCurrentActivity }, ::publishNativeEngine)
+    }
+
     private fun setVideoPaused(paused: Boolean, reason: String = "callback") {
         val changed = gVideoPaused != paused
         gVideoPaused = paused
@@ -3293,6 +3316,10 @@ object Hooks {
 
     private fun applyHighestToKnownEngines() {
         if (!gMasterOn || !gMaxQualityOn) return
+        if (TargetNames.isUniversal(gNames)) {
+            NativePlaybackQuality.apply()
+            return
+        }
 
         val controllers = try {
             synchronized(gControllerMaxResolution) { gControllerMaxResolution.entries.map { it.key to it.value } }
@@ -3943,9 +3970,10 @@ object Hooks {
             }, "restore_controls_pause")
 
             content.addView(sectionTitle(act, "播放与手势", p))
-            if (gNames.resolutionController.isNotBlank()) {
+            if (gNames.resolutionController.isNotBlank() || TargetNames.isUniversal(gNames)) {
                 addSwitch("默认最高画质", "播放时自动选择当前视频支持的最高画质", { gMaxQualityOn }, {
                     gMaxQualityOn = it
+                    if (!it) NativePlaybackQuality.reset()
                     if (it) mainHandler.post { applyHighestToKnownEngines() }
                 }, "max_quality")
             }
@@ -4808,7 +4836,8 @@ object Hooks {
         )
         for ((delay, allowFallback) in attempts) {
             mainHandler.postDelayed({
-                if (!a.isFinishing && isLikelySettingsActivity(a)) injectSettingsButton(a, allowFallback)
+                if (!a.isFinishing && !a.isDestroyed && gCurrentActivity === a &&
+                    isLikelySettingsActivity(a)) injectSettingsButton(a, allowFallback)
             }, delay)
         }
     }
@@ -5720,7 +5749,25 @@ object Hooks {
                             val engine = chain.getArg(0)
                             val current = NativeMetadataAccess.call(chain.thisObject, "getVideoEngine")
                             if (engine == null || current !== engine) return@ham result
-                            chain.getArg(1) as? Int
+                            val nativeState = chain.getArg(1) as? Int
+                            if (TargetNames.isUniversal(gNames)) {
+                                if (nativeState == 1) {
+                                    InAppMiniPlayer.rememberPlayingController(chain.thisObject)
+                                    SystemMediaBridge.rememberController(chain.thisObject)
+                                    observeNativeEngine(engine, "play", gCurrentActivity)
+                                } else if (nativeState == 2 &&
+                                    NativePlaybackSession.engine() === engine &&
+                                    !NativePlaybackSession.playing(engine)) {
+                                    observeNativeEngine(engine, "pause", gCurrentActivity)
+                                    mainHandler.post {
+                                        if (NativePlaybackSession.engine() === engine &&
+                                            !NativePlaybackSession.playing(engine))
+                                            setVideoPaused(true, "confirmed-controller")
+                                    }
+                                }
+                                return@ham result
+                            }
+                            nativeState
                         } else chain.args.lastOrNull { it is Int } as? Int
                         when (state) {
                             1 -> {
@@ -5870,27 +5917,14 @@ object Hooks {
                                 return@Hooker null
                             }
                             val result = chain.proceed()
-                            if (method.name == "start" || method.name == "release") {
-                                // New methods are read-only diagnostics; no synthetic transport.
-                                LogUtil.info("Hook审计: TTVideoEngine." + method.name +
-                                    " engine=" + System.identityHashCode(chain.thisObject) +
-                                    " state=" + NativeMetadataAccess.call(chain.thisObject, "getPlaybackState"))
-                            } else {
-                                try {
-                                    InAppPlaybackContinuity.observeEngine(chain.thisObject, method.name, gCurrentActivity)
-                                } catch (e: Throwable) {
-                                    LogUtil.warn("持续播放: 引擎观察异常 " + method.name + ": " + e)
-                                }
-                                try {
-                                    InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
-                                } catch (e: Throwable) {
-                                    LogUtil.warn("小窗: 引擎观察异常 " + method.name + ": " + e)
-                                }
-                                try {
-                                    SystemMediaBridge.onNativeEngineCommand(chain.thisObject, method.name)
-                                } catch (e: Throwable) {
-                                    LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " + method.name + ": " + e)
-                                }
+                            try {
+                                val candidate = chain.thisObject
+                                if (TargetNames.isUniversal(gNames))
+                                    observeNativeEngine(candidate, method.name, gCurrentActivity)
+                                else if (candidate != null && method.name !in setOf("start", "release"))
+                                    publishNativeEngine(candidate, method.name, gCurrentActivity)
+                            } catch (ex: Throwable) {
+                                LogUtil.warn("播放会话: 原生事件观察失败 " + method.name + ": " + ex)
                             }
                             result
                         })
@@ -6881,6 +6915,7 @@ object Hooks {
                             InAppMiniPlayer.onActivityClosed(activity)
                             SystemMediaBridge.onActivityDestroyed(activity)
                             InAppPlaybackContinuity.onDestroyed(activity)
+                            NativePlaybackSession.onDestroyed(activity)
                         }
                         chain.proceed()
                     })

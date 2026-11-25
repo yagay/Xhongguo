@@ -69,7 +69,10 @@ internal object InAppPlaybackContinuity {
     private fun begin(activity: Activity, reason: String) {
         if (!enabled || !playerPage(activity) || activity.isFinishing || activity.isDestroyed ||
             SystemClock.uptimeMillis() < playerNavigationUntil) return
-        val shared = SystemMediaBridge.currentMiniEngine(activity)?.takeIf { playing(it) }
+        val confirmed = NativePlaybackSession.engine()
+        if (confirmed != null && NativePlaybackSession.currentFor(activity) !== confirmed) return
+        val shared = (NativePlaybackSession.currentFor(activity) ?: SystemMediaBridge.currentMiniEngine(activity))
+            ?.takeIf { playing(it) }
         val local = engineRef.get()?.takeIf { ownerRef.get() === activity && playing(it) }
         if (shared != null && local != null && shared !== local) return
         val engine = shared ?: local ?: return

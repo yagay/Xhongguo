@@ -652,7 +652,7 @@ internal object SystemMediaBridge {
      */
     fun onNativeEngineCommand(candidate: Any?, action: String) {
         if (!enabled || candidate == null) return
-        if (candidate.javaClass.name != "com.ss.ttvideoengine.TTVideoEngine") return
+        if (!NativePlaybackSession.isEngine(candidate)) return
         if (action == "play") {
             if (videoEngine.get() !== candidate) {
                 // Switching episodes can replace TTVideoEngine even within
@@ -901,6 +901,8 @@ internal object SystemMediaBridge {
     /** Called by the exact public VideoShop callbacks, not by obfuscated holder IDs. */
     fun onNativeVideoEvent(candidate: Any?, event: String, expectedPlaying: Boolean?) {
         if (!enabled || candidate == null) return
+        val active = NativePlaybackSession.engine()
+        if (active != null && !NativePlaybackSession.matches(candidate, active)) return
         rememberVideoContext(candidate)
         rememberLayer(candidate)
         rememberController(candidate)
@@ -922,6 +924,8 @@ internal object SystemMediaBridge {
         for (delay in longArrayOf(160L, 650L)) {
             handler.postDelayed({
                 if (!enabled) return@postDelayed
+                val active = NativePlaybackSession.engine()
+                if (active != null && !NativePlaybackSession.matches(candidate, active)) return@postDelayed
                 val actual = nativeIsPlaying(candidate)
                 LogUtil.info("系统媒体: 原生播放探测 $reason delay=$delay" +
                     " isPlaying=" + (actual?.toString() ?: "unknown"))
@@ -932,6 +936,12 @@ internal object SystemMediaBridge {
 
     private fun nativeIsPlaying(candidate: Any?): Boolean? {
         if (candidate == null) return null
+        if (NativePlaybackSession.isEngine(candidate))
+            return when (NativePlaybackSession.state(candidate)) {
+                1 -> true
+                0, 2, 3 -> false
+                else -> null
+            }
         val obj = if (candidate.javaClass.name ==
             "com.ss.android.videoshop.mediaview.LayerHostMediaLayout") {
             try {
@@ -948,6 +958,7 @@ internal object SystemMediaBridge {
     }
 
     private fun activeNativePlayer(): Any? {
+        NativePlaybackSession.engine()?.let { return it }
         for (c in listOf(videoContext.get(), controller.get(), layer.get())) {
             if (nativeIsPlaying(c) == true) return c
         }
@@ -979,6 +990,9 @@ internal object SystemMediaBridge {
 
     fun onNativePlayback(playing: Boolean, source: String, candidate: Any? = null) {
         if (!enabled) return
+        val confirmed = NativePlaybackSession.engine()
+        if (confirmed != null && candidate != null &&
+            !NativePlaybackSession.matches(candidate, confirmed)) return
         if (candidate != null) {
             rememberVideoContext(candidate)
             rememberController(candidate)
@@ -1263,6 +1277,8 @@ internal object SystemMediaBridge {
     internal fun currentMiniEngine(activity: Activity): Any? {
         if (!enabled || foregroundActivity.get() !== activity ||
             activity.isFinishing || activity.isDestroyed) return null
+        val confirmed = NativePlaybackSession.engine()
+        if (confirmed != null) return NativePlaybackSession.currentFor(activity)
         return videoEngine.get()
     }
 
@@ -1270,20 +1286,15 @@ internal object SystemMediaBridge {
 
     private fun requestTransport(play: Boolean, reason: String) {
         if (!enabled) return
-        val latestEngine = videoEngine.get()
-        val targets = if (latestEngine != null &&
-            SystemClock.uptimeMillis() - lastNativeEngineAt < 180_000L) {
-            listOfNotNull(latestEngine, videoContext.get(), controller.get(), layer.get())
-                .distinct()
-        } else listOfNotNull(videoContext.get(), controller.get(),
-            layer.get(), latestEngine).distinct()
+        val latestEngine = NativePlaybackSession.engine() ?: videoEngine.get()
+        // Never fall through to a stale VideoContext or a preload decoder.
+        val targets = listOfNotNull(latestEngine?.takeIf {
+            NativePlaybackSession.isEngine(it) &&
+                NativeMetadataAccess.call(it, "isReleased") != true
+        })
         LogUtil.info("系统媒体: 控制请求 reason=$reason play=$play targets=" +
             targets.joinToString { it.javaClass.simpleName })
-        val methodNames = if (play) {
-            listOf("resume", "resumeVideo", "play", "start", "startVideo")
-        } else {
-            listOf("pause", "pauseVideo", "pausePlayback")
-        }
+        val methodNames = if (play) listOf("play") else listOf("pause")
         if (!play && reason.startsWith("system") ||
             !play && reason == "notification-action") {
             backgroundPauseGuardEngine.clear()
@@ -1314,6 +1325,8 @@ internal object SystemMediaBridge {
                             updateMediaNotification(observed)
                         }
                         handler.postDelayed({
+                            val active = NativePlaybackSession.engine() ?: videoEngine.get()
+                            if (active !== target) return@postDelayed
                             val state = nativeIsPlaying(target)
                             if (state != null) onNativePlayback(state,
                                 "transport-confirm:$reason", target)

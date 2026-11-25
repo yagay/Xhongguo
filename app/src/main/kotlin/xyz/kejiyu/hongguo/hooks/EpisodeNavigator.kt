@@ -324,6 +324,9 @@ internal object EpisodeNavigator {
         if (pending !== task || !task.sawNativeStart) return false
         val activity = task.activity.get() ?: return false
         val engine = task.observedEngine.get() ?: return false
+        val confirmed = NativePlaybackSession.engine()
+        if (confirmed != null && confirmed !== engine) return false
+        if (!NativePlaybackSession.playing(engine)) return false
         val candidate = FullSeriesMediaInfo.navigationCandidate(activity, engine)
         if (candidate?.currentIndex != task.destinationIndex ||
             candidate.currentVideoId != task.destinationId) return false
@@ -359,6 +362,10 @@ internal object EpisodeNavigator {
         // These IDs need not equal SaasVideoData.vid. Require a *new*
         // native play event and independently validate current list/index.
         if (!newEngine && !changedNativeId) return false
+        // Repeated native callbacks from one target must not keep resetting
+        // the baseline; verify an actual progress delta over time.
+        if (task.sawNativeStart && task.observedEngine.get() === engine)
+            return finishIfPlayingTarget(task)
         task.sawNativeStart = true
         task.observedEngine = WeakReference(engine)
         task.initialProgressMs = playbackPosition(engine) ?: -1L

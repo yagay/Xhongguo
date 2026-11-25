@@ -138,7 +138,9 @@ internal object InAppMiniPlayer {
     fun canDock(activity: Activity): Boolean {
         if (!enabled || !onMain() || !isAlive(activity) ||
             activity.javaClass.name !in setOf(MAIN, SERIES)) return false
-        val shared = SystemMediaBridge.currentMiniEngine(activity)
+        val confirmed = NativePlaybackSession.engine()
+        if (confirmed != null && NativePlaybackSession.currentFor(activity) !== confirmed) return false
+        val shared = NativePlaybackSession.currentFor(activity) ?: SystemMediaBridge.currentMiniEngine(activity)
         val local = engineRef.get()
         val owner = engineActivity.get()
         val localAllowed = owner === activity || owner == null ||
