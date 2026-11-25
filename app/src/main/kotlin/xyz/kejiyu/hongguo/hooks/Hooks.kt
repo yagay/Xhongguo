@@ -1504,21 +1504,16 @@ object Hooks {
 
         // Holder classes change between Hongguo versions. Treat the actual
         // attached rendering tree as authoritative, not obfuscated holder IDs.
-        val ownDecor = act.window.decorView
-        fun belongsToActivity(view: View?): Boolean =
-            view != null && view.rootView === ownDecor.rootView
         for ((holder, state) in shortVideoHolderSnapshot().asReversed()) {
             if (state == 2 || !isShortVideoHolderVisible(holder)) continue
-            val root = shortVideoHolderRoot(holder)
-            if (!belongsToActivity(root)) continue
-            find(root, 0)
+            find(shortVideoHolderRoot(holder), 0)
             if (candidates.isNotEmpty()) break
         }
         if (candidates.isEmpty()) {
             find(act.window.decorView, 0)
         }
         val chosen = candidates
-            .filter { belongsToActivity(it) && it.parent is ViewGroup && it.width >= dp(act, 80f) &&
+            .filter { it.parent is ViewGroup && it.width >= dp(act, 80f) &&
                 it.height >= dp(act, 110f) }
             .maxByOrNull { it.width.toLong() * it.height.toLong() }
         LogUtil.info("应用内小窗扫描: nativeHosts=$nativeHosts" +
@@ -1673,8 +1668,7 @@ object Hooks {
             InAppMiniPlayer.activeFor(act))
         LogUtil.incr("inAppMiniTabRecognized")
         if (tab == "首页") {
-            if (InAppMiniPlayer.activeFor(act) && InAppMiniPlayer.ownerIs(act))
-                InAppMiniPlayer.restore()
+            if (InAppMiniPlayer.activeFor(act)) InAppMiniPlayer.restore()
             return
         }
         if (tab == "商城" && isShoppingMallDisabled()) return
@@ -5823,7 +5817,7 @@ object Hooks {
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
             var installed = 0
             for ((index, method) in engine.declaredMethods.filter {
-                it.name in setOf("play", "start", "pause", "stop", "releaseAsync") &&
+                it.name in setOf("play", "pause", "stop", "releaseAsync") &&
                     it.parameterCount == 0
             }.withIndex()) {
                 try {
@@ -5831,13 +5825,8 @@ object Hooks {
                         .setId("xhSystemMediaTTVideoEngine_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
-                            if (method.name in setOf("play", "start") && method.returnType == Void.TYPE &&
-                                InAppMiniPlayer.beforeEnginePlay(chain.thisObject, gCurrentActivity)) {
-                                return@Hooker null
-                            }
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
-                                !InAppMiniPlayer.ownsTransportCommand() &&
                                 (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject) ||
                                     SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject))) {
                                 return@Hooker null
@@ -5846,7 +5835,7 @@ object Hooks {
                             try {
                                 InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
                                 SystemMediaBridge.onNativeEngineCommand(
-                                    chain.thisObject, if (method.name == "start") "play" else method.name)
+                                    chain.thisObject, method.name)
                             } catch (e: Throwable) {
                                 LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " +
                                     method.name + ": " + e.message)
@@ -6744,13 +6733,7 @@ object Hooks {
                         val preserveBackground =
                             BackgroundSeriesTransitionGuard.onActivityResumed(a)
                         SystemMediaBridge.onActivityResumed(a, preserveBackground)
-                        if (!preserveBackground) {
-                            InAppMiniPlayer.onActivityResumed(a)
-                            mainHandler.postDelayed({
-                                if (!a.isFinishing && !a.isDestroyed && gCurrentActivity === a)
-                                    InAppMiniPlayer.installSeriesEntry(a) { findLiveVideoHost(a) }
-                            }, 450L)
-                        }
+                        if (!preserveBackground) InAppMiniPlayer.onActivityResumed(a)
                         if (isShoppingMallDisabled() && a.javaClass.name == SHOP_ACTIVITY) {
                             a.finish()
                         }
@@ -6772,27 +6755,6 @@ object Hooks {
                 result
             })
             LogUtil.info("  ✓ onResume")
-            // Scope Back to the existing full-series Activity. A supported
-            // explicit mini button is also available for hosts which override
-            // Android's legacy onBackPressed / predictive-back dispatcher.
-            try {
-                val series = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity", false, classLoader)
-                val back = series.methods.firstOrNull {
-                    it.name == "onBackPressed" && it.parameterCount == 0
-                }
-                if (back != null) module.hook(back).setId("xhSeriesBackMini")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        val activity = chain.thisObject as? Activity
-                        if (activity != null && gMasterOn && gMiniPlayerOn &&
-                            activity.javaClass.name == series.name &&
-                            InAppMiniPlayer.minimizeSeries(activity) { findLiveVideoHost(activity) }) null
-                        else chain.proceed()
-                    })
-            } catch (e: Throwable) {
-                LogUtil.info("应用内小窗: 全集返回 Hook 未安装 " + e.javaClass.simpleName)
-            }
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
                 // Probe before native onPause can detach the video engine.
