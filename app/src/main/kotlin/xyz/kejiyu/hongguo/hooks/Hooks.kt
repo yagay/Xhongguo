@@ -4960,11 +4960,21 @@ object Hooks {
             }
         } catch (e: Exception) { LogUtil.warn("作用域更新检测启动失败: $e") }
 
-        fun ham(clazz: Class<*>, methodName: String, hookId: String, block: (XposedInterface.Chain) -> Any?) {
-            clazz.declaredMethods.filter { it.name == methodName }.forEachIndexed { i, m -> try { module.hook(m).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
-        }
+        val bindingAudit = HookBindingAudit()
+        fun ham(clazz: Class<*>, methodName: String, hookId: String, block: (XposedInterface.Chain) -> Any?): Int =
+            bindingAudit.methods(clazz, methodName, hookId) { method, index ->
+                module.hook(method).setId("${hookId}_$index")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain -> block(chain) })
+            }
         fun hac(clazz: Class<*>, hookId: String, block: (XposedInterface.Chain) -> Any?) {
-            clazz.declaredConstructors.forEachIndexed { i, c -> try { module.hook(c).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
+            clazz.declaredConstructors.forEachIndexed { i, constructor ->
+                bindingAudit.attempt(hookId, constructor.toGenericString()) {
+                    module.hook(constructor).setId("${hookId}_$i")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain -> block(chain) })
+                }
+            }
         }
 
         if (pkg == TargetNames.CN_PACKAGE || pkg == TargetNames.OVERSEA_PACKAGE) {
@@ -5023,7 +5033,7 @@ object Hooks {
                 LogUtil.warn("  BottomTabFrameLayout 背景 Hook 未命中 | pkg=$pkg: $e")
             }
 
-            try {
+            if (!TargetNames.isUniversal(gNames)) try {
                 val maskClassName: String
                 val maskMethodName: String
                 val maskIdName: String
@@ -5083,7 +5093,8 @@ object Hooks {
 
                     else -> "Eg"
                 }
-                ham(feedClazz, layoutMethod, "feedViewportBottomMargin_${pkg.hashCode()}") { chain ->
+                val layoutHooks = if (TargetNames.isUniversal(gNames)) 0 else
+                    ham(feedClazz, layoutMethod, "feedViewportBottomMargin_${pkg.hashCode()}") { chain ->
                     val root = try { chain.getArg(0) as? View } catch (_: Throwable) { null }
                     val exactOldFeed = pkg == TargetNames.CN_PACKAGE &&
                         (gNames.profileId == "CN-7.3.1.32" || gNames.profileId == "CN-7.3.2.32")
@@ -5110,7 +5121,7 @@ object Hooks {
                     result
                 }
 
-                ham(feedClazz, "onConfigurationChanged", "feedViewportConfig_${pkg.hashCode()}") { chain ->
+                val configHooks = ham(feedClazz, "onConfigurationChanged", "feedViewportConfig_${pkg.hashCode()}") { chain ->
                     val result = chain.proceed()
                     if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                         val root = try { gCurrentActivity?.window?.decorView } catch (_: Throwable) { null }
@@ -5125,7 +5136,7 @@ object Hooks {
                     }
                     result
                 }
-                LogUtil.info("  ✓ VideoFeedTabFragmentImpl.$layoutMethod(View) bottomMargin=0 | pkg=$pkg")
+                LogUtil.info("  Feed viewport hooks layout=$layoutHooks config=$configHooks | pkg=$pkg")
             } catch (e: Throwable) {
                 LogUtil.warn("  VideoFeedTabFragmentImpl bottomMargin Hook 未命中 | pkg=$pkg: $e")
             }
@@ -5168,7 +5179,7 @@ object Hooks {
             }
         }
 
-        try {
+        if (gNames.rightViewAgency.isNotBlank() && gNames.rightViewAgencyEventMethod.isNotBlank()) try {
             val agencyClass = Class.forName(gNames.rightViewAgency, false, classLoader)
             hac(agencyClass, "rightViewAgencyCtor") { chain ->
                 val result = chain.proceed()
@@ -5699,12 +5710,18 @@ object Hooks {
         }
 
         fun hookPlaybackState(className: String, hookId: String) {
+            if (className.isBlank()) return
             try {
                 val c = Class.forName(className, false, classLoader)
-                ham(c, "onPlaybackStateChanged", hookId) { chain ->
+                val count = ham(c, "onPlaybackStateChanged", hookId) { chain ->
                     val result = chain.proceed()
                     try {
-                        val state = chain.args.lastOrNull { it is Int } as? Int
+                        val state = if (className == "com.ss.android.videoshop.controller.VideoController") {
+                            val engine = chain.getArg(0)
+                            val current = NativeMetadataAccess.call(chain.thisObject, "getVideoEngine")
+                            if (engine == null || current !== engine) return@ham result
+                            chain.getArg(1) as? Int
+                        } else chain.args.lastOrNull { it is Int } as? Int
                         when (state) {
                             1 -> {
                                 if (className == "com.ss.android.videoshop.controller.VideoController") {
@@ -5726,7 +5743,7 @@ object Hooks {
                     } catch (e: Throwable) { LogUtil.warn("playback state parse failed: $className: $e") }
                     result
                 }
-                LogUtil.info("  ✓ playback detector: $className")
+                LogUtil.info("  playback detector: $className installed=$count")
             } catch (e: Throwable) { LogUtil.warn("  playback detector missing: $className: $e") }
         }
 
@@ -5742,8 +5759,7 @@ object Hooks {
             )
             var mediaHookCount = 0
             for ((methodIndex, method) in videoContextClass.declaredMethods
-                .filter { it.name in setOf("onVideoPlay", "onVideoPause",
-                    "onEnginePlayStart", "onVideoReleased") }
+                .filter { HookBindingAudit.videoEvent(it) }
                 .withIndex()) {
                 try {
                     module.hook(method)
@@ -5779,7 +5795,8 @@ object Hooks {
                 }
             }
             for (name in listOf("onLifeCycleOnPause", "onLifeCycleOnStop")) {
-                videoContextClass.declaredMethods.filter { it.name == name }
+                videoContextClass.declaredMethods.filter { it.name == name &&
+                    HookBindingAudit.instanceVoid(it, "androidx.lifecycle.LifecycleOwner") }
                     .forEachIndexed { index, method ->
                         try {
                             module.hook(method)
@@ -5837,9 +5854,9 @@ object Hooks {
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
             var installed = 0
             for ((index, method) in engine.declaredMethods.filter {
-                it.name in setOf("play", "pause", "stop", "releaseAsync") &&
-                    it.parameterCount == 0
-            }.withIndex()) {
+                it.name in setOf("play", "pause", "stop", "releaseAsync", "start", "release") &&
+                    HookBindingAudit.instanceVoid(it)
+            }.sortedBy { it.name }.withIndex()) {
                 try {
                     module.hook(method)
                         .setId("xhSystemMediaTTVideoEngine_$index")
@@ -5853,14 +5870,27 @@ object Hooks {
                                 return@Hooker null
                             }
                             val result = chain.proceed()
-                            try {
-                                InAppPlaybackContinuity.observeEngine(chain.thisObject, method.name, gCurrentActivity)
-                                InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
-                                SystemMediaBridge.onNativeEngineCommand(
-                                    chain.thisObject, method.name)
-                            } catch (e: Throwable) {
-                                LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " +
-                                    method.name + ": " + e.message)
+                            if (method.name == "start" || method.name == "release") {
+                                // New methods are read-only diagnostics; no synthetic transport.
+                                LogUtil.info("Hook审计: TTVideoEngine." + method.name +
+                                    " engine=" + System.identityHashCode(chain.thisObject) +
+                                    " state=" + NativeMetadataAccess.call(chain.thisObject, "getPlaybackState"))
+                            } else {
+                                try {
+                                    InAppPlaybackContinuity.observeEngine(chain.thisObject, method.name, gCurrentActivity)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("持续播放: 引擎观察异常 " + method.name + ": " + e)
+                                }
+                                try {
+                                    InAppMiniPlayer.onEngineCommand(chain.thisObject, method.name, gCurrentActivity)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("小窗: 引擎观察异常 " + method.name + ": " + e)
+                                }
+                                try {
+                                    SystemMediaBridge.onNativeEngineCommand(chain.thisObject, method.name)
+                                } catch (e: Throwable) {
+                                    LogUtil.warn("系统媒体: TTVideoEngine 回调异常 " + method.name + ": " + e)
+                                }
                             }
                             result
                         })
@@ -6272,7 +6302,7 @@ object Hooks {
                 })
         } catch (_: Throwable) {}
 
-        if (gPkg == "com.phoenix.read") {
+        if (gPkg == "com.phoenix.read" && gNames.homeFragmentMaskMethod.isNotBlank()) {
             try {
                 val homeFragment = Class.forName(
                     "com.dragon.read.component.shortvideo.impl.v2.SeriesBookMallTabFragment",
@@ -6926,7 +6956,7 @@ object Hooks {
             } catch (_: Throwable) {}
         }
 
-        try {
+        if (settingsSpec.clickClass.isNotBlank()) try {
             val clickClass = Class.forName(settingsSpec.clickClass, false, classLoader)
             clickClass.declaredMethods.filter { it.name == "onClick" }.forEachIndexed { index, method ->
                 module.hook(method)
@@ -7115,6 +7145,7 @@ object Hooks {
             ham(c, "canShowVipCenter", "nvCenter") { chain -> if (gMasterOn && gVipOn) true else chain.proceed() }
             LogUtil.info("  ✓ NsVipImpl") } catch (e: Exception) { LogUtil.warn("  NsVipImpl 未找到: $e") }
 
+        bindingAudit.report()
         LogUtil.info("installBusinessHooks done"); LogUtil.diagDump(true)
     }
 
