@@ -165,7 +165,13 @@ internal object InAppMiniPlayer {
         transitionUntil = SystemClock.uptimeMillis() + 1800L
         transitionPause = false
     }
+    fun cancelAudioRecovery() {
+        transitionUntil = 0L
+        transitionPause = false
+    }
+
     fun shouldKeepPlaying(controller: Any?): Boolean {
+        if (AudioFocusCoordinator.blocksPauseProtection()) return false
         val s = session ?: return false
         if (!enabled || !isAlive(s.activity) || manualCommand ||
             SystemMediaBridge.userTransportActive() ||
@@ -185,6 +191,7 @@ internal object InAppMiniPlayer {
     }
 
     fun resumeAfterTabSwitch() {
+        if (AudioFocusCoordinator.interrupted()) { cancelAudioRecovery(); return }
         val s = session ?: return
         // A single recovery for a recorded transition pause, never a
         // repeating play loop or resume after a deliberate manual pause.

@@ -136,7 +136,10 @@ internal object InAppPlaybackContinuity {
         if (held?.owner === activity) clear("owner-destroyed")
     }
 
+    fun cancelAudioRecovery() { clear("audio-interruption") }
+
     fun keepLifecyclePause(candidate: Any?): Boolean {
+        if (AudioFocusCoordinator.blocksPauseProtection()) return false
         val entry = held ?: return false
         if (!enabled || candidate !== entry.engine || entry.owner.isDestroyed ||
             SystemMediaBridge.userTransportActive() ||

@@ -79,6 +79,7 @@ internal object SystemMediaBridge {
      */
     fun shouldSuppressBackgroundEnginePause(candidate: Any?): Boolean {
         if (!enabled || candidate == null || userCommandInProgress ||
+            AudioFocusCoordinator.blocksPauseProtection() ||
             !requestedBackgroundPlayback || !knownPlaying ||
             backgroundPauseGuardEngine.get() !== candidate ||
             videoEngine.get() !== candidate ||
@@ -721,6 +722,7 @@ internal object SystemMediaBridge {
                 " wasPlaying=" + lastLifecyclePauseWasPlaying)
         }
         if (action == "play") {
+            AudioFocusCoordinator.onPlaying(candidate, foregroundActivity.get())
             lastLifecyclePauseWasPlaying = false
             onNativePlayback(true, "TTVideoEngine#play", candidate)
             captureNativePlayEntity("engine-play")
@@ -738,8 +740,10 @@ internal object SystemMediaBridge {
                 }, delay)
             }
         } else if (action == "pause" || action == "stop") {
+            AudioFocusCoordinator.onEngineEnded(candidate, action)
             onNativePlayback(false, "TTVideoEngine#$action", candidate)
         } else if (action.startsWith("release") && videoEngine.get() === candidate) {
+            AudioFocusCoordinator.onEngineEnded(candidate, action)
             videoEngine.clear()
             onNativePlayback(false, "TTVideoEngine#$action", null)
         }
@@ -820,7 +824,8 @@ internal object SystemMediaBridge {
         LogUtil.info("系统媒体: Activity.onPause $name knownPlaying=$knownPlaying" +
             " recentUserLeave=$recentUserLeave")
         handler.postDelayed({
-            if (!enabled || foregroundActivity.get() !== activity) return@postDelayed
+            if (!enabled || foregroundActivity.get() !== activity ||
+                AudioFocusCoordinator.interrupted()) return@postDelayed
             val state = ActivityManager.RunningAppProcessInfo()
             try { ActivityManager.getMyMemoryState(state) } catch (_: Throwable) {
                 return@postDelayed
@@ -873,7 +878,7 @@ internal object SystemMediaBridge {
     }
 
     private fun onBackgroundTransition(activity: Activity, reason: String) {
-        if (!enabled) return
+        if (!enabled || AudioFocusCoordinator.interrupted()) return
         val native = nativeIsPlaying(activeNativePlayer())
         if (!knownPlaying && native != true) {
             LogUtil.info("系统媒体: $reason 未检测到真实视频播放，不发布虚假媒体卡片")
@@ -1021,6 +1026,7 @@ internal object SystemMediaBridge {
             updateSessionState(false)
             lastPauseAt = SystemClock.uptimeMillis()
             if (requestedBackgroundPlayback && backgroundResumeBudget > 0 &&
+                !AudioFocusCoordinator.interrupted() &&
                 lastPauseAt - leaveAt in 0L..4000L &&
                 !userCommandInProgress && backgroundPauseGuardEngine.get() == null) {
                 backgroundResumeBudget--
@@ -1028,6 +1034,7 @@ internal object SystemMediaBridge {
                 LogUtil.warn("系统媒体: 后台暂停，单次恢复尝试 #" + resumeAttempts)
                 handler.postDelayed({
                     if (enabled && requestedBackgroundPlayback && !knownPlaying &&
+                        !AudioFocusCoordinator.interrupted() &&
                         backgroundPauseGuardEngine.get() == null) {
                         requestTransport(true, "background-auto-resume")
                     }
@@ -1115,6 +1122,7 @@ internal object SystemMediaBridge {
      */
     fun shouldSuppressLifecyclePause(candidate: Any?): Boolean {
         if (!enabled || candidate == null || userCommandInProgress ||
+            AudioFocusCoordinator.blocksPauseProtection() ||
             !requestedBackgroundPlayback || !knownPlaying) return false
         val now = SystemClock.uptimeMillis()
         if (now - leaveAt !in 0L..BACKGROUND_PAUSE_GUARD_MS) return false
@@ -1278,8 +1286,43 @@ internal object SystemMediaBridge {
 
     internal fun userTransportActive(): Boolean = userCommandInProgress
 
+    internal fun audioFocusEngine(): Any? =
+        NativePlaybackSession.engine() ?: videoEngine.get()
+
+    internal fun onAudioInterruption(reason: String) {
+        if (!enabled) return
+        backgroundPauseGuardEngine.clear()
+        backgroundPauseGuardUntil = 0L
+        backgroundResumeBudget = 0
+        requestedBackgroundPlayback = false
+        lastLifecyclePauseWasPlaying = false
+        lastLifecyclePauseEngine.clear()
+        lastUserLeaveWasPlaying = false
+        lastUserLeaveEngine.clear()
+        val target = audioFocusEngine()
+        if (target != null && NativePlaybackSession.playing(target))
+            requestTransport(false, "audio-interruption")
+        else if (knownPlaying) onNativePlayback(false, "audio-interruption:$reason", target)
+        LogUtil.info("系统媒体: 音频中断已取消后台保活和自动恢复 reason=$reason")
+    }
+
+    internal fun resumeAfterAudioFocus(target: Any) {
+        if (enabled && audioFocusEngine() === target && !AudioFocusCoordinator.interrupted() &&
+            !NativePlaybackSession.playing(target))
+            requestTransport(true, "audio-focus-restored")
+    }
+
     private fun requestTransport(play: Boolean, reason: String) {
         if (!enabled) return
+        val explicit = reason.startsWith("system") || reason == "notification-action"
+        if (play) {
+            if (explicit) {
+                if (!AudioFocusCoordinator.userPlayAllowed()) {
+                    LogUtil.info("系统媒体: 通话或焦点不可用，拒绝播放")
+                    return
+                }
+            } else if (AudioFocusCoordinator.interrupted()) return
+        } else if (explicit) AudioFocusCoordinator.userPaused()
         val latestEngine = NativePlaybackSession.engine() ?: videoEngine.get()
         // Never fall through to a stale VideoContext or a preload decoder.
         val targets = listOfNotNull(latestEngine?.takeIf {
@@ -1448,6 +1491,7 @@ internal object SystemMediaBridge {
     }
 
     fun stop() {
+        AudioFocusCoordinator.stop()
         if (backgroundFlagApplied && originalBackgroundFlag != null) {
             setNativeBackgroundAllowance(originalBackgroundFlag == true)
         }

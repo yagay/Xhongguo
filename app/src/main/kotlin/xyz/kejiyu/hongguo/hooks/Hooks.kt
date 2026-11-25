@@ -289,6 +289,7 @@ object Hooks {
         InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
         gSystemMediaOn = prefs.getBoolean("system_media_playback", false)
         SystemMediaBridge.configure(ctx, gMasterOn && gSystemMediaOn)
+        configureAudioFocus(ctx)
         gPlayerOn = prefs.getBoolean("player_bar", false)
         // Dedicated default-on cleanup for the requested build. Keep the old
         // ad_block provider key for compatibility, but use one new UI toggle.
@@ -366,12 +367,24 @@ object Hooks {
         }
     }
 
+    private fun configureAudioFocus(ctx: Context) {
+        val p = gPrefs ?: return
+        AudioFocusCoordinator.configure(ctx, gMasterOn && gSystemMediaOn,
+            p.getBoolean("audio_focus_pause", true),
+            p.getBoolean("audio_call_pause", true),
+            p.getBoolean("audio_focus_auto_resume", false))
+    }
+
     private fun savePref(key: String, value: Boolean) {
         val editor = gPrefs?.edit()?.putBoolean(key, value) ?: return
 
         if (key == DOWNLOAD_LIMIT_PREF || key == "master_on") editor.commit()
         else editor.apply()
-        appCtx?.let { ModuleSettingsStore.pushFromTarget(it, key, value) }
+        appCtx?.let {
+            ModuleSettingsStore.pushFromTarget(it, key, value)
+            if (key in setOf("master_on", "system_media_playback", "audio_focus_pause",
+                    "audio_call_pause", "audio_focus_auto_resume")) configureAudioFocus(it)
+        }
     }
 
     private fun normalizeDefaultSpeed(value: Float): Float {
@@ -3921,6 +3934,15 @@ object Hooks {
                 gSystemMediaOn = it
                 SystemMediaBridge.configure(act, it && gMasterOn)
             }, "system_media_playback")
+            addSwitch("音频焦点丢失时暂停", "其他应用抢占音频焦点时暂停短剧", {
+                gPrefs?.getBoolean("audio_focus_pause", true) ?: true
+            }, {}, "audio_focus_pause")
+            addSwitch("通话时自动暂停", "监听系统铃声、电话及语音通信模式", {
+                gPrefs?.getBoolean("audio_call_pause", true) ?: true
+            }, {}, "audio_call_pause")
+            addSwitch("焦点恢复后自动播放", "仅临时中断且同一视频；永久焦点丢失需手动播放", {
+                gPrefs?.getBoolean("audio_focus_auto_resume", false) ?: false
+            }, {}, "audio_focus_auto_resume")
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled
@@ -4959,6 +4981,7 @@ object Hooks {
 
         gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
         FeatureFaultGuard.reset()
+        AudioFocusCoordinator.install(module)
         RuntimeCapabilities.inspect(classLoader, pkg, detected.first)
         // Re-read settings now the target version is known.
         appCtx?.let { initPrefs(it) }
