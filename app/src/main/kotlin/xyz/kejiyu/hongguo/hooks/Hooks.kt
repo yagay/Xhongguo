@@ -3896,7 +3896,7 @@ object Hooks {
                 InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled
                 if (!it) InAppMiniPlayer.restore()
             }, "in_app_mini_player")
-            addSwitch("应用内持续播放（无小窗）", "优先使用官方无Surface/音频共享机制；开启后不显示应用内小窗，手动暂停仍有效。实验功能", {
+            addSwitch("应用内持续播放（无小窗）", "仅保护已确认的非播放页面切换；不显示小窗。全集退出共享暂未启用。实验功能", {
                 gPrefs?.getBoolean("in_app_continuous_playback", false) == true
             }, {
                 InAppPlaybackContinuity.configure(act, it && gMasterOn)
@@ -5806,8 +5806,7 @@ object Hooks {
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
                         if (method.name == "pause" &&
-                            (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject) ||
-                                SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject))) {
+                            SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
                             return@Hooker null
                         }
                         val result = chain.proceed()
@@ -5829,58 +5828,10 @@ object Hooks {
         // The real 7.3.5.x player can reach the low-level TTVideoEngine
         // without calling VideoContext.onVideoPlay, as confirmed by the new
         // diagnostic ZIP. Observe actual engine commands, not just installation.
-        // Optional native audio continuation. Observe only existing wrappers;
-        // the exact inspected APK signatures are verified by the resolver.
-        try {
-            val wrapper = InAppPlaybackContinuity.resolve(classLoader)
-            if (wrapper != null) {
-                hac(wrapper, "continuityWrapper") { chain ->
-                    val result = chain.proceed()
-                    InAppPlaybackContinuity.observeWrapper(chain.thisObject)
-                    result
-                }
-                ham(wrapper, "resume", "continuityResumeObserve") { chain ->
-                    InAppPlaybackContinuity.observeWrapper(chain.thisObject)
-                    chain.proceed()
-                }
-                ham(wrapper, "pause", "continuityWrapperPause") { chain ->
-                    if (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)) null
-                    else chain.proceed()
-                }
-                val presenter = Class.forName("nt4.a1", false, classLoader)
-                val callback = Class.forName("kotlin.jvm.functions.Function0", false, classLoader)
-                val exit = presenter.getDeclaredMethod("c", callback)
-                val series = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity", false, classLoader)
-                val args = series.getDeclaredMethod("S3")
-                val fragment = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment", false, classLoader)
-                val audioMode = fragment.getDeclaredMethod("Eh")
-                require(exit.returnType == Void.TYPE && args.returnType == android.os.Bundle::class.java &&
-                    audioMode.returnType == Boolean::class.javaPrimitiveType)
-                module.hook(exit).setId("continuityOfficialExit")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        val scoped = InAppPlaybackContinuity.beginNativeExit(chain.thisObject)
-                        try { chain.proceed() } finally {
-                            if (scoped) InAppPlaybackContinuity.endNativeExit()
-                        }
-                    })
-                module.hook(args).setId("continuityExitArgs")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        InAppPlaybackContinuity.exitArgs(chain.thisObject, chain.proceed())
-                    })
-                module.hook(audioMode).setId("continuityExitAudioMode")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        if (InAppPlaybackContinuity.exitAudioMode(chain.thisObject)) true else chain.proceed()
-                    })
-                LogUtil.info("持续播放: 原生无Surface及音频共享退出 Hook 已安装")
-            } else LogUtil.info("持续播放: 原生包装层未识别，仅观察通用导航")
-        } catch (e: Throwable) {
-            LogUtil.warn("持续播放: 原生 Hook 安装失败 " + e.javaClass.simpleName)
-        }
+        // The previous experiment installed only part of its wrapper hooks
+        // before a NoSuchMethodException. Do not hook obfuscated wrappers
+        // or exit arguments until a separately validated implementation.
+        LogUtil.info("持续播放: v2 仅原生引擎导航保护，包装层共享已停用")
         try {
             val engine = Class.forName(
                 "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
@@ -6223,9 +6174,7 @@ object Hooks {
                 module.hook(method).setId("miniHoldPause_" + index)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
-                        if (InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)) {
-                            null
-                        } else if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
+                        if (InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)) {
                             LogUtil.incr("inAppMiniPauseIntercept")
                             null
                         } else if (SystemMediaBridge.shouldSuppressLifecyclePause(chain.thisObject)) {
