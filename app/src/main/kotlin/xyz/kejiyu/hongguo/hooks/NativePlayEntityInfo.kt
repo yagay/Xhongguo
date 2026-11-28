@@ -155,9 +155,12 @@ internal object NativePlayEntityInfo {
             remember(entity)
             val entityId = id(entity, "getVideoId")
             val boundEngine = invoke(owner, "getVideoEngine")
-            if (entityId != null && engineId != null && entityId == engineId ||
-                boundEngine === engine &&
-                    entity.javaClass.name == "com.ss.android.videoshop.entity.PlayEntity") {
+            val exactIdMatch = entityId != null && engineId != null &&
+                entityId == engineId
+            val boundWithoutComparableIds = boundEngine === engine &&
+                (entityId == null || engineId == null) &&
+                entity.javaClass.name == "com.ss.android.videoshop.entity.PlayEntity"
+            if (exactIdMatch || boundWithoutComparableIds) {
                 found = entity
                 break
             }

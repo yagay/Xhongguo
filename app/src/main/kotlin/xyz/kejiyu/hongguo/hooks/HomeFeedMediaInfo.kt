@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import java.lang.ref.WeakReference
 import xyz.kejiyu.hongguo.LogUtil
 
 /**
@@ -23,8 +24,6 @@ internal object HomeFeedMediaInfo {
         "com.dragon.read.pages.main.MainFragmentActivity"
     private const val PAGER =
         "androidx.viewpager2.widget.ViewPager2"
-    private const val ADAPTER_BASE =
-        "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
     private const val MODEL =
         "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData"
 
@@ -36,7 +35,13 @@ internal object HomeFeedMediaInfo {
         val method: String
     )
     private var lastProbeAt = 0L
+    private var lastTreeScanAt = 0L
     private var lastSuccessSignature = ""
+    private val identityAgreement = VideoIdentityAgreement()
+    // Scanning the whole View tree every metadata tick causes UI jank.
+    // A weak pager reference is valid only while that Activity still shows it.
+    private var cachedActivity = WeakReference<Activity>(null)
+    private var cachedPager = WeakReference<View>(null)
 
     private fun call(target: Any?, name: String, vararg args: Any?): Any? =
         try {
@@ -54,18 +59,32 @@ internal object HomeFeedMediaInfo {
         return NativeMetadataAccess.video(input)
     }
 
-    private fun vid(model: Any?): String? = try {
-        model?.javaClass?.getDeclaredField("vid")?.apply {
-            isAccessible = true
-        }?.get(model)?.toString()?.takeIf { it.isNotBlank() && it != "null" }
-    } catch (_: Throwable) { null }
+    private fun vid(model: Any?): String? {
+        if (model == null) return null
+        var type: Class<*>? = model.javaClass
+        while (type != null && type != Any::class.java) {
+            val current = type
+            val field = runCatching { current.getDeclaredField("vid") }.getOrNull()
+            if (field != null) return runCatching {
+                field.isAccessible = true
+                field.get(model)?.toString()?.trim()?.takeIf {
+                    it.isNotBlank() && it != "null" && it != "0"
+                }
+            }.getOrNull()
+            type = current.superclass
+        }
+        return null
+    }
 
     private fun nativeAdapter(adapter: Any?): Boolean {
+        // Semantic native package rather than version-specific obfuscated
+        // class. The returned model is still validated below.
         if (adapter == null) return false
-        return runCatching { adapter.javaClass.methods.any {
-            it.parameterCount == 1 && it.parameterTypes[0] == Integer.TYPE &&
-                it.returnType.name == MODEL
-        } }.getOrDefault(false)
+        return adapter.javaClass.name.startsWith("com.dragon.read.component.shortvideo.") ||
+            runCatching { adapter.javaClass.methods.any {
+                it.parameterCount == 1 && it.parameterTypes[0] == Integer.TYPE &&
+                    it.returnType.name == MODEL
+            } }.getOrDefault(false)
     }
 
     private fun indexedModel(adapter: Any, position: Int): Any? {
@@ -82,29 +101,62 @@ internal object HomeFeedMediaInfo {
         catch (_: Throwable) { null }
     }
 
+    private fun modelFromVisibleHolder(pager: View, pos: Int): Any? {
+        // ViewPager2's selected holder is stronger evidence than a stale
+        // adapter.getCurrentData() at the boundary between two videos.
+        val recycler = if (NativeMetadataAccess.extendsType(pager.javaClass,
+                "androidx.recyclerview.widget.RecyclerView")) pager
+            else (pager as? ViewGroup)?.getChildAt(0) ?: return null
+        val holder = call(recycler, "findViewHolderForAdapterPosition", pos)
+            ?: return null
+        val itemView = try {
+            holder.javaClass.getField("itemView").get(holder) as? View
+        } catch (_: Throwable) { null }
+        if (itemView?.isShown != true) return null
+        val models = ArrayList<Any>(2)
+        var type: Class<*>? = holder.javaClass
+        while (type != null && type != Any::class.java) {
+            for (field in type.declaredFields) {
+                if (field.type.name != MODEL) continue
+                try {
+                    field.isAccessible = true
+                    field.get(holder)?.let(models::add)
+                } catch (_: Throwable) {}
+            }
+            type = type.superclass
+        }
+        return models.singleOrNull()?.takeIf { vid(it) != null }
+    }
+
     private fun inspectPager(pager: View, screenW: Int, screenH: Int): Candidate? {
         if (!pager.isShown || pager.width <= 0 || pager.height <= 0 ||
             pager.width < screenW * 0.55f ||
             pager.height < screenH * 0.38f) return null
         val adapter = call(pager, "getAdapter") ?: return null
         if (!nativeAdapter(adapter)) return null
+        // Avoid showing the previous page while ViewPager2 is settling.
+        val scrollState = (call(pager, "getScrollState") as? Number)?.toInt()
+        if (scrollState != null && scrollState != 0) return null
         val recycler = NativeMetadataAccess.extendsType(pager.javaClass,
             "androidx.recyclerview.widget.RecyclerView")
         val pos = if (recycler) {
             val manager = call(pager, "getLayoutManager") ?: return null
             if ((call(manager, "getOrientation") as? Number)?.toInt() != 1) return null
-            (call(manager, "findFirstCompletelyVisibleItemPosition") as? Number)?.toInt()
-                ?.takeIf { it >= 0 } ?: return null
+            (call(manager, "findFirstCompletelyVisibleItemPosition") as? Number)
+                ?.toInt()?.takeIf { it >= 0 } ?: return null
         } else (call(pager, "getCurrentItem") as? Number)?.toInt() ?: return null
         val active = data(call(adapter, "getCurrentData"))
-        val byIndex = indexedModel(adapter, pos)
+        val indexed = indexedModel(adapter, pos)
+        val visibleHolder = if (indexed == null)
+            modelFromVisibleHolder(pager, pos) else null
+        val byIndex = indexed ?: visibleHolder
         val activeId = vid(active)
         val indexedId = vid(byIndex)
         // On a swipe the adapter and pager can briefly disagree: defer
         // publishing rather than show the previous drama's poster.
         if (activeId != null && indexedId != null &&
             activeId != indexedId) return null
-        val model = active ?: byIndex ?: return null
+        val model = byIndex ?: active ?: return null
         if (vid(model) == null) return null
         val rect = Rect()
         if (!pager.getGlobalVisibleRect(rect)) return null
@@ -112,7 +164,24 @@ internal object HomeFeedMediaInfo {
         if (area < screenW.toLong() * screenH / 5L) return null
         return Candidate(model, pos, area,
             activeId != null && indexedId != null,
-            if (active != null) "current-data" else "pager-position")
+            when {
+                indexed != null -> "pager-position"
+                visibleHolder != null -> "selected-holder"
+                else -> "current-data"
+            })
+    }
+
+    private var snapshotActivity = WeakReference<Activity>(null)
+    private var snapshotEngine = WeakReference<Any>(null)
+    private var snapshotEngineId: String? = null
+    private var snapshot = FullSeriesMediaInfo.Info()
+
+    fun clearSnapshot() {
+        snapshotActivity.clear()
+        snapshotEngine.clear()
+        snapshotEngineId = null
+        snapshot = FullSeriesMediaInfo.Info()
+        identityAgreement.clear()
     }
 
     fun read(activity: Activity?, engine: Any?): FullSeriesMediaInfo.Info {
@@ -120,29 +189,52 @@ internal object HomeFeedMediaInfo {
             NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.FEED ||
             Looper.myLooper() != Looper.getMainLooper())
             return FullSeriesMediaInfo.Info()
+        val engineId = call(engine, "getVideoID")?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() && it != "null" && it != "0" }
+        // A hidden pager cannot prove a new selection. Reuse only the
+        // previously verified snapshot for the same engine AND concrete ID.
+        if (!activity.hasWindowFocus()) {
+            if (engineId != null && snapshotEngine.get() === engine &&
+                snapshotActivity.get() === activity && snapshotEngineId == engineId) {
+                return snapshot.copy(source = "home-verified-background")
+            }
+            return FullSeriesMediaInfo.Info()
+        }
         val root = try { activity.window?.decorView }
             catch (_: Throwable) { null } ?: return FullSeriesMediaInfo.Info()
         val screen = activity.resources.displayMetrics
-        val pending = ArrayDeque<View>()
-        pending.add(root)
-        var scanned = 0
-        var pagerSeen = 0
-        var recyclerSeen = 0
         val candidates = ArrayList<Candidate>(3)
-        while (pending.isNotEmpty() && scanned++ < 4000) {
-            val v = pending.removeFirst()
-            if (!v.isShown) continue
-            val pager = NativeMetadataAccess.extendsType(v.javaClass, PAGER)
-            val recycler = NativeMetadataAccess.extendsType(v.javaClass,
-                "androidx.recyclerview.widget.RecyclerView")
-            if (pager || recycler) {
-                if (pager) pagerSeen++ else recyclerSeen++
-                inspectPager(v, screen.widthPixels, screen.heightPixels)
-                    ?.let(candidates::add)
-            }
-            if (v is ViewGroup) {
-                for (i in 0 until v.childCount) {
-                    pending.addLast(v.getChildAt(i))
+        val cached = if (cachedActivity.get() === activity)
+            cachedPager.get() else null
+        val reused = cached?.let {
+            inspectPager(it, screen.widthPixels, screen.heightPixels)
+        }
+        if (reused != null) candidates.add(reused)
+        else {
+            val scanAt = SystemClock.uptimeMillis()
+            if (scanAt - lastTreeScanAt in 0L..280L)
+                return FullSeriesMediaInfo.Info()
+            lastTreeScanAt = scanAt
+            val pending = ArrayDeque<View>()
+            pending.add(root)
+            var scanned = 0
+            while (pending.isNotEmpty() && scanned++ < 4000) {
+                val v = pending.removeFirst()
+                if (!v.isShown) continue
+                if (NativeMetadataAccess.extendsType(v.javaClass, PAGER) ||
+                    NativeMetadataAccess.extendsType(v.javaClass,
+                        "androidx.recyclerview.widget.RecyclerView")) {
+                    inspectPager(v, screen.widthPixels, screen.heightPixels)
+                        ?.let {
+                            candidates.add(it)
+                            cachedActivity = WeakReference(activity)
+                            cachedPager = WeakReference(v)
+                        }
+                }
+                if (v is ViewGroup) {
+                    for (i in 0 until v.childCount) {
+                        pending.addLast(v.getChildAt(i))
+                    }
                 }
             }
         }
@@ -156,30 +248,47 @@ internal object HomeFeedMediaInfo {
             best.area == next.area && vid(best.data) != vid(next.data)
         val selected = if (ambiguous) null else best
         val activeVideoId = vid(selected?.data)
-        val engineId = try { call(engine, "getVideoID")?.toString() }
-            catch (_: Throwable) { null }
-            ?.takeIf { it.isNotBlank() && it != "null" }
-        // Engine identity is authoritative when it exists. In the official
-        // home feed it may be blank even while video is playing.
-        val verified = selected != null &&
-            (engineId == null || engineId == activeVideoId)
+        // Official host routes can expose a TTVideoEngine ID in a different
+        // namespace from SaasVideoData. A mismatch may only fall back after
+        // independent selected-page evidence survives multiple probes.
         val now = SystemClock.uptimeMillis()
+        val stableKey = if (selected != null && activeVideoId != null)
+            System.identityHashCode(activity).toString() + "|" +
+                System.identityHashCode(engine).toString() + "|" +
+                selected.position + "|" + activeVideoId + "|" + (engineId ?: "") else null
+        val verified = identityAgreement.accept(
+            stableKey, engineId, activeVideoId,
+            independentlySelected = selected != null &&
+                (selected.aligned || selected.method != "current-data"),
+            nowMs = now)
         if (now - lastProbeAt > 9000L) {
             lastProbeAt = now
             LogUtil.info("系统媒体: 首页当前播放器模型" +
-                " pagers=" + pagerSeen + " recyclers=" + recyclerSeen +
-                " candidates=" + candidates.size +
+                " pagers=" + candidates.size +
                 " currentItem=" + (selected?.position ?: -1) +
                 " source=" + (selected?.method ?: "none") +
                 " aligned=" + (selected?.aligned == true) +
                 " engineVideoId=" + (engineId != null) +
                 " pagerVideoId=" + (activeVideoId != null) +
                 " idMatched=" + (engineId != null && engineId == activeVideoId) +
+                " stableFallback=" + (verified && engineId != null &&
+                    engineId != activeVideoId) +
                 " ambiguous=$ambiguous verified=$verified")
             LogUtil.incr("systemMediaHomePagerProbe")
         }
-        if (!verified) return FullSeriesMediaInfo.Info()
+        if (!verified) {
+            // Do not keep an old snapshot across an unresolved foreground swipe.
+            snapshotEngine.clear()
+            snapshotEngineId = null
+            return FullSeriesMediaInfo.Info()
+        }
         val info = FullSeriesMediaInfo.infoForVideoData(selected!!.data)
+        if (engine != null && engineId != null && info.seriesId != null) {
+            snapshotActivity = WeakReference(activity)
+            snapshotEngine = WeakReference(engine)
+            snapshotEngineId = engineId
+            snapshot = info
+        }
         val signature = activeVideoId + "|" + info.seriesId + "|" +
             (info.title != null) + "|" + (info.artworkUrl != null)
         if (signature != lastSuccessSignature) {

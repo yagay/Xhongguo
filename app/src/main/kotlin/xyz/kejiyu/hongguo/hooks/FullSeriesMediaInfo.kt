@@ -69,7 +69,9 @@ internal object FullSeriesMediaInfo {
 
     /** Observe a completed native data-model *at its consumption boundary*.
      * The empty default constructor is not useful with RPC/Gson adapters. */
-    fun observeVideoData(model: Any?) {
+    fun observeVideoData(model: Any?) = observeVideoData(model, true)
+
+    private fun observeVideoData(model: Any?, notify: Boolean) {
         if (model?.javaClass?.name != DATA) return
         val videoId = seriesId(field(model, "vid")) ?: return
         val id = seriesId(field(model, "episodesId")) ?:
@@ -114,7 +116,7 @@ internal object FullSeriesMediaInfo {
                 LogUtil.incr("systemMediaVideoDataObserved")
             }
         }
-        if (newMetadata) SystemMediaBridge.onNativeSeriesMetadataAvailable()
+        if (newMetadata && notify) SystemMediaBridge.onNativeSeriesMetadataAvailable()
     }
 
     /**
@@ -126,7 +128,7 @@ internal object FullSeriesMediaInfo {
     fun infoForVideoData(model: Any?): Info {
         if (model?.javaClass?.name != DATA) return Info()
         val videoId = seriesId(field(model, "vid")) ?: return Info()
-        observeVideoData(model)
+        observeVideoData(model, false)
         val cached = synchronized(detailLock) {
             observedVideos[videoId]?.takeIf {
                 SystemClock.uptimeMillis() - it.observedAt in 0L..VIDEO_TTL_MS

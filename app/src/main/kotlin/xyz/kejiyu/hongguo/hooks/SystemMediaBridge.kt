@@ -160,6 +160,9 @@ internal object SystemMediaBridge {
     private var coverArt: Bitmap? = null
     private var artworkRequestUrl: String? = null
     private var artworkRequestedAt = 0L
+    private var artworkFailedUrl: String? = null
+    private var artworkFailedAt = 0L
+    private var currentArtworkUrl: String? = null
     private var artworkGeneration = 0L
     private var lastArtworkDiagnosticAt = 0L
     private var lastMetadataSignature: String? = null
@@ -186,6 +189,8 @@ internal object SystemMediaBridge {
                 " episodeMatches=" + (publishedEpisode ==
                     (episodeTitle ?: "正在播放的视频")) +
                 " artwork=" + (coverArt != null) +
+                " publishedArtwork=" + (snapshot?.getBitmap(
+                    MediaMetadata.METADATA_KEY_DISPLAY_ICON) != null) +
                 " mediaActive=" + (session?.isActive == true))
             LogUtil.incr("systemMediaMetadataReadback")
         } catch (e: Throwable) {
@@ -298,6 +303,7 @@ internal object SystemMediaBridge {
             return
         }
         val now = SystemClock.uptimeMillis()
+        if (url == artworkFailedUrl && now - artworkFailedAt in 0L..15_000L) return
         if (url == artworkRequestUrl && (coverArt != null ||
             now - artworkRequestedAt < 90_000L)) return
         artworkRequestUrl = url
@@ -310,10 +316,15 @@ internal object SystemMediaBridge {
             if (!enabled || generation != artworkGeneration ||
                 ownerEngine !== videoEngine.get() ||
                 artworkRequestUrl != url) return@load
-            if (bitmap == null) {
-                LogUtil.warn("系统媒体: 封面加载失败 source=$source")
+            if (bitmap == null || bitmap.isRecycled) {
+                artworkFailedUrl = url
+                artworkFailedAt = SystemClock.uptimeMillis()
+                artworkRequestUrl = null
+                LogUtil.warn("系统媒体: 封面加载失败 source=$source retryAfterMs=15000")
                 LogUtil.incr("systemMediaArtworkUnavailable")
-            } else if (!bitmap.isRecycled) {
+            } else {
+                artworkFailedUrl = null
+                artworkFailedAt = 0L
                 coverArt = bitmap
                 updateSessionMetadata()
                 updateMediaNotification(knownPlaying)
@@ -346,26 +357,14 @@ internal object SystemMediaBridge {
     private fun updateSessionMetadata(force: Boolean = false) {
         val media = session ?: return
         val artwork = coverArt
-        val signature = (seriesTitle ?: "") + "|" + (episodeTitle ?: "") +
-            "|" + durationMs
+        val snapshot = MediaCardSnapshot(
+            seriesTitle ?: "红果短剧", episodeTitle ?: "正在播放的视频",
+            durationMs, artwork)
+        val signature = snapshot.signature
         if (!force && signature == lastMetadataSignature &&
             artwork === lastMetadataArt) return
         try {
-            val title = seriesTitle ?: "红果短剧"
-            val subtitle = episodeTitle ?: "正在播放的视频"
-            val builder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, "红果短剧")
-            if (durationMs > 0) builder.putLong(
-                MediaMetadata.METADATA_KEY_DURATION, durationMs)
-            if (artwork != null && !artwork.isRecycled) {
-                builder.putBitmap(MediaMetadata.METADATA_KEY_ART, artwork)
-                builder.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
-            }
-            media.setMetadata(builder.build())
+            media.setMetadata(snapshot.toPlatformMetadata())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
             if (!force && (seriesTitle != null ||
@@ -444,6 +443,7 @@ internal object SystemMediaBridge {
             seriesTitle = null
             episodeTitle = null
             coverArt = null
+            currentArtworkUrl = null
             artworkGeneration++
             artworkRequestUrl = null
             artworkRequestedAt = 0L
@@ -453,7 +453,8 @@ internal object SystemMediaBridge {
         if (resolvedSeriesId != null) currentSeriesIdentity = resolvedSeriesId
         if (activity != null) currentMetadataPage =
             if (isFullSeries) "series" else "feed"
-        requestNativeArtwork(artworkUrl, "unified:$reason")
+        if (artworkUrl != null) currentArtworkUrl = artworkUrl
+        requestNativeArtwork(currentArtworkUrl, "unified:$reason")
         var changed = false
         if (title != null && title != seriesTitle) {
             seriesTitle = title
@@ -525,6 +526,7 @@ internal object SystemMediaBridge {
             if (!sameSeries) {
                 seriesTitle = null
                 coverArt = null
+                currentArtworkUrl = null
                 currentSeriesIdentity = null
             }
             artworkGeneration++
@@ -672,6 +674,7 @@ internal object SystemMediaBridge {
                 if (!sameSeries) {
                     seriesTitle = null
                     coverArt = null
+                    currentArtworkUrl = null
                     currentSeriesIdentity = null
                 }
                 episodeTitle = null
@@ -1518,6 +1521,7 @@ internal object SystemMediaBridge {
         currentSeriesIdentity = null
         currentMetadataPage = null
         coverArt = null
+        currentArtworkUrl = null
         artworkGeneration++
         artworkRequestUrl = null
         artworkRequestedAt = 0L
@@ -1544,6 +1548,9 @@ internal object SystemMediaBridge {
         videoContext.clear()
         videoEngine.clear()
         foregroundActivity.clear()
+        HomeFeedMediaInfo.clearSnapshot()
+        artworkFailedUrl = null
+        artworkFailedAt = 0L
         originalBackgroundFlag = null
         originalBackgroundHost.clear()
     }
