@@ -375,7 +375,9 @@ object Hooks {
             p.getBoolean("audio_focus_auto_resume", ModuleSettingsStore.defaultBoolean("audio_focus_auto_resume")),
             p.getBoolean("audio_call_auto_resume", ModuleSettingsStore.defaultBoolean("audio_call_auto_resume")),
             p.getBoolean("audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck")),
-            p.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")))
+            p.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")),
+            p.getBoolean("audio_external_auto_resume", ModuleSettingsStore.defaultBoolean("audio_external_auto_resume")),
+            ModuleSettingsStore.externalResumeDelay(p))
     }
 
     private fun savePref(key: String, value: Boolean) {
@@ -387,7 +389,7 @@ object Hooks {
             ModuleSettingsStore.pushFromTarget(it, key, value)
             if (key in setOf("master_on", "system_media_playback", "audio_focus_pause",
                     "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume",
-                    "audio_focus_pause_duck", "audio_external_pause")) configureAudioFocus(it)
+                    "audio_focus_pause_duck", "audio_external_pause", "audio_external_auto_resume")) configureAudioFocus(it)
         }
     }
 
@@ -3960,6 +3962,29 @@ object Hooks {
             addSwitch("其他应用音频检测", "检测实际媒体音频（包括未抢焦点的 App）；需 LSPosed 系统框架作用域及重启，默认开启", {
                 gPrefs?.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")) ?: ModuleSettingsStore.defaultBoolean("audio_external_pause")
             }, {}, "audio_external_pause")
+            lateinit var externalResumeRow: LinearLayout
+            val externalResumeKey = "audio_external_auto_resume"
+            val delaySummary = {
+                "仅恢复原视频 · 延迟 " + ModuleSettingsStore.externalResumeDelay(gPrefs) / 1000.0 + " 秒（点击调整）"
+            }
+            externalResumeRow = addSwitch("其他应用停止后自动恢复", delaySummary(), {
+                gPrefs?.getBoolean(externalResumeKey, ModuleSettingsStore.defaultBoolean(externalResumeKey)) ?: true
+            }, {}, externalResumeKey, onRowAction = {
+                val options = ModuleSettingsStore.EXTERNAL_RESUME_DELAYS
+                val selected = options.indices.minByOrNull {
+                    kotlin.math.abs(options[it] - ModuleSettingsStore.externalResumeDelay(gPrefs))
+                } ?: 0
+                android.app.AlertDialog.Builder(act)
+                    .setTitle("外部音频恢复延迟")
+                    .setSingleChoiceItems(options.map { "${it / 1000} 秒" }.toTypedArray(), selected) { dialog, index ->
+                        val key = ModuleSettingsStore.EXTERNAL_RESUME_DELAY
+                        gPrefs?.edit()?.putInt(key, options[index])?.commit()
+                        ModuleSettingsStore.pushFromTarget(act, key, options[index])
+                        configureAudioFocus(act)
+                        ((externalResumeRow.getChildAt(0) as? ViewGroup)?.getChildAt(1) as? TextView)?.text = delaySummary()
+                        dialog.dismiss()
+                    }.setNegativeButton("取消", null).show()
+            }).first
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
                 InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled

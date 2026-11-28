@@ -181,6 +181,7 @@ object ModuleDiagnostics {
             for (key in ModuleSettingsStore.BOOLEANS.sorted()) {
                 appendLine(key + "=" + prefs.getBoolean(key, ModuleSettingsStore.defaultBoolean(key)))
             }
+            appendLine(ModuleSettingsStore.EXTERNAL_RESUME_DELAY + "=" + ModuleSettingsStore.externalResumeDelay(prefs))
         }
         files["settings-origin.txt"] = buildString {
             for (key in ModuleSettingsStore.BOOLEANS.sorted()) {

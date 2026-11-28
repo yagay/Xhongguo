@@ -23,6 +23,7 @@ class SettingsActivity : Activity() {
     private var speedText: TextView? = null
     private var speedSwitch: Switch? = null
     private var limitText: TextView? = null
+    private var externalDelayText: TextView? = null
 
     private fun dp(n: Int): Int = (n * resources.displayMetrics.density + .5f).toInt()
     private fun color(id: Int) = getColor(id)
@@ -90,6 +91,8 @@ class SettingsActivity : Activity() {
         toggle("通话结束自动恢复", "仅恢复同一视频；永久失焦仍需手动播放", "audio_call_auto_resume", ModuleSettingsStore.defaultBoolean("audio_call_auto_resume"))
         toggle("降低音量请求时暂停", "默认不额外暂停普通提示音", "audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck"))
         toggle("其他应用音频检测", "检测实际媒体音频（含未抢焦点的 App）；需 LSPosed 系统框架作用域及重启，默认开启", "audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause"))
+        toggle("其他应用停止后自动恢复", "仅恢复被外部音频暂停的原视频；手动暂停不恢复", "audio_external_auto_resume", ModuleSettingsStore.defaultBoolean("audio_external_auto_resume"))
+        externalDelayText = action("外部音频恢复延迟", externalDelayDescription()) { chooseExternalDelay() }
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
         section("播放与手势")
@@ -187,6 +190,25 @@ class SettingsActivity : Activity() {
         row.setOnClickListener { click() }
         append(row)
         return summary
+    }
+
+    private fun externalDelayDescription(): String =
+        "当前 " + ModuleSettingsStore.externalResumeDelay(prefs) / 1000.0 + " 秒"
+
+    private fun chooseExternalDelay() {
+        val options = ModuleSettingsStore.EXTERNAL_RESUME_DELAYS
+        val selected = options.indices.minByOrNull {
+            kotlin.math.abs(options[it] - ModuleSettingsStore.externalResumeDelay(prefs))
+        } ?: 0
+        AlertDialog.Builder(this)
+            .setTitle("外部音频恢复延迟")
+            .setSingleChoiceItems(options.map { "${it / 1000} 秒" }.toTypedArray(), selected) { dialog, index ->
+                if (ModuleSettingsStore.save(this, ModuleSettingsStore.EXTERNAL_RESUME_DELAY, options[index]))
+                    externalDelayText?.text = externalDelayDescription()
+                else Toast.makeText(this, "保存设置失败", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null).show()
     }
 
     private val speeds = floatArrayOf(.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 3f)

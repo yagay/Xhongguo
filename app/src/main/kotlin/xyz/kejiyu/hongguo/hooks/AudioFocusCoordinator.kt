@@ -37,6 +37,15 @@ internal object AudioFocusCoordinator {
     @Volatile private var pauseDuck = false
     @Volatile private var externalEnabled = false
     @Volatile private var externalActive = false
+    @Volatile private var resumeExternal = true
+    private var externalResumeDelayMs = 1000L
+    private var externalResumeTicket: ResumeTicket? = null
+    private var recentFocusTicket: ResumeTicket? = null
+    private var recentFocusAt = 0L
+    private var externalQuietSince = 0L
+    private var externalResumeGeneration = 0L
+    private var externalResumePending = false
+    private var externalResumeAttempts = 0
     private var externalReceiver: BroadcastReceiver? = null
     private var externalContext: Context? = null
     private var externalSignalAt = 0L
@@ -73,7 +82,8 @@ internal object AudioFocusCoordinator {
     @Volatile private var ticket: ResumeTicket? = null
 
     fun configure(ctx: Context, active: Boolean, focus: Boolean, calls: Boolean, resume: Boolean,
-                  callResume: Boolean, duck: Boolean, external: Boolean) {
+                  callResume: Boolean, duck: Boolean, external: Boolean,
+                  externalResume: Boolean, externalDelayMs: Int) {
         val primary = runCatching { Application.getProcessName() == ctx.packageName }.getOrDefault(false)
         val task = Runnable {
             enabled = active && primary && (focus || calls || external)
@@ -83,8 +93,12 @@ internal object AudioFocusCoordinator {
             resumeCalls = callResume
             pauseDuck = duck
             externalEnabled = enabled && external
+            resumeExternal = externalResume
+            externalResumeDelayMs = externalDelayMs.coerceIn(1000, 10000).toLong()
+            if (!externalEnabled || !resumeExternal) cancelExternalResume("settings-disabled")
             val configuration = "enabled=$enabled primary=$primary focus=$pauseFocus calls=$pauseCall" +
-                " external=$externalEnabled autoResume=$autoResume callResume=$resumeCalls duck=$pauseDuck"
+                " external=$externalEnabled autoResume=$autoResume callResume=$resumeCalls duck=$pauseDuck" +
+                " externalResume=$resumeExternal externalDelayMs=$externalResumeDelayMs"
             if (configuration != lastConfiguration) {
                 lastConfiguration = configuration
                 LogUtil.info("音频协调: 实际配置 $configuration")
@@ -175,10 +189,24 @@ internal object AudioFocusCoordinator {
                         LogUtil.info("音频协调: 系统音频状态同步 external=$active own=$ownActive first=$first")
                     }
                     val next = active && (ownActive || externalActive ||
-                        isPlaying(SystemMediaBridge.audioFocusEngine()))
-                    if (next == externalActive) return
+                        isPlaying(SystemMediaBridge.audioFocusEngine()) ||
+                        recentExternalCandidate() != null || externalResumeTicket != null)
+                    if (next == externalActive) {
+                        if (!active && externalResumeTicket != null) scheduleExternalResume()
+                        return
+                    }
                     externalActive = next
-                    if (next) interrupt("external-media", false) else gained("external-media-ended")
+                    if (next) {
+                        externalQuietSince = 0L
+                        invalidateExternalSchedule()
+                        rememberExternalInterruption()
+                        interrupt("external-media", false)
+                    } else {
+                        externalQuietSince = SystemClock.elapsedRealtime()
+                        externalResumeAttempts = 0
+                        if (externalResumeTicket != null) scheduleExternalResume()
+                        else gained("external-media-ended")
+                    }
                 }
             }
             val filter = IntentFilter(SystemAudioActivity.ACTION)
@@ -199,6 +227,137 @@ internal object AudioFocusCoordinator {
             }, 18_000L)
         } catch (e: Throwable) { LogUtil.warn("音频协调: 高级监听不可用 " + e.javaClass.simpleName) }
     }
+    private fun validTicket(value: ResumeTicket): Boolean {
+        val target = value.engine.get() ?: return false
+        return value.epoch >= 0 && SystemMediaBridge.audioFocusEngine() === target &&
+            NativePlaybackSession.generation() == value.epoch &&
+            NativePlaybackSession.videoId(target) == value.video &&
+            NativeMetadataAccess.call(target, "isReleased") != true
+    }
+
+    private fun recentExternalCandidate(): ResumeTicket? =
+        recentFocusTicket?.takeIf {
+            SystemClock.elapsedRealtime() - recentFocusAt in 0L..5500L && validTicket(it)
+        }
+
+    private fun invalidateExternalSchedule() {
+        ++externalResumeGeneration
+        externalResumePending = false
+    }
+
+    private fun cancelExternalResume(reason: String) {
+        if (externalResumeTicket != null)
+            LogUtil.info("音频协调: 取消外部音频恢复 reason=$reason")
+        invalidateExternalSchedule()
+        externalResumeTicket = null
+        recentFocusTicket = null
+        recentFocusAt = 0L
+        externalQuietSince = 0L
+        externalResumeAttempts = 0
+    }
+
+    private fun rememberExternalInterruption() {
+        if (!externalEnabled || !resumeExternal) return
+        if (externalResumeTicket?.let(::validTicket) == true) return
+        val engine = SystemMediaBridge.audioFocusEngine()
+        val epoch = NativePlaybackSession.generation()
+        // Focus loss often precedes the system playback event. Only a recent
+        // verified session that WAS playing may be promoted to an external ticket.
+        val candidate = if (engine != null && epoch >= 0 && isPlaying(engine))
+            ResumeTicket(WeakReference(engine), NativePlaybackSession.videoId(engine), epoch)
+        else recentExternalCandidate() ?: ticket?.takeIf(::validTicket)
+        externalResumeTicket = candidate
+        recentFocusTicket = null
+        if (candidate != null) LogUtil.info("音频协调: 已记录外部音频恢复会话")
+    }
+
+    private fun externalSilenceConfirmed(): Boolean =
+        externalEnabled && resumeExternal && !externalRawActive && !externalActive &&
+            externalQuietSince > 0L && externalSignalAt > 0L &&
+            SystemClock.elapsedRealtime() - externalSignalAt in 0L..7000L
+
+    // Reuse the native focus client, if still known. A permanent focus loss
+    // will not necessarily send GAIN when another app stops. Only this
+    // explicitly enabled external recovery may request focus after fresh silence.
+    private fun regainAfterExternal(): Boolean {
+        if (!externalSilenceConfirmed() || callActive ||
+            manager?.let { runCatching { inCall(it.mode) }.getOrDefault(true) } != false) return false
+        if (!pauseFocus) return true
+        if (!focusLost && (nativeRequest != null || own != null)) return true
+        val audio = manager ?: return false
+        val existing = nativeRequest
+        if (existing == null) return acquire()
+        val result = try {
+            when (existing) {
+                is AudioFocusRequest -> audio.requestAudioFocus(existing)
+                is AudioManager.OnAudioFocusChangeListener -> {
+                    @Suppress("DEPRECATION")
+                    audio.requestAudioFocus(existing, AudioManager.STREAM_MUSIC, nativeLegacyGain)
+                }
+                else -> AudioManager.AUDIOFOCUS_REQUEST_FAILED
+            }
+        } catch (_: Throwable) { AudioManager.AUDIOFOCUS_REQUEST_FAILED }
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return false
+        focusLost = false
+        return true
+    }
+
+    private fun scheduleExternalResume() {
+        val resume = externalResumeTicket ?: return
+        if (!enabled || !externalSilenceConfirmed() || callActive ||
+            externalResumePending || externalResumeAttempts >= 3) return
+        if (!validTicket(resume)) { cancelExternalResume("session-changed"); return }
+        val wait = (externalResumeDelayMs -
+            (SystemClock.elapsedRealtime() - externalQuietSince)).coerceAtLeast(
+                if (externalResumeAttempts > 0) 1500L else 0L)
+        val generation = ++externalResumeGeneration
+        externalResumePending = true
+        LogUtil.info("音频协调: 外部音频停止，等待恢复 delayMs=$wait")
+        main.postDelayed({
+            if (generation != externalResumeGeneration) return@postDelayed
+            externalResumePending = false
+            if (!enabled || externalResumeTicket !== resume ||
+                !validTicket(resume)) {
+                cancelExternalResume("session-changed")
+                return@postDelayed
+            }
+            if (!externalSilenceConfirmed() || callActive) return@postDelayed
+            val remaining = externalResumeDelayMs -
+                (SystemClock.elapsedRealtime() - externalQuietSince)
+            if (remaining > 0L) { scheduleExternalResume(); return@postDelayed }
+            val target = resume.engine.get() ?: return@postDelayed
+            ++externalResumeAttempts
+            if (!regainAfterExternal() || !externalSilenceConfirmed() || callActive ||
+                focusLost || !validTicket(resume)) {
+                LogUtil.warn("音频协调: 外部音频恢复焦点未获批准 attempt=$externalResumeAttempts")
+                if (externalResumeAttempts < 3) scheduleExternalResume()
+                else cancelExternalResume("focus-unavailable")
+                return@postDelayed
+            }
+            cancelExternalResume("resume-dispatch")
+            ticket = null
+            resumeAuthorized = false
+            permanentlyInterrupted = false
+            manualHold = false
+            ++interruptionGeneration
+            val sent = isPlaying(target) || transport(target, true)
+            if (!sent) {
+                manualHold = true
+                permanentlyInterrupted = true
+                LogUtil.warn("音频协调: 外部音频恢复指令失败")
+                return@postDelayed
+            }
+            LogUtil.info("音频协调: 外部音频恢复指令已发送")
+            main.postDelayed({
+                if (SystemMediaBridge.audioFocusEngine() === target && isPlaying(target) &&
+                    !interrupted()) {
+                    LogUtil.info("音频协调: 外部音频恢复播放已确认")
+                    LogUtil.incr("audioExternalResumeConfirmed")
+                }
+            }, 900L)
+        }, wait)
+    }
+
     fun blocksPauseProtection(): Boolean {
         if (interrupted()) return true
         // Native focus callbacks may be observed before a framework request
@@ -305,6 +464,12 @@ internal object AudioFocusCoordinator {
         val id = NativePlaybackSession.videoId(engine)
         val task = Runnable {
             if (!enabled) return@Runnable
+            if (reason.startsWith("focus:") && externalEnabled && resumeExternal &&
+                playing && engine != null && epoch >= 0 && externalResumeTicket == null) {
+                recentFocusTicket = ResumeTicket(WeakReference(engine), id, epoch)
+                recentFocusAt = SystemClock.elapsedRealtime()
+            }
+            if (reason.startsWith("call-mode:")) invalidateExternalSchedule()
             if (!temporary) {
                 permanentlyInterrupted = true
                 ticket = null
@@ -371,7 +536,12 @@ internal object AudioFocusCoordinator {
     }
 
     private fun gained(reason: String) {
-        if (!enabled || hardInterrupted()) return
+        if (!enabled) return
+        if (externalResumeTicket != null) {
+            scheduleExternalResume()
+            return
+        }
+        if (hardInterrupted()) return
         val resume = ticket
         val authorized = resumeAuthorized
         ticket = null
@@ -404,6 +574,7 @@ internal object AudioFocusCoordinator {
         if (callActive || externalActive ||
             (externalEnabled && externalRawActive &&
                 SystemClock.elapsedRealtime() - externalSignalAt in 0L..15_000L)) return false
+        cancelExternalResume("user-play")
         ticket = null
         resumeAuthorized = false
         ++interruptionGeneration
@@ -434,6 +605,7 @@ internal object AudioFocusCoordinator {
         return true
     }
     fun userPaused() {
+        cancelExternalResume("user-pause")
         ticket = null
         resumeAuthorized = false
         manualHold = true
@@ -457,6 +629,9 @@ internal object AudioFocusCoordinator {
             SystemClock.elapsedRealtime() - externalSignalAt in 0L..15_000L &&
             !externalActive) {
             externalActive = true
+            externalQuietSince = 0L
+            invalidateExternalSchedule()
+            rememberExternalInterruption()
             interrupt("external-media-on-play", false)
             return
         }
@@ -464,7 +639,8 @@ internal object AudioFocusCoordinator {
             // A real foreground play after focus gain may be user initiated.
             // Never clear a hold solely because a background callback played.
             if (allowForegroundRestart && !hardInterrupted() &&
-                activity?.hasWindowFocus() == true && ticket == null) {
+                activity?.hasWindowFocus() == true && ticket == null &&
+                externalResumeTicket == null) {
                 manualHold = false
                 permanentlyInterrupted = false
                 ++interruptionGeneration
@@ -536,6 +712,8 @@ internal object AudioFocusCoordinator {
     fun onEngineEnded(engine: Any, action: String) {
         if (!enabled) return
         if (action == "stop" || action.startsWith("release")) {
+            if (externalResumeTicket?.engine?.get() === engine ||
+                recentFocusTicket?.engine?.get() === engine) cancelExternalResume("engine-ended")
             if (ticket?.engine?.get() === engine) { ticket = null; resumeAuthorized = false }
             if (lastRequestEngine.get() === engine) lastRequestEngine.clear()
             if (SystemMediaBridge.audioFocusEngine() === engine || SystemMediaBridge.audioFocusEngine() == null) releaseOwn()
@@ -552,6 +730,7 @@ internal object AudioFocusCoordinator {
         }
     }
     fun stop() {
+        cancelExternalResume("coordinator-stop")
         releaseOwn()
         ticket = null
         resumeAuthorized = false

@@ -20,7 +20,7 @@ object ModuleSettingsStore {
         "default_speed", "double_tap_comment", "oled_protect",
         "notification_menu", "download_limit_unlimit", "video_longpress_settings",
         "disable_shopping_mall", "in_app_mini_player", "system_media_playback",
-        "in_app_continuous_playback", "audio_focus_pause", "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck", "audio_external_pause",
+        "in_app_continuous_playback", "audio_focus_pause", "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck", "audio_external_pause", "audio_external_auto_resume",
         "hide_mine_shortcuts", "hide_all_ads", "official_playback_probe"
     )
     // Same default for module UI, target Hook and diagnostic export.
@@ -28,13 +28,22 @@ object ModuleSettingsStore {
         "video_longpress_settings", "disable_shopping_mall",
         "hide_mine_shortcuts", "hide_all_ads",
         "audio_focus_pause", "audio_call_pause", "audio_call_auto_resume",
-        "audio_external_pause"
+        "audio_external_pause", "audio_external_auto_resume"
     )
+
+    const val EXTERNAL_RESUME_DELAY = "audio_external_resume_delay_ms"
+    val EXTERNAL_RESUME_DELAYS = intArrayOf(1000, 2000, 3000, 5000, 10000)
+    fun externalResumeDelay(prefs: SharedPreferences?): Int =
+        (prefs?.getInt(EXTERNAL_RESUME_DELAY, 1000) ?: 1000).coerceIn(1000, 10000)
+
+    internal fun validInt(key: String, value: Int): Boolean =
+        if (key == EXTERNAL_RESUME_DELAY) value in 1000..10000
+        else value in 1..999_999_999
 
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(
         "download_limit_one_day_episode", "download_limit_one_day_series",
-        "download_limit_total_series"
+        "download_limit_total_series", EXTERNAL_RESUME_DELAY
     )
 
     fun prefs(ctx: Context): SharedPreferences =
@@ -47,7 +56,7 @@ object ModuleSettingsStore {
         when {
             key in BOOLEANS && value is Boolean -> editor.putBoolean(key, value)
             key in FLOATS && value is Float && value.isFinite() -> editor.putFloat(key, value)
-            key in INTS && value is Int && value in 1..999_999_999 -> editor.putInt(key, value)
+            key in INTS && value is Int && validInt(key, value) -> editor.putInt(key, value)
             else -> return false
         }
         val ok = editor.commit()
@@ -153,7 +162,7 @@ class ModuleSettingsProvider : ContentProvider() {
                     }
                     key in ModuleSettingsStore.INTS && extras?.containsKey("i") == true -> {
                         val v = extras.getInt("i")
-                        if (v in 1..999_999_999) { editor.putInt(key, v); true } else false
+                        if (ModuleSettingsStore.validInt(key, v)) { editor.putInt(key, v); true } else false
                     }
                     else -> false
                 }
@@ -175,7 +184,7 @@ class ModuleSettingsProvider : ContentProvider() {
                     }
                     ModuleSettingsStore.INTS.forEach { key ->
                         val v = extras.getInt(key, -1)
-                        if (extras.containsKey(key) && !prefs.contains(key) && v in 1..999_999_999) {
+                        if (extras.containsKey(key) && !prefs.contains(key) && ModuleSettingsStore.validInt(key, v)) {
                             editor.putInt(key, v); count++
                         }
                     }

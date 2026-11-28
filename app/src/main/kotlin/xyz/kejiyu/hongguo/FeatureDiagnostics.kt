@@ -122,11 +122,15 @@ object FeatureDiagnostics {
         appendLine()
         appendLine("音频中断重点排查")
         for (key in listOf("audio_focus_pause", "audio_call_pause", "audio_external_pause",
-            "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck")) {
+            "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck", "audio_external_auto_resume")) {
             appendLine(key + "=" + pref.getBoolean(key, ModuleSettingsStore.defaultBoolean(key)) +
                 " origin=" + if (pref.contains(key)) "saved" else "default")
         }
-        for (signal in listOf("音频协调: 实际配置", "音频协调: 焦点回调",
+        appendLine("audio_external_resume_delay_ms=" + ModuleSettingsStore.externalResumeDelay(pref))
+        for (signal in listOf("音频协调: 已记录外部音频恢复会话",
+            "音频协调: 外部音频停止，等待恢复", "音频协调: 外部音频恢复播放已确认",
+            "音频协调: 外部音频恢复焦点未获批准", "音频协调: 取消外部音频恢复",
+            "音频协调: 实际配置", "音频协调: 焦点回调",
             "音频协调: 系统音频状态同步", "音频协调: 未收到系统音频状态",
             "Read-only system audio activity listener registered", "音频协调: 中断",
             "音频协调: 暂停状态已确认", "音频协调: 已阻止后台自动开始播放")) {
