@@ -103,14 +103,16 @@ internal object NativeBusinessResolver {
     fun boundEngine(candidate: Any?): Any? {
         if (candidate == null) return null
         if (NativeMetadataAccess.extendsType(candidate.javaClass, ENGINE)) return candidate
-        val getter = noArg(candidate.javaClass, "getVideoEngine") {
-            NativeMetadataAccess.extendsType(it, ENGINE)
-        }
-        if (getter != null) {
+        val observed = ArrayList<Any>(2)
+        for (name in listOf("getVideoEngine", "getTTVideoEngine")) {
+            val getter = noArg(candidate.javaClass, name) {
+                NativeMetadataAccess.extendsType(it, ENGINE)
+            } ?: continue
             val actual = runCatching { getter.invoke(candidate) }.getOrNull()
-            if (actual != null && NativeMetadataAccess.extendsType(actual.javaClass, ENGINE))
-                return actual
+            if (actual != null && NativeMetadataAccess.extendsType(actual.javaClass, ENGINE) &&
+                observed.none { it === actual }) observed.add(actual)
         }
+        if (observed.isNotEmpty()) return observed.singleOrNull()
         // Fallback only on an existing object with the player wrapper contract.
         if (noArg(candidate.javaClass, "getSurfaceHolder") == null ||
             shape(candidate.javaClass).methods.none { it.name == "pause" &&

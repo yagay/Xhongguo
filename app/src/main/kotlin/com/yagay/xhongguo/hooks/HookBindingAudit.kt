@@ -51,7 +51,7 @@ internal class HookBindingAudit {
             "onEnginePlayStart" -> instanceVoid(method,
                 "com.ss.android.videoshop.api.VideoStateInquirer",
                 "com.ss.android.videoshop.entity.PlayEntity", "int")
-            "onVideoPlay", "onVideoPause", "onVideoReleased" -> instanceVoid(method,
+            "onVideoPlay", "onVideoPause", "onVideoReleased", "onFirstPlayStart" -> instanceVoid(method,
                 "com.ss.android.videoshop.api.VideoStateInquirer",
                 "com.ss.android.videoshop.entity.PlayEntity")
             else -> false

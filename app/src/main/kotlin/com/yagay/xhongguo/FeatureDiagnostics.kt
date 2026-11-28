@@ -120,6 +120,14 @@ object FeatureDiagnostics {
             if (errors.isNotEmpty()) appendLine("  失败线索：" + errors.joinToString())
         }
         appendLine()
+        appendLine("APK 合同与运行验证")
+        appendLine("基准：国版 7.4.2.32 / 74232；接口存在不代表功能成功")
+        for (line in evidence.lineSequence().filter {
+            it.contains("通用能力识别:") || it.contains("通用能力:") ||
+                it.contains("verified recycler bind") || it.contains("native-state-confirmation") ||
+                it.contains("当前版本没有已验证的评论分发绑定")
+        }.distinct().toList().takeLast(40)) appendLine("  " + line.take(300))
+        appendLine()
         appendLine("播放协调与 Hook 生命周期")
         for (signal in listOf("播放会话: confirmed", "Hook 生命周期: 已安装作用域",
             "功能隔离:", "音频协调: 已识别原生用户暂停", "后台切集守护: 未匹配后台启动凭证")) {

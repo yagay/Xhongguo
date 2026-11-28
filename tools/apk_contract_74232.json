@@ -1,0 +1,134 @@
+{
+  "reference": {
+    "package": "com.phoenix.read",
+    "versionName": "7.4.2.32",
+    "versionCode": 74232,
+    "dexCount": 25,
+    "classDefinitions": 330983,
+    "sha256": "340cff9073bf7bd6530bc79f0c9ba00ba89dd3e8482c0f0bcc27cfa71b891b84"
+  },
+  "methods": {
+    "Lcom/ss/ttvideoengine/TTVideoEngine;": [
+      "play()V",
+      "start()V",
+      "pause()V",
+      "stop()V",
+      "release()V",
+      "releaseAsync()V",
+      "getVideoID()Ljava/lang/String;",
+      "getPlaybackState()I",
+      "getDuration()I",
+      "getCurrentPlaybackTime()I",
+      "isReleased()Z",
+      "getVideoModel()Lcom/ss/ttvideoengine/model/VideoModel;",
+      "getCurrentResolution()Lcom/ss/ttvideoengine/Resolution;",
+      "findMaxQualityResolution(Lcom/ss/ttvideoengine/model/VideoModel;Lcom/ss/ttvideoengine/Resolution;)Lcom/ss/ttvideoengine/Resolution;",
+      "configResolution(Lcom/ss/ttvideoengine/Resolution;)V",
+      "setVideoModel(Lcom/ss/ttvideoengine/model/IVideoModel;)V",
+      "setVideoModel(Lcom/ss/ttvideoengine/model/VideoModel;)V",
+      "setPlaybackParams(Lcom/ss/ttm/player/PlaybackParams;)V"
+    ],
+    "Lcom/ss/android/videoshop/context/VideoContext;": [
+      "getVideoContext(Landroid/content/Context;)Lcom/ss/android/videoshop/context/VideoContext;",
+      "getVideoEngine()Lcom/ss/ttvideoengine/TTVideoEngine;",
+      "getPlayEntity()Lcom/ss/android/videoshop/entity/PlayEntity;",
+      "isPlaying()Z",
+      "play()V",
+      "pause()V",
+      "onEnginePlayStart(Lcom/ss/android/videoshop/api/VideoStateInquirer;Lcom/ss/android/videoshop/entity/PlayEntity;I)V",
+      "onVideoPlay(Lcom/ss/android/videoshop/api/VideoStateInquirer;Lcom/ss/android/videoshop/entity/PlayEntity;)V",
+      "onVideoPause(Lcom/ss/android/videoshop/api/VideoStateInquirer;Lcom/ss/android/videoshop/entity/PlayEntity;)V",
+      "onVideoReleased(Lcom/ss/android/videoshop/api/VideoStateInquirer;Lcom/ss/android/videoshop/entity/PlayEntity;)V",
+      "onFirstPlayStart(Lcom/ss/android/videoshop/api/VideoStateInquirer;Lcom/ss/android/videoshop/entity/PlayEntity;)V"
+    ],
+    "Lcom/ss/android/videoshop/controller/VideoController;": [
+      "getVideoEngine()Lcom/ss/ttvideoengine/TTVideoEngine;",
+      "setPlayEntity(Lcom/ss/android/videoshop/entity/PlayEntity;)V",
+      "onPlaybackStateChanged(Lcom/ss/ttvideoengine/TTVideoEngine;I)V",
+      "onRenderStart(Lcom/ss/ttvideoengine/TTVideoEngine;)V",
+      "play()V",
+      "pause()V"
+    ],
+    "Lcom/ss/android/videoshop/entity/PlayEntity;": [
+      "getVideoId()Ljava/lang/String;",
+      "getTitle()Ljava/lang/String;",
+      "getBusinessModel()Ljava/lang/Object;",
+      "setTitle(Ljava/lang/String;)Lcom/ss/android/videoshop/entity/PlayEntity;",
+      "setVideoId(Ljava/lang/String;)Lcom/ss/android/videoshop/entity/PlayEntity;",
+      "setBusinessModel(Ljava/lang/Object;)Lcom/ss/android/videoshop/entity/PlayEntity;"
+    ],
+    "Lcom/ss/ttvideoengine/model/VideoModel;": [
+      "getSupportResolutions()[Lcom/ss/ttvideoengine/Resolution;"
+    ],
+    "Lcom/ss/ttm/player/PlaybackParams;": [
+      "setSpeed(F)Lcom/ss/ttm/player/PlaybackParams;"
+    ],
+    "Lcom/dragon/read/component/shortvideo/impl/v2/ShortSeriesSingleFragment;": [
+      "getCurrentPosition()I",
+      "getDataList()Ljava/util/List;"
+    ],
+    "Lcom/dragon/read/component/shortvideo/impl/ShortSeriesActivity;": [
+      "onCreate(Landroid/os/Bundle;)V",
+      "onResume()V"
+    ],
+    "Lcom/dragon/read/pages/main/MainFragmentActivity;": [
+      "onCreate(Landroid/os/Bundle;)V",
+      "onResume()V"
+    ],
+    "Lcom/dragon/read/widget/BottomTabFrameLayout;": [
+      "setBottomTabBackground(I)V",
+      "setLayoutParams(Landroid/view/ViewGroup$LayoutParams;)V"
+    ],
+    "Lcom/dragon/read/recyler/AbsRecyclerViewHolder;": [
+      "onBind(Ljava/lang/Object;I)V",
+      "onBind(Ljava/lang/Object;ILjava/util/List;)V",
+      "onBind(Ljava/lang/Object;ILandroidx/recyclerview/widget/RecyclerView$Adapter;)V"
+    ],
+    "Lcom/dragon/read/component/biz/impl/mine/settings/SettingsActivity;": [
+      "onCreate(Landroid/os/Bundle;)V"
+    ],
+    "Lcom/dragon/read/component/biz/impl/mine/settings/KmpSettingsActivity;": [
+      "onCreate(Landroid/os/Bundle;)V"
+    ],
+    "Lcom/dragon/read/component/shortvideo/impl/autoplay/o;": [
+      "getTTVideoEngine()Lcom/ss/ttvideoengine/TTVideoEngine;",
+      "setSpeed(F)V"
+    ],
+    "Lcom/ss/android/videoshop/commonbase/widget/SeekBarForNewUI;": [
+      "getProgress()I",
+      "onTouchEvent(Landroid/view/MotionEvent;)Z"
+    ],
+    "Lcom/ss/android/videoshop/layer/widget/SSSeekBar;": [
+      "getProgress()I",
+      "setProgress(F)V"
+    ],
+    "Lcom/dragon/read/component/shortvideo/data/VideoDetailModelWrapper;": [
+      "getVideoData()Lcom/dragon/read/component/shortvideo/data/saas/video/SaasVideoData;"
+    ],
+    "Lcom/dragon/read/base/ssconfig/SsConfigMgr;": [
+      "getABValueJson(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    ]
+  },
+  "fields": {
+    "Lcom/dragon/read/component/shortvideo/data/saas/video/SaasVideoData;": [
+      "vid:Ljava/lang/String;",
+      "seriesName:Ljava/lang/String;",
+      "cover:Ljava/lang/String;",
+      "episodesId:Ljava/lang/String;",
+      "seriesId:Ljava/lang/String;"
+    ],
+    "Lcom/dragon/read/component/shortvideo/data/saas/video/SaasVideoDetailModel;": [
+      "episodesId:Ljava/lang/String;",
+      "episodesTitle:Ljava/lang/String;",
+      "episodesCover:Ljava/lang/String;",
+      "smallEpisodesCover:Ljava/lang/String;"
+    ]
+  },
+  "classes": [
+    "Lcom/ss/android/videoshop/layer/progressbar/SSProgressBar;",
+    "Lcom/dragon/read/component/shortvideo/impl/rightview/ShortSeriesRightView;",
+    "Lcom/dragon/read/component/shortvideo/impl/feedtab/VideoFeedTabFragmentImpl;",
+    "Lcom/dragon/read/component/shortvideo/impl/seriesdetail/ShortSeriesDetailActivity;",
+    "Lcom/dragon/read/component/shortvideo/impl/albumdetail/VideoAlbumDetailActivity;"
+  ]
+}

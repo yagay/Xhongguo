@@ -154,7 +154,7 @@ internal object NativePlayEntityInfo {
             val entity = invoke(owner, method) ?: continue
             remember(entity)
             val entityId = id(entity, "getVideoId")
-            val boundEngine = invoke(owner, "getVideoEngine")
+            val boundEngine = NativePlaybackSession.boundEngine(owner)
             val exactIdMatch = entityId != null && engineId != null &&
                 entityId == engineId
             val boundWithoutComparableIds = boundEngine === engine &&

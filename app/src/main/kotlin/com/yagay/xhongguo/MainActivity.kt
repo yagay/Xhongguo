@@ -175,14 +175,19 @@ class MainActivity : Activity() {
         val pi = packageInfo(pkg) ?: return "$label  未安装\n$pkg"
         val versionName = pi.versionName ?: "未知"
         val code = versionCodeOf(pi)
-        val status = if (versionName in supported) "✓ 已适配" else "! 待验证（已保护原生布局）"
+        val status = when {
+            pkg == TargetNames.CN_PACKAGE && versionName == "7.4.2.32" ->
+                "APK 签名已核对（运行效果待验证）"
+            versionName in supported -> "历史兼容配置"
+            else -> "通用能力检测（待验证）"
+        }
         return "$label  $versionName  ·  $status\nversionCode $code  ·  $pkg"
     }
 
     private fun updateTargetVersionText() {
         if (!::tvTargetVersions.isInitialized) return
         tvTargetVersions.text = buildString {
-            append("已适配版本\n")
+            append("已核对 APK / 历史兼容版本\n")
             append("国版  ${TargetNames.SUPPORTED_CN_VERSIONS.joinToString("  ·  ")}\n")
             append("国际版  ${TargetNames.SUPPORTED_OVERSEA_VERSIONS.joinToString("  ·  ")}\n\n")
             append("当前设备\n")

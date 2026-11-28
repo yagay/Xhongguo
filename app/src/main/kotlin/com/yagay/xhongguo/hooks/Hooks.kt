@@ -2604,9 +2604,12 @@ object Hooks {
     private fun refreshVideoPauseState(reason: String, fallback: Boolean? = null) {
         mainHandler.postDelayed({
             val shortVideoState = detectPausedFromShortVideoHolders()
-            val detected = shortVideoState ?: detectPausedFromVideoLayers() ?: fallback
+            val nativeState = if (TargetNames.isUniversal(gNames))
+                NativePlaybackSession.state(NativePlaybackSession.currentFor(gCurrentActivity)) else null
+            val nativePaused = when (nativeState) { 1 -> false; 2 -> true; else -> null }
+            val detected = nativePaused ?: shortVideoState ?: detectPausedFromVideoLayers() ?: fallback
             if (detected != null) {
-                val source = if (shortVideoState != null) "short-holder" else "layer"
+                val source = if (nativePaused != null) "verified-engine" else if (shortVideoState != null) "short-holder" else "layer"
                 setVideoPaused(detected, "$reason/$source")
             }
             else LogUtil.warn("video state undetermined: $reason")
@@ -2694,11 +2697,11 @@ object Hooks {
             "com.dragon.read.pages.main.MainFragmentActivity",
             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
         )) return false
-        // Generic video progress only: do not hide settings/loaders or
-        // widgets unrelated to the currently visible video screen.
-        if (v !is android.widget.SeekBar &&
-            v !is android.widget.ProgressBar) return false
+        // APK-confirmed custom View-based VideoShop seek bars.
         if (!isInsideCurrentActivityDecor(v)) return false
+        if (NativeUiContract.isVideoSeekBar(v)) return true
+        if (NativePlaybackSession.currentFor(activity) == null ||
+            v !is android.widget.SeekBar) return false
         val dm = activity.resources.displayMetrics
         val w = if (v.width > 0) v.width else v.measuredWidth
         val h = if (v.height > 0) v.height else v.measuredHeight
@@ -5263,19 +5266,24 @@ object Hooks {
 
             try {
                 val bottomFrameClazz = Class.forName("com.dragon.read.widget.BottomTabFrameLayout", false, classLoader)
-                ham(bottomFrameClazz, "setBottomTabBackground", "nativeBottomBackground_${pkg.hashCode()}") { chain ->
-                    val frame = chain.thisObject as? View
-                    val result = chain.proceed()
-                    if (gMasterOn && gControlOn && !keepNativeNavigation() &&
-                        !(gRestoreControlsOnPause && gVideoPaused)) {
-                        collapseNativeMainBottomFrame(frame)
-                    }
-                    if (isShoppingMallDisabled()) mainHandler.post {
-                        scanShoppingTabIfNeeded(gCurrentActivity, force = true)
-                    }
-                    result
-                }
-                LogUtil.info("  ✓ BottomTabFrameLayout.setBottomTabBackground/windowNavColor | pkg=$pkg")
+                val verifiedBottomMethod = NativeHookContract.methods(bottomFrameClazz,
+                    listOf(NativeHookContract.sig("setBottomTabBackground", "void", "int"))).singleOrNull()
+                if (verifiedBottomMethod != null && bindingAudit.attempt("native-bottom-background", verifiedBottomMethod.toGenericString()) {
+                    module.hook(verifiedBottomMethod).setId("nativeBottomBackground_${pkg.hashCode()}")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val frame = chain.thisObject as? View
+                            val result = chain.proceed()
+                            FeatureFaultGuard.run("native-bottom-background") {
+                                if (gMasterOn && gControlOn && !keepNativeNavigation() &&
+                                    !(gRestoreControlsOnPause && gVideoPaused)) collapseNativeMainBottomFrame(frame)
+                                if (isShoppingMallDisabled()) mainHandler.post {
+                                    scanShoppingTabIfNeeded(gCurrentActivity, force = true)
+                                }
+                            }
+                            result
+                        })
+                }) LogUtil.info("  ✓ verified BottomTabFrameLayout.setBottomTabBackground(int) | pkg=$pkg")
             } catch (e: Throwable) {
                 LogUtil.warn("  BottomTabFrameLayout 背景 Hook 未命中 | pkg=$pkg: $e")
             }
@@ -5478,7 +5486,7 @@ object Hooks {
                 LogUtil.warn("  双击处理器 $handlerName Hook 失败: $e")
             }
         }
-        if (doubleTapHookCount == 0) LogUtil.warn("  双击评论：当前版本没有安装到任何 onDoubleTap Hook")
+        if (doubleTapHookCount == 0) LogUtil.warn("  双击评论：当前版本没有已验证的评论分发绑定，保留原生手势")
 
         if (gNames.doubleTapLikeView.isNotBlank()) {
             try {
@@ -5534,8 +5542,10 @@ object Hooks {
                     "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
                 var modelHooks = 0
                 for ((index, method) in engine.declaredMethods.filter {
-                    it.name == "setVideoModel" && it.parameterCount == 1 &&
-                        it.parameterTypes[0].name.contains("VideoModel")
+                    HookBindingAudit.instanceVoid(it, "com.ss.ttvideoengine.model.IVideoModel") &&
+                        it.name == "setVideoModel" ||
+                        HookBindingAudit.instanceVoid(it, "com.ss.ttvideoengine.model.VideoModel") &&
+                        it.name == "setVideoModel"
                 }.withIndex()) {
                     module.hook(method)
                         .setId("universalMaxQualityVideoModel_$index")
@@ -6023,8 +6033,7 @@ object Hooks {
                 "com.ss.android.videoshop.context.VideoContext", false, classLoader
             )
             var mediaHookCount = 0
-            for ((methodIndex, method) in videoContextClass.declaredMethods
-                .filter { HookBindingAudit.videoEvent(it) }
+            for ((methodIndex, method) in NativeHookContract.methods(videoContextClass, NativeHookContract.contextEvents)
                 .withIndex()) {
                 try {
                     module.hook(method)
@@ -6035,7 +6044,7 @@ object Hooks {
                             try {
                                 val action = method.name
                                 when (action) {
-                                    "onVideoPlay", "onEnginePlayStart" -> {
+                                    "onVideoPlay", "onEnginePlayStart", "onFirstPlayStart" -> {
                                         SystemMediaBridge.onNativeVideoEvent(
                                             chain.thisObject, "VideoContext#$action", true)
                                         SystemMediaBridge.onNativeVideoStart(
@@ -6080,9 +6089,7 @@ object Hooks {
                         }
                     }
             }
-            for ((i, method) in videoContextClass.declaredMethods
-                .filter { it.name in setOf("play", "pause") &&
-                    it.parameterCount == 0 }.withIndex()) {
+            for ((i, method) in NativeHookContract.methods(videoContextClass, NativeHookContract.contextTransport).withIndex()) {
                 module.hook(method)
                     .setId("xhNativeVideoTransport_$i")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
@@ -6107,66 +6114,10 @@ object Hooks {
             LogUtil.warn("  system media VideoContext hooks missing: " + e)
         }
 
-        // The real 7.3.5.x player can reach the low-level TTVideoEngine
-        // without calling VideoContext.onVideoPlay, as confirmed by the new
-        // diagnostic ZIP. Observe actual engine commands, not just installation.
-        // The previous experiment installed only part of its wrapper hooks
-        // before a NoSuchMethodException. Do not hook obfuscated wrappers
-        // or exit arguments until a separately validated implementation.
-        LogUtil.info("持续播放: v2 仅原生引擎导航保护，包装层共享已停用")
-        try {
-            val engine = Class.forName(
-                "com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
-            var installed = 0
-            for ((index, method) in engine.declaredMethods.filter {
-                it.name in setOf("play", "pause", "stop", "releaseAsync", "start", "release") &&
-                    HookBindingAudit.instanceVoid(it)
-            }.sortedBy { it.name }.withIndex()) {
-                try {
-                    module.hook(method)
-                        .setId("xhSystemMediaTTVideoEngine_$index")
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(Hooker { chain ->
-                            if (method.name in setOf("play", "start") &&
-                                method.returnType == Void.TYPE &&
-                                AudioFocusCoordinator.blocksNativeBackgroundStart(chain.thisObject, gCurrentActivity)) {
-                                return@Hooker null
-                            }
-                            if (method.name == "pause" &&
-                                method.returnType == Void.TYPE &&
-                                (FeatureFaultGuard.test("continuity-pause") {
-                                    InAppPlaybackContinuity.keepLifecyclePause(chain.thisObject)
-                                } || FeatureFaultGuard.test("mini-pause") {
-                                    InAppMiniPlayer.shouldKeepPlaying(chain.thisObject)
-                                } || FeatureFaultGuard.test("background-pause") {
-                                    SystemMediaBridge.shouldSuppressBackgroundEnginePause(chain.thisObject)
-                                })) {
-                                return@Hooker null
-                            }
-                            if (method.name == "pause")
-                                AudioFocusCoordinator.observeNativePauseIntent(chain.thisObject, gCurrentActivity)
-                            val result = chain.proceed()
-                            try {
-                                val candidate = chain.thisObject
-                                if (TargetNames.isUniversal(gNames))
-                                    observeNativeEngine(candidate, method.name, gCurrentActivity)
-                                else if (candidate != null && method.name !in setOf("start", "release"))
-                                    publishNativeEngine(candidate, method.name, gCurrentActivity)
-                            } catch (ex: Throwable) {
-                                LogUtil.warn("播放会话: 原生事件观察失败 " + method.name + ": " + ex)
-                            }
-                            result
-                        })
-                    installed++
-                } catch (e: Throwable) {
-                    LogUtil.warn("系统媒体: TTVideoEngine " +
-                        method.name + " Hook 失败: " + e.message)
-                }
-            }
-            LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed")
-        } catch (e: Throwable) {
-            LogUtil.warn("  system media TTVideoEngine observer unavailable: " + e.message)
-        }
+        // Native transport and actual state confirmation are bound through
+        // the audited SDK signatures, independently of obfuscated holders.
+        NativePlaybackHooks.install(module, classLoader, TargetNames.isUniversal(gNames),
+            { gCurrentActivity }, ::publishNativeEngine, ::observeNativeEngine)
 
         // Read stable SaasVideoDetailModel objects rather than guessing an
         // obfuscated uo4.y0.x Runnable which is absent in Hongguo 7.3.5.32.
@@ -6400,8 +6351,8 @@ object Hooks {
             val controllerClass = Class.forName(
                 "com.ss.android.videoshop.controller.VideoController", false, classLoader)
             var registrations = 0
-            for ((index, method) in controllerClass.declaredMethods
-                .filter { it.name == "setPlayEntity" && it.parameterCount == 1 }
+            for ((index, method) in NativeHookContract.methods(controllerClass,
+                    listOf(NativeHookContract.sig("setPlayEntity", "void", NativeHookContract.ENTITY)))
                 .withIndex()) {
                 module.hook(method)
                     .setId("xhMediaEntityBound_$index")
@@ -6416,9 +6367,7 @@ object Hooks {
                     })
                 registrations++
             }
-            for ((index, method) in entityClass.declaredMethods
-                .filter { it.name in setOf("setTitle", "setVideoId",
-                    "setBusinessModel") && it.parameterCount == 1 }
+            for ((index, method) in NativeHookContract.methods(entityClass, NativeHookContract.entitySetters)
                 .withIndex()) {
                 module.hook(method)
                     .setId("xhMediaEntityChanged_$index")
@@ -6440,8 +6389,7 @@ object Hooks {
             val controller = Class.forName(
                 "com.ss.android.videoshop.controller.VideoController", false, classLoader
             )
-            for ((i, method) in controller.declaredMethods
-                .filter { it.name == "play" && it.parameterCount == 0 }.withIndex()) {
+            for ((i, method) in NativeHookContract.methods(controller, listOf(NativeHookContract.sig("play", "void"))).withIndex()) {
                 module.hook(method)
                     .setId("xhSystemMediaControllerPlay_$i")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
@@ -6459,10 +6407,8 @@ object Hooks {
 
         try {
             val controller = Class.forName("com.ss.android.videoshop.controller.VideoController", false, classLoader)
-            val pausingMethods = controller.declaredMethods.filter { method ->
-                method.name in setOf("pause", "pauseVideo") &&
-                    method.returnType == Void.TYPE && method.parameterCount == 0
-            }
+            val pausingMethods = NativeHookContract.methods(controller,
+                listOf(NativeHookContract.sig("pause", "void"), NativeHookContract.sig("pauseVideo", "void")))
             for ((index, method) in pausingMethods.withIndex()) {
                 module.hook(method).setId("miniHoldPause_" + index)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
@@ -6685,19 +6631,19 @@ object Hooks {
             try { registerVideoToolbarLayer(chain.thisObject) } catch (_: Throwable) {}
         }
 
-        try { val c = Class.forName("com.dragon.read.pages.video.layers.toolbarlayer.ToolbarLayerFixed", false, classLoader)
+        if (gNames.fixedToolbarShowMethod.isNotBlank()) try { val c = Class.forName("com.dragon.read.pages.video.layers.toolbarlayer.ToolbarLayerFixed", false, classLoader)
             ham(c, gNames.fixedToolbarShowMethod, "pb") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("btmBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
             LogUtil.info("  ✓ playerBtm") } catch (e: Exception) { LogUtil.warn("  ToolbarLayerFixed 未找到") }
 
-        try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
+        if (gNames.customizeToolbarShowMethod.isNotBlank()) try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
             ham(c, gNames.customizeToolbarShowMethod, "pt") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
             LogUtil.info("  ✓ playerTop") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer 未找到") }
 
-        try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
+        if (gNames.customizeToolbarApplyMethod.isNotBlank()) try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
             module.hook(c.getDeclaredMethod(gNames.customizeToolbarApplyMethod, Boolean::class.java, Boolean::class.java, Boolean::class.java)).setId("ctS").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } })
             LogUtil.info("  ✓ CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod}") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod} 未找到") }
 
-        try { val c = Class.forName(gNames.toolbarBase, false, classLoader)
+        if (gNames.toolbarBase.isNotBlank()) try { val c = Class.forName(gNames.toolbarBase, false, classLoader)
             hac(c, "toolbarBaseCtor") { chain -> val r = chain.proceed(); registerToolbarBaseLayer(chain.thisObject); r }
             module.hook(c.getDeclaredMethod("a", Boolean::class.java)).setId("gt7c").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 registerToolbarBaseLayer(chain.thisObject)
@@ -6916,7 +6862,35 @@ object Hooks {
             LogUtil.info("  ✓ addView")
         } catch (e: Exception) { LogUtil.error("addView", e) }
 
-        try { val c = Class.forName("com.dragon.read.recyler.AbsRecyclerViewHolder", false, classLoader); hac(c, "cc") { chain -> if (gMasterOn) try { val v = chain.getArg(0) as? View; if (v != null) { if (gControlOn) scanTreeQuick(v) else scanTreeRestore(v) } } catch (_: Exception) {}; chain.proceed() }; try { module.hook(c.getDeclaredMethod("onBind", Object::class.java, Int::class.java)).setId("cb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn) try { val iv = chain.thisObject.javaClass.getField("itemView").get(chain.thisObject) as? View; if (iv != null) { if (gControlOn) scanTreeQuick(iv) else scanTreeRestore(iv) } } catch (_: Exception) {}; chain.proceed() }) } catch (_: Exception) {}; LogUtil.info("  ✓ card") } catch (e: Exception) { LogUtil.warn("  AbsRecyclerViewHolder 未找到") }
+        try {
+            val holder = NativeHookContract.load(classLoader, NativeHookContract.HOLDER)
+            val methods = NativeHookContract.methods(holder, NativeHookContract.recyclerBind)
+            for ((index, method) in methods.withIndex()) {
+                bindingAudit.attempt("native-recycler-bind", method.toGenericString()) {
+                    module.hook(method).setId("xhRecyclerBind_$index")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            FeatureFaultGuard.run("native-recycler-bind") {
+                                val activity = gCurrentActivity
+                                if (gMasterOn && activity?.hasWindowFocus() == true) {
+                                    val view = chain.thisObject?.javaClass?.getField("itemView")
+                                        ?.get(chain.thisObject) as? View
+                                    if (view != null && view.isAttachedToWindow &&
+                                        isInsideCurrentActivityDecor(view)) {
+                                        if (gControlOn && !(gRestoreControlsOnPause && gVideoPaused))
+                                            scanTreeQuick(view)
+                                        else scanTreeRestore(view)
+                                        uiScanScheduler.request()
+                                    }
+                                }
+                            }
+                            result
+                        })
+                }
+            }
+            LogUtil.info("  ✓ verified recycler bind overloads=" + methods.size)
+        } catch (e: Throwable) { LogUtil.warn("  Native recycler bind unavailable: " + e.javaClass.simpleName) }
 
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 

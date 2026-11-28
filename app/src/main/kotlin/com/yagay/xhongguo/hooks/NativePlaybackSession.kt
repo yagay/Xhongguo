@@ -117,6 +117,30 @@ internal object NativePlaybackSession {
             emit(candidate, action, active.owner.get())
     }
 
+    fun observeVerifiedCallback(candidate: Any?, event: String, foreground: () -> Activity?,
+                                emit: (Any, String, Activity?) -> Unit) {
+        if (candidate == null || !isEngine(candidate)) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val ref = WeakReference(candidate)
+            main.post { ref.get()?.let { observeVerifiedCallback(it, event, foreground, emit) } }
+            return
+        }
+        val active = current
+        val known = active?.engine?.get() === candidate
+        val requested = pending.get() === candidate
+        if (!known && !requested) return
+        val activity = if (requested) pendingOwner.get() else active?.owner?.get()
+        val state = state(candidate)
+        if (state == 1) {
+            LogUtil.incr("nativeVerifiedStatePlaying")
+            observe(candidate, "play", activity, foreground, emit)
+        } else if (state == 2 && known && active?.playing == true &&
+            event == "onPlaybackStateChanged") {
+            LogUtil.incr("nativeVerifiedStatePaused")
+            observe(candidate, "pause", activity, foreground, emit)
+        }
+    }
+
     fun onDestroyed(activity: Activity?) {
         if (activity == null) return
         if (pendingOwner.get() === activity) {

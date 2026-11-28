@@ -22,9 +22,16 @@ internal object NativePlaybackQuality {
             appliedVideoId == videoId) return true
         return try {
             val loader = engine.javaClass.classLoader ?: return false
-            val modelType = Class.forName("com.ss.ttvideoengine.model.VideoModel", false, loader)
-            val resolution = Class.forName("com.ss.ttvideoengine.Resolution", false, loader)
-            val engineType = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, loader)
+            val c = NativeHookContract
+            val modelType = c.load(loader, c.MODEL) ?: return false
+            val resolution = c.load(loader, c.RESOLUTION) ?: return false
+            val engineType = c.load(loader, c.ENGINE) ?: return false
+            if (!c.has(engineType, c.sig("getVideoModel", c.MODEL)) ||
+                !c.has(engineType, c.sig("getCurrentResolution", c.RESOLUTION)) ||
+                !c.has(engineType, c.sig("findMaxQualityResolution", c.RESOLUTION, c.MODEL,
+                    c.RESOLUTION, static = true)) ||
+                !c.has(engineType, c.sig("configResolution", "void", c.RESOLUTION)) ||
+                !c.has(modelType, c.sig("getSupportResolutions", "[L" + c.RESOLUTION + ";"))) return false
             val model = engineType.getMethod("getVideoModel").invoke(engine) ?: return false
             if (!modelType.isInstance(model)) return false
             val current = engineType.getMethod("getCurrentResolution").invoke(engine) ?: return false
