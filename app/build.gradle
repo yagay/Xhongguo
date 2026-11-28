@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'xyz.kejiyu.hongguo'
+    namespace 'com.yagay.xhongguo'
     compileSdk 36
 
     defaultConfig {
-        applicationId 'xyz.kejiyu.hongguo'
+        applicationId 'com.yagay.xhongguo'
         minSdk 29
         targetSdk 34
         versionCode 20260811

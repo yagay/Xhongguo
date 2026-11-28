@@ -17,7 +17,7 @@
 
 ## 1. 项目简介
 
-本项目（<span dir="ltr"><code>xyz.kejiyu.hongguo</code></span>）是一个针对红果短剧客户端的界面精简与体验增强模块。支持通过模块内置设置面板自由自定义多种沉浸式观影体验、手势拦截、自动最高画质及体验优化功能。
+本项目（<span dir="ltr"><code>com.yagay.xhongguo</code></span>）是一个针对红果短剧客户端的界面精简与体验增强模块。支持通过模块内置设置面板自由自定义多种沉浸式观影体验、手势拦截、自动最高画质及体验优化功能。
 
 ---
 
@@ -121,7 +121,7 @@
 │   └── src/main/
 │       ├── assets/                    # Xposed / LSPosed 属性配置 (module.prop, xposed_init)
 │       ├── resources/META-INF/xposed/ # libxposed 接口及 Scope 配置文件
-│       └── kotlin/xyz/kejiyu/hongguo/
+│       └── kotlin/com/yagay/xhongguo/
 │           ├── MainActivity.kt        # 模块主界面 Activity
 │           ├── SettingsActivity.kt    # 模块内独立设置页面
 │           ├── ModuleSettingsStore.kt # 跨进程同步与配置迁移

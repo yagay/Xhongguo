@@ -1,2 +1,2 @@
--keep class xyz.kejiyu.hongguo.MainHook { *; }
--keep class xyz.kejiyu.hongguo.MainActivity { *; }
+-keep class com.yagay.xhongguo.MainHook { *; }
+-keep class com.yagay.xhongguo.MainActivity { *; }

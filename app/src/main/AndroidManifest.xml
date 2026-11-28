@@ -32,11 +32,11 @@
 
         <meta-data
             android:name="xposedscope"
-            android:value="com.phoenix.read,com.phoenix.read.oversea.gp,xyz.kejiyu.hongguo" />
+            android:value="com.phoenix.read,com.phoenix.read.oversea.gp,com.yagay.xhongguo" />
 
         <provider
             android:name=".ModuleSettingsProvider"
-            android:authorities="xyz.kejiyu.hongguo.settings"
+            android:authorities="com.yagay.xhongguo.settings"
             android:exported="true" />
 
         <activity

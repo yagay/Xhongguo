@@ -2,7 +2,7 @@ name: Debug APK
 
 on:
   push:
-    branches: [main, feature/module-settings-app, experiment/in-app-continuous-playback]
+    branches: [main, test, feature/module-settings-app, experiment/in-app-continuous-playback]
   pull_request:
     branches: [main]
   workflow_dispatch:

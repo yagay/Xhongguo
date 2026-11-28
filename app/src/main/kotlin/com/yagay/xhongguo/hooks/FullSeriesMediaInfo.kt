@@ -1,0 +1,937 @@
+package com.yagay.xhongguo.hooks
+
+import android.app.Activity
+import android.os.SystemClock
+import java.lang.ref.WeakReference
+import com.yagay.xhongguo.LogUtil
+
+/**
+ * 7.3.5.32 full-series playback keeps its current SaasVideoData inside:
+ * ShortSeriesActivity.a -> uo4.y0.{I,z} (SaasVideoData).
+ * The same presenter holds its loaded SaasVideoDetailModel at x.b.
+ *
+ * Reading this already-loaded data is more reliable than the fullscreen
+ * overlay: fullscreen controls can be invisible while a video is playing.
+ * Nothing here changes playback, creates network requests, or affects feed.
+ */
+internal object FullSeriesMediaInfo {
+    data class Info(
+        val title: String? = null,
+        val episode: String? = null,
+        val source: String = "none",
+        val artworkUrl: String? = null,
+        val seriesId: String? = null
+    )
+
+    private const val ACTIVITY =
+        "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"
+    private const val DATA =
+        "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoData"
+    private const val DETAIL =
+        "com.dragon.read.component.shortvideo.data.saas.video.SaasVideoDetailModel"
+
+    private var lastDiagnosticAt = 0L
+    // uo4.y0.x is only a short-lived Runnable holding SaasVideoDetailModel.
+    // Cache only non-sensitive metadata for the same ShortSeriesActivity, not
+    // the transient Runnable or the whole model (avoids retaining its video list).
+    private var cachedActivity = WeakReference<Activity>(null)
+    private var cachedSeriesKey: String? = null
+    private var cachedSeriesTitle: String? = null
+    private var cachedTotal: Long? = null
+    private var cachedCoverUrl: String? = null
+
+    // The 7.3.5.32 detail is often held only by a short-lived uo4.y0.x
+    // Runnable. Retain safe metadata keyed by the actual series ID, never
+    // the Runnable, Activity, video list or a stale episode screenshot.
+    private data class DetailSnapshot(
+        val title: String?,
+        val artworkUrl: String?,
+        val total: Long?,
+        val observedAt: Long
+    )
+    private val detailLock = Any()
+    private val observedDetails = LinkedHashMap<String, DetailSnapshot>()
+    private const val DETAIL_TTL_MS = 30L * 60L * 1000L
+
+    // The native feed and full-series screens share these immutable, bounded
+    // snapshots. Key by the ACTUAL video ID from TTVideoEngine, never by UI
+    // position, autoplay neighbours or a recycled Activity.
+    private data class VideoSnapshot(
+        val seriesId: String?,
+        val title: String?,
+        val poster: String?,
+        val observedAt: Long
+    )
+    private val observedVideos = LinkedHashMap<String, VideoSnapshot>()
+    private const val VIDEO_TTL_MS = 15L * 60L * 1000L
+    private var lastObservedVideoDiagnosticAt = 0L
+    private var lastDetailTypeDiagnosticAt = 0L
+
+    /** Observe a completed native data-model *at its consumption boundary*.
+     * The empty default constructor is not useful with RPC/Gson adapters. */
+    fun observeVideoData(model: Any?) = observeVideoData(model, true)
+
+    private fun observeVideoData(model: Any?, notify: Boolean) {
+        if (model?.javaClass?.name != DATA) return
+        val videoId = seriesId(field(model, "vid")) ?: return
+        val id = seriesId(field(model, "episodesId")) ?:
+            seriesId(field(model, "seriesId"))
+        val title = str(field(model, "seriesName"))
+        val posterValue = field(model, "cover") as? String
+        val episodeCover = field(model, "episodeCover") as? String
+        // A still/thumbnail is not the official series poster.
+        val poster = posterValue?.takeIf {
+            it.isNotBlank() && it != episodeCover
+        }?.let { MediaArtworkLoader.normalize(it) }
+        if (title == null && poster == null && id == null) return
+        val now = SystemClock.uptimeMillis()
+        var newMetadata = false
+        synchronized(detailLock) {
+            val previous = observedVideos.remove(videoId)
+            val sameSeries = previous != null &&
+                (id == null || previous.seriesId == null ||
+                    previous.seriesId == id)
+            val updated = VideoSnapshot(
+                id ?: previous?.seriesId,
+                title ?: if (sameSeries) previous?.title else null,
+                poster ?: if (sameSeries) previous?.poster else null, now)
+            observedVideos[videoId] = updated
+            newMetadata = previous == null ||
+                previous.seriesId != updated.seriesId ||
+                previous.title != updated.title ||
+                previous.poster != updated.poster
+            while (observedVideos.size > 250) {
+                val it = observedVideos.keys.iterator()
+                if (!it.hasNext()) break
+                it.next()
+                it.remove()
+            }
+            if (now - lastObservedVideoDiagnosticAt > 12000L) {
+                lastObservedVideoDiagnosticAt = now
+                LogUtil.info("系统媒体: 原生视频数据已观察" +
+                    " videoId=true seriesId=" + (id != null) +
+                    " title=" + (title != null) +
+                    " poster=" + (poster != null) +
+                    " cacheSize=" + observedVideos.size)
+                LogUtil.incr("systemMediaVideoDataObserved")
+            }
+        }
+        if (newMetadata && notify) SystemMediaBridge.onNativeSeriesMetadataAvailable()
+    }
+
+    /**
+     * The feed's native ViewPager2 can identify the *visible* data model
+     * even when TTVideoEngine.getVideoID() is blank. A series detail
+     * snapshot may then supply the official title and full-size poster,
+     * but ONLY if its real series ID matches this current model.
+     */
+    fun infoForVideoData(model: Any?): Info {
+        if (model?.javaClass?.name != DATA) return Info()
+        val videoId = seriesId(field(model, "vid")) ?: return Info()
+        observeVideoData(model, false)
+        val cached = synchronized(detailLock) {
+            observedVideos[videoId]?.takeIf {
+                SystemClock.uptimeMillis() - it.observedAt in 0L..VIDEO_TTL_MS
+            }
+        }
+        val modelSeriesId = seriesId(field(model, "episodesId")) ?:
+            seriesId(field(model, "seriesId")) ?: cached?.seriesId
+        val detail = detailForSeries(modelSeriesId)
+        val modelCover = (field(model, "cover") as? String)
+            ?.takeIf { it.isNotBlank() &&
+                it != (field(model, "episodeCover") as? String) }
+            ?.let(MediaArtworkLoader::normalize)
+        return Info(
+            title = detail?.title ?: str(field(model, "seriesName")) ?:
+                cached?.title,
+            episode = episodeFromIndex(model, detail?.total),
+            source = "home-native-current-item",
+            artworkUrl = detail?.artworkUrl ?: modelCover ?: cached?.poster,
+            seriesId = modelSeriesId
+        )
+    }
+
+    fun observedForEngine(engine: Any?): Info {
+        val videoId = seriesId(call(engine, "getVideoID")) ?: return Info()
+        val now = SystemClock.uptimeMillis()
+        val video = synchronized(detailLock) {
+            observedVideos[videoId]?.takeIf {
+                now - it.observedAt in 0L..VIDEO_TTL_MS
+            }
+        } ?: return Info()
+        val detail = detailForSeries(video.seriesId)
+        return Info(detail?.title ?: video.title, null,
+            "native-model-video-id",
+            detail?.artworkUrl ?: video.poster, video.seriesId)
+    }
+
+
+    private fun seriesId(value: Any?): String? =
+        value?.toString()?.trim()?.takeIf {
+            it.isNotEmpty() && it != "null" && it != "0" && it.length <= 128
+        }
+
+    /** Version-independent bridge: observe the actual DTO, not an
+     * obfuscated Runnable class which changes with each host APK. */
+    fun observeDetailModel(model: Any?) {
+        rememberDetail(model)
+    }
+
+    private fun rememberDetail(model: Any?) {
+        if (!isDetailModel(model)) return
+        val id = seriesId(detailField(model, "episodesId")) ?:
+            seriesId(detailField(model, "seriesId"))
+        val nowForEvidence = SystemClock.uptimeMillis()
+        if (nowForEvidence - lastDetailTypeDiagnosticAt > 12000L) {
+            lastDetailTypeDiagnosticAt = nowForEvidence
+            LogUtil.info("系统媒体: 原生详情对象实际到达" +
+                " wrapper=" + (model?.javaClass?.name != DETAIL) +
+                " id=" + (id != null) +
+                " hasTitle=" + (str(detailField(model, "episodesTitle")) != null) +
+                " hasCover=" +
+                (MediaArtworkLoader.normalize(detailField(model, "episodesCover") as? String)
+                    != null))
+            LogUtil.incr("systemMediaNativeDetailObjectSeen")
+        }
+        if (id == null) return
+        val title = str(detailField(model, "episodesTitle")) ?:
+            str(detailField(model, "seriesName"))
+        val cover = listOf("episodesCover", "smallEpisodesCover")
+            .firstNotNullOfOrNull { key ->
+                (detailField(model, key) as? String)?.let {
+                    MediaArtworkLoader.normalize(it)
+                }
+            }
+        val total = listOf("episodeTotalCnt", "episodeCnt")
+            .firstNotNullOfOrNull { key ->
+                number(detailField(model, key))?.takeIf { it in 1..5000L }
+            }
+        if (title == null && cover == null && total == null) return
+        val now = SystemClock.uptimeMillis()
+        var newMetadata = false
+        synchronized(detailLock) {
+            val prev = observedDetails[id]
+            val updated = DetailSnapshot(title ?: prev?.title,
+                cover ?: prev?.artworkUrl, total ?: prev?.total, now)
+            observedDetails.remove(id)
+            observedDetails[id] = updated
+            val iterator = observedDetails.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (now - entry.value.observedAt > DETAIL_TTL_MS ||
+                    observedDetails.size > 24) iterator.remove()
+            }
+            newMetadata = prev == null || prev.title != updated.title ||
+                prev.artworkUrl != updated.artworkUrl ||
+                prev.total != updated.total
+            if (newMetadata) {
+                LogUtil.info("系统媒体: 已捕获官方全集详情" +
+                    " title=" + (updated.title != null) +
+                    " poster=" + (updated.artworkUrl != null) +
+                    " total=" + (updated.total != null))
+                LogUtil.incr("systemMediaSeriesDetailCaptured")
+            }
+        }
+        if (newMetadata) SystemMediaBridge.onNativeSeriesMetadataAvailable()
+    }
+
+    private fun detailForSeries(id: String?): DetailSnapshot? {
+        if (id == null) return null
+        val now = SystemClock.uptimeMillis()
+        return synchronized(detailLock) {
+            observedDetails[id]?.takeIf {
+                now - it.observedAt in 0L..DETAIL_TTL_MS
+            }
+        }
+    }
+
+    private data class PagerState(
+        val currentItem: Int? = null,
+        val adapterCount: Int? = null,
+        val listCount: Int? = null,
+        val currentPageModel: Any? = null,
+        val pageAligned: Boolean = false
+    )
+
+    private fun pagerState(presenter: Any?, detail: Any?, total: Long?): PagerState {
+        // uo4.y0.h is j25.d, which extends j25.e -> AndroidX ViewPager.
+        // getCurrentItem() is an actual selected page, unlike the cached
+        // uo4.y0.z model that is only set during presenter initialization.
+        val pager = NativeBusinessResolver.pager(presenter) ?: return PagerState()
+        val item = number(call(pager, "getCurrentItem"))?.toInt()
+            ?.takeIf { it in 0..5000 }
+        val adapter = call(pager, "getAdapter")
+        val count = number(call(adapter, "getCount"))?.toInt()
+            ?.takeIf { it in 1..5000 }
+
+        val list = listOf("episodesList", "playerSerialVideoList",
+            "episodesListWithTrail", "episodesListWithTrailAfterCut")
+            .mapNotNull { field(detail, it) as? List<*> }
+            .firstOrNull { it.isNotEmpty() && it.size <= 5000 &&
+                (it.size == count || total != null && it.size.toLong() == total) }
+
+        val listSize = list?.size
+        val aligned = item != null && count != null && item < count &&
+            (total != null && count.toLong() == total ||
+             listSize != null && count == listSize && count >= 2)
+        val model = if (aligned && list != null && item < list.size)
+            list[item] else null
+        return PagerState(item, count, listSize, model, aligned)
+    }
+
+    private fun episodeFromPager(pager: PagerState, total: Long?): String? {
+        val item = pager.currentItem ?: return null
+        if (!pager.pageAligned) return null
+
+        // The real ViewPager adapter must represent the same complete
+        // episodes list or an exact copy of the series detail's list. A
+        // three-page recycler with 80 episodes is NOT an episode counter.
+        val selected = pager.currentPageModel
+        val indexInList = number(field(selected, "indexInList"))
+        val verified = if (indexInList != null &&
+            indexInList in 0..4999L &&
+            indexInList < (total ?: 5000L)) indexInList + 1
+            else item.toLong() + 1L
+        if (verified <= 0 || verified > 5000 ||
+            total != null && verified > total) return null
+        return "第" + verified + "集" +
+            (if (total != null) " · 全" + total + "集" else "")
+    }
+
+    // The outer uo4.y0.h pager has only two navigation containers (count=2).
+    // The real currently-playing episode is selected in the INNER
+    // ShortSeriesSingleFragment's list. The original 7.3.5.32 APK exposes
+    // getCurrentPosition() (backed by field U), getDataList() and
+    // VideoData.getVideoData() -> SaasVideoData on that fragment.
+    private const val EPISODE_FRAGMENT =
+        "com.dragon.read.component.shortvideo.impl.v2.ShortSeriesSingleFragment"
+
+    private data class ActiveFragmentEntry(
+        val fragment: Any,
+        val score: Int,
+        val itemPosition: Int,
+        val listCount: Int,
+        val video: Any,
+        val modelVidIndex: Long?,
+        val modelListIndex: Long?,
+        val seriesVerified: Boolean
+    )
+
+    private var lastFragmentDiagnosticAt = 0L
+
+    private data class FragmentMedia(
+        val title: String? = null,
+        val episode: String? = null,
+        val artworkUrl: String? = null,
+        val total: Long? = null,
+        val seriesId: String? = null
+    )
+
+    private fun currentFragmentEntries(
+        activity: Activity,
+        seriesKey: String?,
+        total: Long?
+    ): List<ActiveFragmentEntry> {
+        val entries = ArrayList<ActiveFragmentEntry>()
+        for (fragment in NativeMetadataAccess.episodeFragments(activity)) {
+                if (NativeMetadataAccess.isEpisodeFragment(fragment)) {
+                    val visible = call(fragment, "isVisible") as? Boolean ?: false
+                    val resumed = call(fragment, "isResumed") as? Boolean ?: false
+                    val hidden = call(fragment, "isHidden") as? Boolean ?: false
+                    val view = call(fragment, "getView") as? android.view.View
+                    val shown = view?.isShown == true
+                    if (!hidden && (resumed || visible || shown)) {
+                        val position = number(call(fragment,
+                            "getCurrentPosition"))?.toInt()
+                        val list = call(fragment, "getDataList") as? List<*>
+                        if (position != null && list != null &&
+                            position >= 0 && position < list.size &&
+                            list.size in 1..5000) {
+                            val wrapper = list[position]
+                            val model = NativeMetadataAccess.video(wrapper)
+                            if (model != null) {
+                                val modelId = seriesId(field(model, "episodesId"))
+                                val modelTotal = number(field(model,
+                                    "episodesCount"))
+                                val sameSeries = seriesKey == null ||
+                                    modelId == null || seriesKey == modelId
+                                val sameTotal = total == null ||
+                                    modelTotal == null || modelTotal <= 0L ||
+                                    modelTotal == total
+                                if (sameSeries && sameTotal) {
+                                    val bounds = android.graphics.Rect()
+                                    val area = if (shown &&
+                                        view?.getGlobalVisibleRect(bounds) == true)
+                                        bounds.width().toLong() *
+                                            bounds.height() else 0L
+                                    val score = (if (resumed) 8 else 0) +
+                                        (if (visible) 4 else 0) +
+                                        (if (shown) 2 else 0) +
+                                        (if (area > 50000) 1 else 0)
+                                    entries.add(ActiveFragmentEntry(fragment,
+                                        score, position, list.size, model,
+                                        number(field(model, "vidIndex")),
+                                        number(field(model, "indexInList")),
+                                        (seriesKey != null && modelId == seriesKey) ||
+                                            (total != null && modelTotal == total)))
+                                }
+                            }
+                        }
+                    }
+                }
+        }
+        return entries
+    }
+
+    private fun mediaFromActiveFragment(
+        activity: Activity,
+        seriesKey: String?,
+        total: Long?
+    ): FragmentMedia {
+        val entries = currentFragmentEntries(activity, seriesKey, total)
+        val sorted = entries.sortedWith(compareByDescending<ActiveFragmentEntry> {
+            it.score
+        }.thenByDescending { it.seriesVerified })
+        val best = sorted.firstOrNull()
+        val next = sorted.getOrNull(1)
+        // Multiple equally visible active players can be cached by the app.
+        // Refuse to pick a preloaded neighbour without extra evidence.
+        val ambiguous = best != null && next != null &&
+            best.score == next.score &&
+            best.seriesVerified == next.seriesVerified &&
+            (best.video !== next.video)
+
+        val listIndex = best?.modelListIndex
+        val vidIndex = best?.modelVidIndex
+        val indexFromList = listIndex?.takeIf {
+            it >= 0L && it < (total ?: 5000L)
+        }?.plus(1)
+        val indexFromVid = vidIndex?.takeIf {
+            it in 1..(total ?: 5000L)
+        }
+        // vidIndex is an episode-facing numeric ID in this SaaS model;
+        // indexInList is the local list offset. Prefer agreement, and do not
+        // invent "first episode" when a local recycled list starts at zero.
+        val current = when {
+            ambiguous || best == null || best.score < 4 -> null
+            indexFromVid != null && indexFromList != null &&
+                indexFromVid == indexFromList -> indexFromVid
+            indexFromVid != null && listIndex == vidIndex ->
+                indexFromList
+            indexFromVid != null && listIndex == 0L &&
+                indexFromVid > 1L -> indexFromVid
+            indexFromVid != null && indexFromList == null -> indexFromVid
+            indexFromList != null && vidIndex == null -> indexFromList
+            indexFromList != null && vidIndex == 0L -> indexFromList
+            else -> null
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastFragmentDiagnosticAt > 12000L) {
+            lastFragmentDiagnosticAt = now
+            LogUtil.info("系统媒体: 全集内层视频索引 fragmentCandidates=" +
+                entries.size + " visibleScore=" +
+                (best?.score?.toString() ?: "?") +
+                " localPosition=" + (best?.itemPosition?.toString() ?: "?") +
+                " innerListCount=" + (best?.listCount?.toString() ?: "?") +
+                " vidIndex=" + (vidIndex?.toString() ?: "?") +
+                " indexInList=" + (listIndex?.toString() ?: "?") +
+                " verifiedSeries=" + (best?.seriesVerified == true) +
+                " ambiguous=$ambiguous" +
+                " resolvedEpisode=" + (current?.toString() ?: "?"))
+            LogUtil.incr("systemMediaInnerEpisodeProbe")
+        }
+        if (best == null || ambiguous || best.score < 4) return FragmentMedia()
+        val model = best.video
+        val fragmentTotal = number(field(model, "episodesCount"))
+            ?.takeIf { it in 1..5000L }
+        observeVideoData(model)
+        val modelTitle = str(field(model, "seriesName"))
+        // The Saas model separates the drama's 'cover' from the individual
+        // episode's 'episodeCover' (often a frame still). Accept 'cover'
+        // only when distinct from 'episodeCover', never the frame still.
+        val poster = field(model, "cover") as? String
+        val frameStill = field(model, "episodeCover") as? String
+        val fragmentCover: String? = poster?.takeIf {
+            it.isNotBlank() && it != frameStill
+        }
+        val matchedEpisode = if (current != null && current >= 1 &&
+            (total == null || current <= total)) {
+            "第" + current + "集" +
+                (if (total != null) " · 全" + total + "集" else "")
+        } else null
+        return FragmentMedia(
+            title = modelTitle,
+            episode = matchedEpisode,
+            artworkUrl = fragmentCover,
+            total = fragmentTotal,
+            seriesId = seriesId(field(model, "episodesId"))
+        )
+    }
+
+    private fun preserveCurrentSeries(
+        activity: Activity, seriesKey: String?, newTitle: String?,
+        newTotal: Long?, newCover: String?, verifiedPoster: Boolean
+    ): Pair<String?, Long?> {
+        if (cachedActivity.get() !== activity ||
+            seriesKey != null && cachedSeriesKey != null &&
+                cachedSeriesKey != seriesKey ||
+            // If IDs are known, they alone identify the series. A
+            // late title correction must never erase its cached poster.
+            (seriesKey == null && newTitle != null &&
+                cachedSeriesTitle != null &&
+                newTitle != cachedSeriesTitle)) {
+            cachedActivity = WeakReference(activity)
+            cachedSeriesTitle = null
+            cachedTotal = null
+            cachedCoverUrl = null
+            cachedSeriesKey = seriesKey
+        }
+        if (seriesKey != null) cachedSeriesKey = seriesKey
+        if (newTitle != null) cachedSeriesTitle = newTitle
+        if (newTotal != null && newTotal in 1..5000L) cachedTotal = newTotal
+        // The official detail poster must be allowed to REPLACE an early
+        // low-confidence SaasVideoData.cover. Never let a later episode frame
+        // replace a verified detail poster.
+        if (!newCover.isNullOrBlank() &&
+            (cachedCoverUrl.isNullOrBlank() || verifiedPoster &&
+                cachedCoverUrl != newCover)) {
+            cachedCoverUrl = newCover
+            LogUtil.info("系统媒体: 已确定当前短剧官方封面" +
+                " verified=$verifiedPoster")
+        }
+        return cachedSeriesTitle to cachedTotal
+    }
+
+    private fun isDetailModel(model: Any?): Boolean {
+        var type: Class<*>? = model?.javaClass
+        while (type != null && type != Any::class.java) {
+            if (type.name == DETAIL) return true
+            type = type.superclass
+        }
+        return false
+    }
+
+    /** Read SaasVideoDetailModelWrapper's delegated properties, not the
+     * empty inherited fields of its base SaasVideoDetailModel. */
+    private fun detailField(model: Any?, name: String): Any? {
+        val direct = field(model, name)
+        if (model == null || !isDetailModel(model)) return direct
+        // Wrapper's semantic delegated value takes priority over the inherited
+        // base field, which may be unset or initialized to a placeholder.
+        val delegate = field(model, "_" + name + '$' + "delegate")
+            ?: return direct
+        val props = (field(model, "" + '$' + '$' + "delegatedProperties")
+            as? Array<*>) ?: return direct
+        val prop = props.firstOrNull { p ->
+            try {
+                val n = p?.javaClass?.methods?.firstOrNull {
+                    it.name == "getName" && it.parameterCount == 0
+                }?.invoke(p)?.toString()
+                n == "_" + name || n == name
+            } catch (_: Throwable) { false }
+        } ?: return direct
+        return try {
+            // Kotlin delegate getter is identified by its semantic
+            // KProperty argument/return shape, never by obfuscated name.
+            val getter = delegate.javaClass.declaredMethods.firstOrNull {
+                it.parameterCount == 1 &&
+                    it.parameterTypes[0].name == "kotlin.reflect.KProperty" &&
+                    it.returnType != Void.TYPE
+            } ?: return direct
+            getter.isAccessible = true
+            getter.invoke(delegate, prop) ?: direct
+        } catch (_: Throwable) { direct }
+    }
+
+    private fun field(receiver: Any?, name: String): Any? {
+        if (receiver == null) return null
+        var cls: Class<*>? = receiver.javaClass
+        while (cls != null && cls != Any::class.java) {
+            try {
+                val declared = cls.getDeclaredField(name)
+                declared.isAccessible = true
+                return declared.get(receiver)
+            } catch (_: NoSuchFieldException) {
+                cls = cls.superclass
+            } catch (_: Throwable) {
+                return null
+            }
+        }
+        return null
+    }
+
+    private fun call(receiver: Any?, methodName: String): Any? = try {
+        receiver?.javaClass?.methods?.firstOrNull {
+            it.name == methodName && it.parameterCount == 0
+        }?.invoke(receiver)
+    } catch (_: Throwable) { null }
+
+    private fun str(value: Any?): String? {
+        val text = (value as? CharSequence)?.toString()?.trim()
+            ?.replace(Regex("\\s+"), " ") ?: return null
+        if (text.length !in 2..80 || text.startsWith("http") ||
+            text.matches(Regex("[0-9]+")) || text.contains("://") ||
+            text in setOf("红果短剧", "全集", "正在播放的视频")) return null
+        return text
+    }
+
+    private fun number(value: Any?): Long? = (value as? Number)?.toLong()
+
+    private fun vid(entity: Any?): String? {
+        if (entity == null) return null
+        val direct = field(entity, "vid") ?: field(entity, "videoId") ?:
+            call(entity, "getVideoId")
+        return direct?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+    }
+
+    private fun episodeFromIndex(model: Any?, total: Long?): String? {
+        if (model == null || model.javaClass.name != DATA) return null
+        val index = number(field(model, "indexInList"))
+        val vidIndex = number(field(model, "vidIndex"))
+
+        // indexInList is the playlist's zero-based index. vidIndex is
+        // independently supplied by the server and not necessarily 0-based.
+        // Prefer explicit playlist position when plausible.
+        val current: Long? = when {
+            index != null && index >= 0 &&
+                index < 5000 && (total == null || index < total) -> index + 1
+            vidIndex == 0L -> 1L
+            vidIndex != null && vidIndex in 1L..5000L &&
+                total != null && vidIndex <= total -> vidIndex
+            else -> null
+        }
+        if (current == null) return null
+        val result = "第" + current + "集"
+        return if (total != null && total in current..5000L) {
+            result + " · 全" + total + "集"
+        } else result
+    }
+
+    private fun indexFromList(detail: Any?, engineId: String?): Long? {
+        if (detail == null || engineId == null) return null
+        for (key in listOf("episodesList", "playerSerialVideoList",
+            "episodesListWithTrail", "episodesListWithTrailAfterCut")) {
+            val list = field(detail, key) as? List<*> ?: continue
+            if (list.isEmpty() || list.size > 500) continue
+            for ((index, item) in list.withIndex()) {
+                if (vid(item) == engineId) return index.toLong() + 1
+            }
+        }
+        return null
+    }
+
+
+    /**
+     * On Hongguo 7.3.5.32, TTVideoEngine.getVideoID and SaasVideoData.vid
+     * may use different ID domains. Prefer exact match, but allow the unique
+     * strongly visible/verified inner fragment with agreeing episode indices.
+     * Cache only a weak validated fragment for background media commands.
+     */
+    private var trustedNavActivity = WeakReference<Activity>(null)
+    private var trustedNavFragment = WeakReference<Any>(null)
+    private var trustedNavSeries: String? = null
+    private var lastNavEvidence = ""
+
+    internal data class NavigationCandidate(
+        val fragment: Any,
+        val currentIndex: Int,
+        val listCount: Int,
+        val currentVideoId: String,
+        val previousVideoId: String?,
+        val nextVideoId: String?,
+        val seriesId: String?,
+        val evidence: String
+    )
+
+    private var lastNavRejectReason = ""
+    private var lastNavRejectAt = 0L
+
+    private fun rejectedNavigation(reason: String, extra: String = ""): NavigationCandidate? {
+        val now = SystemClock.uptimeMillis()
+        if (reason != lastNavRejectReason || now - lastNavRejectAt > 12_000L) {
+            lastNavRejectReason = reason
+            lastNavRejectAt = now
+            LogUtil.info("系统媒体切集: 导航模型拒绝原因=" + reason +
+                (if (extra.isNotEmpty()) " " + extra else ""))
+            LogUtil.incr("systemMediaEpisodeModelReject")
+        }
+        return null
+    }
+
+    fun navigationCandidate(activity: Activity?, engine: Any?): NavigationCandidate? {
+        if (activity == null || engine == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.SERIES ||
+            activity.isFinishing || activity.isDestroyed)
+            return rejectedNavigation("inactive-activity-or-engine")
+
+        val engineId = call(engine, "getVideoID")?.toString()
+            ?.takeIf { it.isNotBlank() && it != "null" }
+
+        // The metadata resolver already verified the series ID against the
+        // active inner fragment. Reuse that verified identity rather than
+        // requiring observedForEngine(engine) to have a direct ID mapping.
+        val cachedKey = if (cachedActivity.get() === activity) cachedSeriesKey else null
+        val cachedCount = if (cachedActivity.get() === activity) cachedTotal else null
+        val presenter = NativeBusinessResolver.seriesPresenter(activity, engine)
+        val presenterKey = NativeMetadataAccess.typedFields(presenter, DATA)
+            .filter { engineId != null && vid(it) == engineId }
+            .mapNotNull { seriesId(field(it, "episodesId")) }
+            .distinct().singleOrNull()
+        val observedKey = observedForEngine(engine).seriesId
+        val seriesKey = cachedKey ?: observedKey ?: presenterKey
+
+        val ranked = currentFragmentEntries(activity, seriesKey, cachedCount)
+            .sortedWith(compareByDescending<ActiveFragmentEntry> {
+                engineId != null && vid(it.video) == engineId
+            }.thenByDescending { it.score }.thenByDescending { it.seriesVerified })
+        val best = ranked.firstOrNull()
+        val runnerUp = ranked.getOrNull(1)
+        val exactEngine = best != null && engineId != null &&
+            vid(best.video) == engineId
+        val ambiguous = runnerUp != null && best != null &&
+            runnerUp.score == best.score &&
+            runnerUp.seriesVerified == best.seriesVerified &&
+            runnerUp.fragment !== best.fragment
+        val uniqueVisible = best != null && best.score >= 12 &&
+            !ambiguous && (runnerUp == null || runnerUp.score < best.score) &&
+            (best.seriesVerified ||
+                seriesId(field(best.video, "episodesId")) != null)
+
+        val fragment: Any
+        val index: Int
+        val expectedCount: Int
+        val evidence: String
+        if (best != null && (exactEngine || uniqueVisible) && !ambiguous) {
+            fragment = best.fragment
+            index = best.itemPosition
+            expectedCount = best.listCount
+            evidence = if (exactEngine) "engine-id" else "unique-visible-fragment"
+        } else {
+            // A previous foreground validation allows a background session
+            // to use the same fragment, but never an unverified new Activity.
+            if (trustedNavActivity.get() !== activity) {
+                return rejectedNavigation("no-unique-trusted-fragment",
+                    "candidates=" + ranked.size +
+                    " cachedSeries=" + (cachedKey != null) +
+                    " observedSeries=" + (observedKey != null) +
+                    " presenterSeries=" + (presenterKey != null) +
+                    " score=" + (best?.score ?: -1) +
+                    " verified=" + (best?.seriesVerified == true) +
+                    " ambiguous=" + ambiguous)
+            }
+            fragment = trustedNavFragment.get()
+                ?: return rejectedNavigation("trusted-fragment-collected")
+            if (call(fragment, "getActivity") !== activity ||
+                call(fragment, "isAdded") != true)
+                return rejectedNavigation("trusted-fragment-detached")
+            index = (call(fragment, "getCurrentPosition") as? Number)
+                ?.toInt() ?: return rejectedNavigation("no-background-position")
+            expectedCount = (call(fragment, "getDataList") as? List<*>)
+                ?.size ?: return rejectedNavigation("no-background-list")
+            evidence = "validated-fragment-background"
+        }
+
+        val list = call(fragment, "getDataList") as? List<*>
+            ?: return rejectedNavigation("list-unavailable")
+        if (list.size != expectedCount || index !in list.indices ||
+            list.size !in 2..5000)
+            return rejectedNavigation("list-index-not-aligned",
+                "index=" + index + " count=" + list.size +
+                " expected=" + expectedCount)
+
+        fun videoAt(position: Int): Any? {
+            if (position !in list.indices) return null
+            return NativeMetadataAccess.video(list[position])
+        }
+        val selected = videoAt(index)
+            ?: return rejectedNavigation("current-wrapper-unavailable",
+                "index=" + index + " count=" + list.size)
+        val selectedId = vid(selected)
+            ?: return rejectedNavigation("current-video-id-unavailable")
+        val localIndex = number(field(selected, "indexInList"))
+        val episodeNumber = number(field(selected, "vidIndex"))
+        if (localIndex != index.toLong() &&
+            episodeNumber != index.toLong() + 1L)
+            return rejectedNavigation("native-index-disagreement",
+                "position=" + index +
+                " localIndex=" + (localIndex ?: -1) +
+                " episodeNumber=" + (episodeNumber ?: -1))
+
+        val key = seriesId(field(selected, "episodesId"))
+        if (seriesKey != null && key != null && key != seriesKey)
+            return rejectedNavigation("current-series-disagreement")
+        if (evidence == "validated-fragment-background" &&
+            trustedNavSeries != null && key != trustedNavSeries)
+            return rejectedNavigation("background-series-changed")
+        if (key == null && seriesKey == null)
+            return rejectedNavigation("series-unverified")
+
+        fun neighborId(position: Int): String? {
+            val adjacent = videoAt(position) ?: return null
+            val neighborSeries = seriesId(field(adjacent, "episodesId"))
+            if (key != null && neighborSeries != null && key != neighborSeries)
+                return null
+            val neighborIndex = number(field(adjacent, "indexInList"))
+            val neighborEpisode = number(field(adjacent, "vidIndex"))
+            if (neighborIndex != position.toLong() &&
+                neighborEpisode != position.toLong() + 1L) return null
+            return vid(adjacent)?.takeIf { it != selectedId }
+        }
+
+        if (evidence != "validated-fragment-background") {
+            trustedNavActivity = WeakReference(activity)
+            trustedNavFragment = WeakReference(fragment)
+            trustedNavSeries = key ?: seriesKey
+        }
+        if (lastNavEvidence != evidence) {
+            lastNavEvidence = evidence
+            LogUtil.info("系统媒体切集: 当前导航模型来源=" + evidence +
+                " engineIdMatched=" + (engineId != null && engineId == selectedId) +
+                " seriesVerified=" + (key != null || seriesKey != null) +
+                " index=" + index + " count=" + list.size)
+            LogUtil.incr("systemMediaEpisodeModelResolved")
+        }
+        return NavigationCandidate(
+            fragment, index, list.size, selectedId,
+            neighborId(index - 1), neighborId(index + 1), key ?: seriesKey, evidence)
+    }
+
+    fun read(activity: Activity?, engine: Any?): Info {
+        if (activity == null ||
+            NativeBusinessResolver.page(activity, engine) != NativeBusinessResolver.Page.SERIES) return Info()
+        val presenter = NativeBusinessResolver.seriesPresenter(activity, engine)
+        val detail = NativeMetadataAccess.typedFields(presenter, DETAIL).singleOrNull()
+        rememberDetail(detail)
+        val videoId = call(engine, "getVideoID")?.toString()
+            ?.takeIf { it.isNotBlank() && it != "null" }
+
+        val current = NativeMetadataAccess.typedFields(presenter, DATA)
+        current.forEach(::observeVideoData)
+
+        // A prepared next episode can coexist with the active video. Never
+        // use its index or episode title without an exact ID match.
+        val active = if (videoId != null) current.firstOrNull {
+            vid(it) == videoId
+        } else null
+
+        // IDs are frequently numeric strings; the title validator deliberately
+        // rejects numeric names and must NOT be used to validate series IDs.
+        val detailSeriesKey = seriesId(detailField(detail, "episodesId")) ?:
+            seriesId(field(active, "episodesId"))
+        val provisionalTotal = listOfNotNull(
+            number(field(active, "episodesCount")),
+            number(detailField(detail, "episodeTotalCnt")),
+            number(detailField(detail, "episodeCnt"))
+        ).firstOrNull { it in 1..5000L }
+        // The active fragment supplied the *correct current episode* in the
+        // 16:41 diagnostics. Read its series name and art at the same time.
+        // Unlike the transient detail Runnable, this model stays attached to
+        // the current playing video's internal list.
+        val previousSeriesKey = if (cachedActivity.get() === activity)
+            cachedSeriesKey else null
+        val previousTotal = if (cachedActivity.get() === activity)
+            cachedTotal else null
+        val fragment = mediaFromActiveFragment(activity,
+            detailSeriesKey ?: previousSeriesKey, provisionalTotal ?: previousTotal)
+        val seriesKey = detailSeriesKey ?: fragment.seriesId ?:
+            observedForEngine(engine).seriesId
+        val capturedDetail = detailForSeries(seriesKey)
+        val observedVideo = observedForEngine(engine)
+        val freshTotal = provisionalTotal ?: fragment.total ?: capturedDetail?.total
+
+        // Detail metadata belongs to this ShortSeriesActivity rather than an
+        // unrelated home recommendation; its title can be shown even if the
+        // exact episode is not yet available from the active video model.
+        // A stable series ID validates the DTO snapshot, including its title
+        // and official poster. The currently visible fragment is the second
+        // authoritative source; transient selected-video DTO may be empty.
+        val intentTitle = if (activity.intent != null) {
+            listOf("episodesTitle", "seriesName", "series_name", "bookName",
+                "book_name", "shortSeriesName", "dramaName")
+                .firstNotNullOfOrNull { key ->
+                    try { str(activity.intent?.getStringExtra(key)) }
+                    catch (_: Throwable) { null }
+                }
+        } else null
+        val latestTitle =
+            str(detailField(detail, "episodesTitle")) ?:
+            capturedDetail?.title ?:
+            str(field(active, "seriesName")) ?:
+            fragment.title ?:
+            intentTitle ?:
+            str(field(active, "title")) ?:
+            observedVideo.title
+        // 7.3.5.32's official Saas model has URL strings for both full-sized
+        // and compact series posters. The detail is a transient Runnable
+        // payload, so preserve its URL for the currently displayed series.
+        // Prefer the explicitly named series poster in the detail model.
+        // When transient detail is unavailable, SaasVideoData.cover is the
+        // series image; episodeCover is the individual-video thumbnail.
+        val videoData = active
+        val seriesCover = field(videoData, "cover") as? String
+        val episodeFrame = field(videoData, "episodeCover") as? String
+        val safeDataCover = seriesCover?.takeIf {
+            it.isNotBlank() && it != episodeFrame
+        }
+        val verifiedCoverUrl = listOfNotNull(
+            detailField(detail, "episodesCover") as? String,
+            detailField(detail, "smallEpisodesCover") as? String,
+            capturedDetail?.artworkUrl
+        ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
+        val freshCoverUrl = verifiedCoverUrl ?: listOfNotNull(
+            safeDataCover, fragment.artworkUrl, observedVideo.artworkUrl
+        ).firstNotNullOfOrNull { MediaArtworkLoader.normalize(it) }
+        val retained = preserveCurrentSeries(activity, seriesKey,
+            latestTitle, freshTotal, freshCoverUrl,
+            verifiedPoster = verifiedCoverUrl != null)
+        val seriesTitle = retained.first
+        val total = retained.second
+        val pager = pagerState(presenter, detail, total)
+
+        // Reading the active SaasVideoData is O(1). Avoid scanning hundreds
+        // of playlist items on every ~1.4s media timeline tick.
+        val fromActive = episodeFromIndex(active, total)
+        val episode = fromActive
+            ?: indexFromList(detail, videoId)?.let { episodeNumber ->
+                "第" + episodeNumber + "集" +
+                    (if (total != null && total >= episodeNumber)
+                        " · 全" + total + "集" else "")
+            }
+            ?: fragment.episode
+            ?: episodeFromPager(pager, total)
+            // The total episode count is independently verified by the
+            // series data model. Show it even if the active index is unknown.
+            ?: total?.let { "全" + it + "集" }
+
+        val now = SystemClock.uptimeMillis()
+        if (now - lastDiagnosticAt > 12000L) {
+            lastDiagnosticAt = now
+            LogUtil.info("系统媒体: 全集原生元数据解析 presenter=" +
+                (presenter != null) + " detail=" + (detail != null) +
+                " activeVideoId=" + (videoId != null) +
+                " candidateCount=" + current.size +
+                " videoMatched=" + (active != null) +
+                " title=" + (seriesTitle != null) +
+                " fragmentTitle=" + (fragment.title != null) +
+                " seriesIdPresent=" + (seriesKey != null) +
+                " capturedDetail=" + (capturedDetail != null) +
+                " intentTitle=" + (intentTitle != null) +
+                " coverUrl=" + (cachedCoverUrl != null) +
+                " episode=" + (episode != null) +
+                " hasCurrentEpisode=" + (episode?.startsWith("第") == true) +
+                " total=" + (total != null) +
+                " pagerIndex=" + (pager.currentItem?.toString() ?: "?") +
+                " pagerCount=" + (pager.adapterCount?.toString() ?: "?") +
+                " detailListCount=" + (pager.listCount?.toString() ?: "?") +
+                " pagerAligned=" + pager.pageAligned +
+                " innerEpisodeProbe=" + (episode?.startsWith("第") == true))
+            LogUtil.incr("systemMediaFullSeriesNativeProbe")
+        }
+        return Info(seriesTitle, episode,
+            if (active != null) "saas-current-video"
+            else if (pager.pageAligned) "saas-fullseries-pager"
+            else if (seriesTitle != null || total != null) "saas-series-detail"
+            else "none",
+            cachedCoverUrl, seriesKey)
+    }
+}

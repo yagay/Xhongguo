@@ -7,9 +7,9 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-targets = (ROOT / "app/src/main/kotlin/xyz/kejiyu/hongguo/hooks/TargetNames.kt").read_text()
-hooks = (ROOT / "app/src/main/kotlin/xyz/kejiyu/hongguo/hooks/Hooks.kt").read_text()
-capabilities = (ROOT / "app/src/main/kotlin/xyz/kejiyu/hongguo/hooks/RuntimeCapabilities.kt").read_text()
+targets = (ROOT / "app/src/main/kotlin/com/yagay/xhongguo/hooks/TargetNames.kt").read_text()
+hooks = (ROOT / "app/src/main/kotlin/com/yagay/xhongguo/hooks/Hooks.kt").read_text()
+capabilities = (ROOT / "app/src/main/kotlin/com/yagay/xhongguo/hooks/RuntimeCapabilities.kt").read_text()
 
 auto = re.search(
     r"private val AUTO_TEMPLATE\s*=\s*Names\((.*?)\n    \)",
