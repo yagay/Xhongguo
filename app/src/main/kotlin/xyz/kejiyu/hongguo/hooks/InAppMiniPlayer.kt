@@ -68,6 +68,7 @@ internal object InAppMiniPlayer {
         return NativeMetadataAccess.call(engine, "isPlaying") as? Boolean
     }
     private fun command(engine: Any, play: Boolean): Boolean {
+        if (play && AudioFocusCoordinator.interrupted()) return false
         transitionUntil = 0
         transitionPause = false
         manualCommand = true
@@ -161,7 +162,8 @@ internal object InAppMiniPlayer {
     }
 
     private fun armTransition() {
-        if (session?.let { isPlaying(it.engine) } != true) return
+        if (AudioFocusCoordinator.interrupted() ||
+            session?.let { isPlaying(it.engine) } != true) return
         transitionUntil = SystemClock.uptimeMillis() + 1800L
         transitionPause = false
     }
@@ -400,7 +402,13 @@ internal object InAppMiniPlayer {
         expand.setOnClickListener { returnToVideo() }
         close.setOnClickListener { command(s.engine, false); restore() }
         play.setOnClickListener {
-            command(s.engine, isPlaying(s.engine) != true)
+            val playRequested = isPlaying(s.engine) != true
+            if (playRequested) {
+                if (AudioFocusCoordinator.userPlayAllowed()) command(s.engine, true)
+            } else {
+                AudioFocusCoordinator.userPaused()
+                command(s.engine, false)
+            }
             main.postDelayed({ updatePlayButton(s) }, 160L)
             showControls(s, true)
         }

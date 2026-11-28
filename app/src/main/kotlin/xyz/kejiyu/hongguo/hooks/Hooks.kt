@@ -370,12 +370,12 @@ object Hooks {
     private fun configureAudioFocus(ctx: Context) {
         val p = gPrefs ?: return
         AudioFocusCoordinator.configure(ctx, gMasterOn,
-            p.getBoolean("audio_focus_pause", true),
-            p.getBoolean("audio_call_pause", true),
-            p.getBoolean("audio_focus_auto_resume", false),
-            p.getBoolean("audio_call_auto_resume", true),
-            p.getBoolean("audio_focus_pause_duck", false),
-            p.getBoolean("audio_external_pause", false))
+            p.getBoolean("audio_focus_pause", ModuleSettingsStore.defaultBoolean("audio_focus_pause")),
+            p.getBoolean("audio_call_pause", ModuleSettingsStore.defaultBoolean("audio_call_pause")),
+            p.getBoolean("audio_focus_auto_resume", ModuleSettingsStore.defaultBoolean("audio_focus_auto_resume")),
+            p.getBoolean("audio_call_auto_resume", ModuleSettingsStore.defaultBoolean("audio_call_auto_resume")),
+            p.getBoolean("audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck")),
+            p.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")))
     }
 
     private fun savePref(key: String, value: Boolean) {
@@ -3943,22 +3943,22 @@ object Hooks {
                 SystemMediaBridge.configure(act, it && gMasterOn)
             }, "system_media_playback")
             addSwitch("音频焦点丢失时暂停", "其他应用抢占音频焦点时暂停短剧", {
-                gPrefs?.getBoolean("audio_focus_pause", true) ?: true
+                gPrefs?.getBoolean("audio_focus_pause", ModuleSettingsStore.defaultBoolean("audio_focus_pause")) ?: true
             }, {}, "audio_focus_pause")
             addSwitch("通话时自动暂停", "监听系统铃声、电话及语音通信模式", {
-                gPrefs?.getBoolean("audio_call_pause", true) ?: true
+                gPrefs?.getBoolean("audio_call_pause", ModuleSettingsStore.defaultBoolean("audio_call_pause")) ?: true
             }, {}, "audio_call_pause")
             addSwitch("焦点恢复后自动播放", "仅临时中断且同一视频；永久焦点丢失需手动播放", {
-                gPrefs?.getBoolean("audio_focus_auto_resume", false) ?: false
+                gPrefs?.getBoolean("audio_focus_auto_resume", ModuleSettingsStore.defaultBoolean("audio_focus_auto_resume")) ?: false
             }, {}, "audio_focus_auto_resume")
             addSwitch("通话结束自动恢复", "仅恢复通话前正在播放的同一视频；永久失焦仍需手动播放", {
-                gPrefs?.getBoolean("audio_call_auto_resume", true) ?: true
+                gPrefs?.getBoolean("audio_call_auto_resume", ModuleSettingsStore.defaultBoolean("audio_call_auto_resume")) ?: true
             }, {}, "audio_call_auto_resume")
             addSwitch("降低音量请求时暂停", "普通提示音通常只请求短时降低音量；默认不额外暂停", {
-                gPrefs?.getBoolean("audio_focus_pause_duck", false) ?: false
+                gPrefs?.getBoolean("audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck")) ?: false
             }, {}, "audio_focus_pause_duck")
-            addSwitch("其他应用音频检测", "高级模式：需 LSPosed 系统框架作用域；检测实际媒体音频，默认关闭", {
-                gPrefs?.getBoolean("audio_external_pause", false) ?: false
+            addSwitch("其他应用音频检测", "检测实际媒体音频（包括未抢焦点的 App）；需 LSPosed 系统框架作用域及重启，默认开启", {
+                gPrefs?.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")) ?: ModuleSettingsStore.defaultBoolean("audio_external_pause")
             }, {}, "audio_external_pause")
             addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
                 gMiniPlayerOn = it
@@ -5953,6 +5953,11 @@ object Hooks {
                         .setId("xhSystemMediaTTVideoEngine_$index")
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
+                            if (method.name in setOf("play", "start") &&
+                                method.returnType == Void.TYPE &&
+                                AudioFocusCoordinator.blocksNativeBackgroundStart(chain.thisObject, gCurrentActivity)) {
+                                return@Hooker null
+                            }
                             if (method.name == "pause" &&
                                 method.returnType == Void.TYPE &&
                                 (FeatureFaultGuard.test("continuity-pause") {

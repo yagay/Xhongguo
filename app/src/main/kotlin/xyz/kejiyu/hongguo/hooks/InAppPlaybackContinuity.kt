@@ -68,7 +68,8 @@ internal object InAppPlaybackContinuity {
     }
 
     private fun begin(activity: Activity, reason: String) {
-        if (!enabled || !playerPage(activity) || activity.isFinishing || activity.isDestroyed ||
+        if (!enabled || AudioFocusCoordinator.interrupted() ||
+            !playerPage(activity) || activity.isFinishing || activity.isDestroyed ||
             SystemClock.uptimeMillis() < playerNavigationUntil) return
         val confirmed = NativePlaybackSession.engine()
         if (confirmed != null && NativePlaybackSession.currentFor(activity) !== confirmed) return

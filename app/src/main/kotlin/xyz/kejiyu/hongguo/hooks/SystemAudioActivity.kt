@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 
 /**
@@ -39,7 +40,7 @@ internal object SystemAudioActivity {
                         ?: error("audio service not ready")
                     val uidMethod = AudioPlaybackConfiguration::class.java.getMethod("getClientUid")
                     val activeMethod = AudioPlaybackConfiguration::class.java.getMethod("isActive")
-                    fun publish(configs: List<AudioPlaybackConfiguration>) {
+                    fun publish(configs: List<AudioPlaybackConfiguration>, force: Boolean = false) {
                         try {
                             val active = configs.mapNotNull { config ->
                                 if (activeMethod.invoke(config) != true) return@mapNotNull null
@@ -57,11 +58,15 @@ internal object SystemAudioActivity {
                                 val own = uid in active
                                 val other = active.any { it != uid && it / 100000 == uid / 100000 }
                                 val state = other to own
-                                if (previous[pkg] == state) continue
+                                val changed = previous[pkg] != state
+                                if (!force && !changed) continue
                                 previous[pkg] = state
                                 context.sendBroadcast(Intent(ACTION).setPackage(pkg)
                                     .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY)
+                                    .putExtra("snapshot_elapsed", SystemClock.elapsedRealtime())
                                     .putExtra("external", other).putExtra("own", own))
+                                if (changed) Log.i("XhongguoAudio",
+                                    "Playback state changed: external=$other own=$own")
                             }
                         } catch (e: Throwable) { Log.w("XhongguoAudio", "Audio snapshot skipped", e) }
                     }
@@ -73,8 +78,18 @@ internal object SystemAudioActivity {
                     audio.registerAudioPlaybackCallback(cb, handler)
                     callback = cb
                     installed = true
-                    publish(audio.activePlaybackConfigurations)
-                    Log.i("XhongguoAudio", "Read-only system audio activity listener registered")
+                    publish(audio.activePlaybackConfigurations, true)
+                    // Initial state sync for receivers registered after the last
+                    // playback event. No sticky/public broadcasts or app identity.
+                    // Read-only, bounded periodic snapshots, alongside instant callbacks.
+                    handler.postDelayed(object : Runnable {
+                        override fun run() {
+                            try { publish(audio.activePlaybackConfigurations, true) }
+                            catch (e: Throwable) { Log.w("XhongguoAudio", "Playback sync failed", e) }
+                            finally { if (installed) handler.postDelayed(this, 5000L) }
+                        }
+                    }, 5000L)
+                    Log.i("XhongguoAudio", "Read-only system audio activity listener registered; snapshot interval=5000ms")
                 } catch (e: Throwable) {
                     if (remaining > 0) handler.postDelayed({ attempt(remaining - 1) }, 5000L)
                     else Log.w("XhongguoAudio", "Optional system audio activity unavailable", e)

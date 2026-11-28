@@ -23,6 +23,14 @@ object ModuleSettingsStore {
         "in_app_continuous_playback", "audio_focus_pause", "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck", "audio_external_pause",
         "hide_mine_shortcuts", "hide_all_ads", "official_playback_probe"
     )
+    // Same default for module UI, target Hook and diagnostic export.
+    fun defaultBoolean(key: String): Boolean = key in setOf(
+        "video_longpress_settings", "disable_shopping_mall",
+        "hide_mine_shortcuts", "hide_all_ads",
+        "audio_focus_pause", "audio_call_pause", "audio_call_auto_resume",
+        "audio_external_pause"
+    )
+
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(
         "download_limit_one_day_episode", "download_limit_one_day_series",

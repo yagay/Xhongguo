@@ -218,7 +218,7 @@ internal object EpisodeNavigator {
     }
 
     fun controls(activity: Activity?, engine: Any?): Controls {
-        if (pending != null) return Controls()
+        if (pending != null || AudioFocusCoordinator.blocksEpisodeNavigation()) return Controls()
         val target = resolve(activity, engine) ?: return Controls()
         return Controls(
             previous = target.model.previousVideoId != null,
@@ -227,6 +227,10 @@ internal object EpisodeNavigator {
     }
 
     fun navigate(direction: Int, activity: Activity?, engine: Any?): Boolean {
+        if (AudioFocusCoordinator.blocksEpisodeNavigation()) {
+            LogUtil.info("系统媒体切集: 音频中断期间禁止切集")
+            return false
+        }
         if (direction != 1 && direction != -1) return false
         if (pending != null) {
             LogUtil.info("系统媒体切集: 已有待确认指令，忽略重复按钮")

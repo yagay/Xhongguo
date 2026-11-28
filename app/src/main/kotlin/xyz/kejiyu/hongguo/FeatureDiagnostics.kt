@@ -103,8 +103,7 @@ object FeatureDiagnostics {
         }
         appendLine()
         for (rule in rules) {
-            val switched = master && pref.getBoolean(rule.key,
-                rule.key == "video_longpress_settings" || rule.key == "disable_shopping_mall")
+            val switched = master && pref.getBoolean(rule.key, ModuleSettingsStore.defaultBoolean(rule.key))
             val hooks = rule.installed.filter { evidence.contains(it, true) }
             val events = rule.triggered.filter { evidence.contains(it, true) }
             val errors = rule.problems.filter { evidence.contains(it, true) }
@@ -119,6 +118,21 @@ object FeatureDiagnostics {
             if (hooks.isNotEmpty()) appendLine("  安装/探测：" + hooks.joinToString())
             if (events.isNotEmpty()) appendLine("  触发事件：" + events.joinToString())
             if (errors.isNotEmpty()) appendLine("  失败线索：" + errors.joinToString())
+        }
+        appendLine()
+        appendLine("音频中断重点排查")
+        for (key in listOf("audio_focus_pause", "audio_call_pause", "audio_external_pause",
+            "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck")) {
+            appendLine(key + "=" + pref.getBoolean(key, ModuleSettingsStore.defaultBoolean(key)) +
+                " origin=" + if (pref.contains(key)) "saved" else "default")
+        }
+        for (signal in listOf("音频协调: 实际配置", "音频协调: 焦点回调",
+            "音频协调: 系统音频状态同步", "音频协调: 未收到系统音频状态",
+            "Read-only system audio activity listener registered", "音频协调: 中断",
+            "音频协调: 暂停状态已确认", "音频协调: 已阻止后台自动开始播放")) {
+            val matches = evidence.lineSequence().filter { it.contains(signal) }.toList()
+            appendLine("  " + signal + " count=" + matches.size)
+            matches.lastOrNull()?.let { appendLine("    " + it.take(350)) }
         }
         appendLine()
         appendLine("系统媒体重点排查")

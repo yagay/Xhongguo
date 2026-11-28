@@ -97,6 +97,12 @@ object ModuleDiagnostics {
             return files
         }
         files["root/status.txt"] = "ROOT GRANTED"
+        val audioLog = asRoot(ctx, "logcat -b all -d -v threadtime -s XhongguoAudio:I", 8)
+        if (!audioLog.isNullOrBlank()) {
+            files["logcat/system-audio.txt"] = redact(audioLog.takeLast(40000))
+        } else {
+            files["status/system-audio.txt"] = "No system audio listener log; check Android framework LSPosed scope and reboot."
+        }
         for (pkg in targets) {
             val dir = "/storage/emulated/0/Android/media/" + pkg + "/K_红果logs"
             // Avoid blending months-old international-build logs into a current
@@ -173,8 +179,12 @@ object ModuleDiagnostics {
         val prefs = ModuleSettingsStore.prefs(ctx)
         files["settings.txt"] = buildString {
             for (key in ModuleSettingsStore.BOOLEANS.sorted()) {
-                appendLine(key + "=" + prefs.getBoolean(key,
-                    key == "video_longpress_settings" || key == "disable_shopping_mall"))
+                appendLine(key + "=" + prefs.getBoolean(key, ModuleSettingsStore.defaultBoolean(key)))
+            }
+        }
+        files["settings-origin.txt"] = buildString {
+            for (key in ModuleSettingsStore.BOOLEANS.sorted()) {
+                appendLine(key + "=" + if (prefs.contains(key)) "saved" else "default")
             }
         }
         files.putAll(collectRoot(ctx))

@@ -1299,6 +1299,7 @@ internal object SystemMediaBridge {
         lastLifecyclePauseEngine.clear()
         lastUserLeaveWasPlaying = false
         lastUserLeaveEngine.clear()
+        EpisodeNavigator.reset()
         val target = audioFocusEngine()
         // The independent coordinator owns native pause and confirmation.
         if (target != null && !NativePlaybackSession.playing(target) && knownPlaying)
