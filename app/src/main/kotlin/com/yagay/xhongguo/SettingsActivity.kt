@@ -26,6 +26,9 @@ class SettingsActivity : Activity() {
     private var currentPage = SettingsCatalog.Page.HOME
     private val categoryRows = linkedMapOf<SettingsCatalog.Page, MutableList<Pair<String, View>>>()
     private val pages = linkedMapOf<SettingsCatalog.Page, LinearLayout>()
+    private val switches = linkedMapOf<String, Switch>()
+    private val searchItems = mutableListOf<SettingsSearch.Item>()
+    private var refreshing = false
     private val prefs by lazy { ModuleSettingsStore.prefs(this) }
     private var speedText: TextView? = null
     private var speedSwitch: Switch? = null
@@ -119,7 +122,17 @@ class SettingsActivity : Activity() {
         toggle("自定义下载数量限制", "覆盖默认的下载数量限制", "download_limit_unlimit")
         limitText = action("下载限制数值", limitDescription(), "download_limit_values") { editLimits() }
 
+        action("备份设置", "导出 JSON，仅包含模块配置", "backup_settings") {
+            SettingsBackup.choose(this, false)
+        }
+        action("恢复设置", "导入 JSON，将替换当前模块配置", "restore_settings") {
+            AlertDialog.Builder(this).setTitle("恢复设置")
+                .setMessage("将替换当前模块的设置，不会修改红果账号及缓存。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("选择备份") { _, _ -> SettingsBackup.choose(this, true) }.show()
+        }
         buildPages()
+        refreshRows()
         val restored = savedInstanceState?.getString("settings_page")?.let {
             runCatching { SettingsCatalog.Page.valueOf(it) }.getOrNull()
         } ?: SettingsCatalog.Page.HOME
@@ -160,6 +173,18 @@ class SettingsActivity : Activity() {
             }
             if (page == SettingsCatalog.Page.HOME) {
                 section(container, "功能分类")
+                val search = row()
+                addText(search, "搜索设置", "按功能名称、分类或关键词查找")
+                search.addView(label("›", 23, R.color.text_secondary))
+                search.setOnClickListener {
+                    SettingsSearch.show(this, searchItems) { item ->
+                        showPage(item.page)
+                        val target = categoryRows[item.page]?.firstOrNull { it.first == item.key }?.second
+                        target?.post { if (target.visibility == View.VISIBLE) target.requestFocus()
+                            else Toast.makeText(this, "请先启用该项的上级开关", Toast.LENGTH_SHORT).show() }
+                    }
+                }
+                appendTo(container, search)
                 for (category in SettingsCatalog.categories) {
                     val entry = row()
                     addText(entry, category.title, category.summary)
@@ -177,6 +202,23 @@ class SettingsActivity : Activity() {
 
     @Deprecated("Android document picker result")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        if (requestCode == SettingsBackup.EXPORT || requestCode == SettingsBackup.IMPORT) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) Thread {
+                val outcome = runCatching {
+                    if (requestCode == SettingsBackup.EXPORT) SettingsBackup.export(this, uri)
+                    else SettingsBackup.restore(this, uri)
+                }
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        Toast.makeText(this, if (outcome.isSuccess) "操作成功"
+                            else "操作失败：" + outcome.exceptionOrNull()?.message, Toast.LENGTH_LONG).show()
+                        if (outcome.isSuccess && requestCode == SettingsBackup.IMPORT) recreate()
+                    }
+                }
+            }.start()
+            return
+        }
         if (ModuleDiagnostics.onActivityResult(this, requestCode, resultCode, data)) return
         super.onActivityResult(requestCode, resultCode, data)
     }
@@ -208,6 +250,24 @@ class SettingsActivity : Activity() {
         return summary
     }
 
+    private fun refreshRows() {
+        refreshing = true
+        try {
+            for ((key, sw) in switches) sw.isChecked = prefs.getBoolean(key, ModuleSettingsStore.defaultBoolean(key))
+            for ((_, rows) in categoryRows) for ((key, view) in rows) {
+                val definition = SettingsCatalog.definition(key)
+                view.visibility = if (definition.parentKeys.all {
+                    prefs.getBoolean(it, ModuleSettingsStore.defaultBoolean(it))
+                }) View.VISIBLE else View.GONE
+            }
+        } finally { refreshing = false }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshRows()
+    }
+
     private fun append(key: String, row: View) {
         categoryRows.getOrPut(SettingsCatalog.page(key)) { mutableListOf() }.add(key to row)
     }
@@ -225,11 +285,15 @@ class SettingsActivity : Activity() {
         val toggle = Switch(this).apply {
             isChecked = prefs.getBoolean(key, defaultValue)
             setOnCheckedChangeListener { _, checked ->
+                if (refreshing) return@setOnCheckedChangeListener
                 if (!ModuleSettingsStore.save(this@SettingsActivity, key, checked)) {
                     Toast.makeText(this@SettingsActivity, "保存设置失败", Toast.LENGTH_SHORT).show()
                 }
+                refreshRows()
             }
         }
+        switches[key] = toggle
+        searchItems.add(SettingsSearch.Item(key, name, sub, SettingsCatalog.page(key)))
         row.addView(toggle)
         row.setOnClickListener { toggle.isChecked = !toggle.isChecked }
         append(key, row)
@@ -239,6 +303,7 @@ class SettingsActivity : Activity() {
     private fun action(name: String, sub: String, key: String, click: () -> Unit): TextView {
         val row = row()
         val summary = addText(row, name, sub)
+        searchItems.add(SettingsSearch.Item(key, name, sub, SettingsCatalog.page(key)))
         row.addView(label("›", 23, R.color.text_secondary))
         row.setOnClickListener { click() }
         append(key, row)

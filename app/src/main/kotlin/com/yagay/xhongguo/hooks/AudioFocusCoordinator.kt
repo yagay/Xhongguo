@@ -37,6 +37,10 @@ internal object AudioFocusCoordinator {
     @Volatile private var pauseDuck = false
     @Volatile private var externalEnabled = false
     @Volatile private var externalActive = false
+        set(value) {
+            field = value
+            PlaybackCoordinator.gate.set(PlaybackGate.Blocker.EXTERNAL, value && enabled)
+        }
     @Volatile private var resumeExternal = true
     private var externalResumeDelayMs = 1000L
     private var externalResumeTicket: ResumeTicket? = null
@@ -60,8 +64,20 @@ internal object AudioFocusCoordinator {
     @Volatile private var focusOwnerObserved = false
     private var resumeAuthorized = false
     @Volatile private var focusLost = false
+        set(value) {
+            field = value
+            PlaybackCoordinator.gate.set(PlaybackGate.Blocker.FOCUS, value && enabled)
+        }
     @Volatile private var callActive = false
+        set(value) {
+            field = value
+            PlaybackCoordinator.gate.set(PlaybackGate.Blocker.CALL, value && enabled)
+        }
     @Volatile private var manualHold = false
+        set(value) {
+            field = value
+            PlaybackCoordinator.gate.set(PlaybackGate.Blocker.HOLD, value && enabled)
+        }
     @Volatile private var manager: AudioManager? = null
     private var modeRegistration: Any? = null
     @Volatile private var own: AudioFocusRequest? = null
@@ -78,7 +94,8 @@ internal object AudioFocusCoordinator {
     private val internalRequest = ThreadLocal<Boolean>()
     private var lastRequestEngine = WeakReference<Any>(null)
     private var lastRequestVideo: String? = null
-    private data class ResumeTicket(val engine: WeakReference<Any>, val video: String?, val epoch: Long)
+    private data class ResumeTicket(val engine: WeakReference<Any>, val video: String?, val epoch: Long,
+        val userEpoch: Long = PlaybackCoordinator.gate.epoch())
     @Volatile private var ticket: ResumeTicket? = null
 
     fun configure(ctx: Context, active: Boolean, focus: Boolean, calls: Boolean, resume: Boolean,
@@ -116,6 +133,7 @@ internal object AudioFocusCoordinator {
                 ++retryGeneration
                 ++interruptionGeneration
                 lastRequestEngine.clear()
+                PlaybackCoordinator.gate.reset()
                 return@Runnable
             }
             manager = ctx.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -133,8 +151,8 @@ internal object AudioFocusCoordinator {
         if (Looper.myLooper() == Looper.getMainLooper()) task.run() else main.post(task)
     }
 
-    fun interrupted(): Boolean = enabled && (focusLost || callActive || externalActive || manualHold)
-    private fun hardInterrupted() = enabled && (focusLost || callActive || externalActive)
+    fun interrupted(): Boolean = enabled && !PlaybackCoordinator.permitsAutomaticPlayback()
+    private fun hardInterrupted() = enabled && PlaybackCoordinator.gate.hardBlocked()
 
     private fun isPlaying(engine: Any?): Boolean =
         NativePlaybackSession.playing(engine) ||
@@ -229,10 +247,9 @@ internal object AudioFocusCoordinator {
     }
     private fun validTicket(value: ResumeTicket): Boolean {
         val target = value.engine.get() ?: return false
-        return value.epoch >= 0 && SystemMediaBridge.audioFocusEngine() === target &&
-            NativePlaybackSession.generation() == value.epoch &&
-            NativePlaybackSession.videoId(target) == value.video &&
-            NativeMetadataAccess.call(target, "isReleased") != true
+        return !value.video.isNullOrBlank() && value.userEpoch == PlaybackCoordinator.gate.epoch() &&
+            PlaybackCoordinator.sameSession(SystemMediaBridge.audioFocusEngine(), target,
+                value.video, value.epoch)
     }
 
     private fun recentExternalCandidate(): ResumeTicket? =
@@ -274,7 +291,7 @@ internal object AudioFocusCoordinator {
     private fun externalSilenceConfirmed(): Boolean =
         externalEnabled && resumeExternal && !externalRawActive && !externalActive &&
             externalQuietSince > 0L && externalSignalAt > 0L &&
-            SystemClock.elapsedRealtime() - externalSignalAt in 0L..7000L
+            SystemClock.elapsedRealtime() - externalSignalAt in 0L..2000L
 
     // Reuse the native focus client, if still known. A permanent focus loss
     // will not necessarily send GAIN when another app stops. Only this
@@ -334,27 +351,29 @@ internal object AudioFocusCoordinator {
                 else cancelExternalResume("focus-unavailable")
                 return@postDelayed
             }
-            cancelExternalResume("resume-dispatch")
             ticket = null
             resumeAuthorized = false
             permanentlyInterrupted = false
             manualHold = false
             ++interruptionGeneration
+            externalResumePending = true
             val sent = isPlaying(target) || transport(target, true)
-            if (!sent) {
-                manualHold = true
-                permanentlyInterrupted = true
-                LogUtil.warn("音频协调: 外部音频恢复指令失败")
-                return@postDelayed
-            }
-            LogUtil.info("音频协调: 外部音频恢复指令已发送")
+            LogUtil.info("音频协调: 外部音频恢复指令 sent=$sent attempt=$externalResumeAttempts")
             main.postDelayed({
-                if (SystemMediaBridge.audioFocusEngine() === target && isPlaying(target) &&
-                    !interrupted()) {
+                if (generation != externalResumeGeneration || externalResumeTicket !== resume)
+                    return@postDelayed
+                externalResumePending = false
+                if (!validTicket(resume)) { cancelExternalResume("session-changed"); return@postDelayed }
+                if (isPlaying(target) && !interrupted()) {
+                    cancelExternalResume("confirmed")
                     LogUtil.info("音频协调: 外部音频恢复播放已确认")
                     LogUtil.incr("audioExternalResumeConfirmed")
+                } else {
+                    manualHold = true
+                    if (externalResumeAttempts < 3) scheduleExternalResume()
+                    else { permanentlyInterrupted = true; cancelExternalResume("play-not-confirmed") }
                 }
-            }, 900L)
+            }, if (sent) 1200L else 350L)
         }, wait)
     }
 
@@ -482,7 +501,8 @@ internal object AudioFocusCoordinator {
                 if (allowResume && ticket != null) resumeAuthorized = true
             }
             ++retryGeneration
-            LogUtil.info("音频协调: 中断 $reason playing=$playing resume=$allowResume")
+            LogUtil.info("音频协调: 中断 $reason playing=$playing resume=$allowResume blockers=" +
+                PlaybackCoordinator.gate.description())
             LogUtil.incr("audioFocusInterruption")
             InAppMiniPlayer.cancelAudioRecovery()
             InAppPlaybackContinuity.cancelAudioRecovery()
@@ -520,6 +540,8 @@ internal object AudioFocusCoordinator {
         for (delay in longArrayOf(160L, 450L, 1100L, 2200L)) main.postDelayed({ check() }, delay)
     }
 
+    private val internalTransport = ThreadLocal<Boolean>()
+
     private fun transport(engine: Any, play: Boolean): Boolean {
         if (SystemMediaBridge.audioFocusEngine() !== engine || !NativePlaybackSession.isEngine(engine) ||
             NativeMetadataAccess.call(engine, "isReleased") == true) return false
@@ -527,7 +549,8 @@ internal object AudioFocusCoordinator {
             val method = engine.javaClass.methods.firstOrNull {
                 it.name == (if (play) "play" else "pause") && HookBindingAudit.instanceVoid(it)
             } ?: return false
-            method.invoke(engine)
+            internalTransport.set(true)
+            try { method.invoke(engine) } finally { internalTransport.remove() }
             true
         }.getOrElse {
             LogUtil.warn("音频协调: 原生控制失败 " + it.javaClass.simpleName)
@@ -551,12 +574,13 @@ internal object AudioFocusCoordinator {
             return
         }
         val target = resume.engine.get()
-        if (target == null || SystemMediaBridge.audioFocusEngine() !== target ||
+        if (!validTicket(resume) || target == null || SystemMediaBridge.audioFocusEngine() !== target ||
             resume.epoch != NativePlaybackSession.generation() ||
             resume.video != NativePlaybackSession.videoId(target)) return
         val generation = interruptionGeneration
         main.postDelayed({
-            if (generation != interruptionGeneration || hardInterrupted() || permanentlyInterrupted ||
+            if (generation != interruptionGeneration || resume.userEpoch != PlaybackCoordinator.gate.epoch() ||
+                hardInterrupted() || permanentlyInterrupted ||
                 SystemMediaBridge.audioFocusEngine() !== target ||
                 resume.epoch != NativePlaybackSession.generation() ||
                 resume.video != NativePlaybackSession.videoId(target)) return@postDelayed
@@ -574,6 +598,7 @@ internal object AudioFocusCoordinator {
         if (callActive || externalActive ||
             (externalEnabled && externalRawActive &&
                 SystemClock.elapsedRealtime() - externalSignalAt in 0L..15_000L)) return false
+        PlaybackCoordinator.gate.userAction()
         cancelExternalResume("user-play")
         ticket = null
         resumeAuthorized = false
@@ -605,6 +630,8 @@ internal object AudioFocusCoordinator {
         return true
     }
     fun userPaused() {
+        if (!enabled) return
+        PlaybackCoordinator.gate.userAction()
         cancelExternalResume("user-pause")
         ticket = null
         resumeAuthorized = false
@@ -616,6 +643,20 @@ internal object AudioFocusCoordinator {
         lastRequestVideo = null
         releaseOwn()
     }
+    // Only explicit foreground click/touch transport is classified as user pause.
+    // A lifecycle, focus callback or coordinator pause must not discard a resume ticket.
+    fun observeNativePauseIntent(engine: Any?, activity: Activity?) {
+        if (!enabled || activity?.hasWindowFocus() != true ||
+            SystemMediaBridge.audioFocusEngine() !== engine || internalTransport.get() == true) return
+        val stack = Thread.currentThread().stackTrace
+        if (stack.any { it.methodName in setOf("onAudioFocusChange", "onPause", "onStop",
+            "onCompletion", "onError", "onHiddenChanged") }) return
+        if (stack.any { it.methodName in setOf("onClick", "performClick", "onSingleTapUp", "onSingleTapConfirmed") }) {
+            LogUtil.info("音频协调: 已识别原生用户暂停")
+            userPaused()
+        }
+    }
+
     fun onPlaying(engine: Any, activity: Activity?, allowForegroundRestart: Boolean = true) {
         if (!enabled) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -731,6 +772,16 @@ internal object AudioFocusCoordinator {
     }
     fun stop() {
         cancelExternalResume("coordinator-stop")
+        enabled = false
+        externalEnabled = false
+        externalContext?.let { configureExternal(it) }
+        unregisterMode()
+        focusLost = false
+        callActive = false
+        manualHold = false
+        permanentlyInterrupted = false
+        PlaybackCoordinator.gate.reset()
+        ++interruptionGeneration
         releaseOwn()
         ticket = null
         resumeAuthorized = false

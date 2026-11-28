@@ -163,6 +163,8 @@ object ModuleDiagnostics {
         val files = linkedMapOf<String, String>()
         files["device.txt"] = buildString {
             appendLine("Xhongguo " + BuildConfig.VERSION_NAME + " / " + BuildConfig.VERSION_CODE)
+            appendLine("Package: " + ctx.packageName)
+            appendLine("Build: " + BuildConfig.BUILD_CHANNEL + " / " + BuildConfig.BUILD_REVISION)
             appendLine("Android " + Build.VERSION.RELEASE + " API " + Build.VERSION.SDK_INT)
             appendLine("Device: " + Build.MANUFACTURER + " " + Build.DEVICE)
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager

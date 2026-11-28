@@ -30,6 +30,13 @@ internal object MediaArtworkLoader {
         Thread(runnable, "Xhongguo-MediaArtwork").apply { isDaemon = true }
     }
     private val memory = object : LruCache<String, Bitmap>(8) {}
+    class Subscription {
+        @Volatile var cancelled = false
+            private set
+        fun cancel() { cancelled = true }
+    }
+    private data class Subscriber(val token: Subscription, val callback: (Bitmap?, String) -> Unit)
+    private val inflight = HashMap<String, MutableList<Subscriber>>()
     private val urlPattern = Regex("""https?://[^\s"'\\<>}\]]+""",
         RegexOption.IGNORE_CASE)
 
@@ -171,30 +178,60 @@ internal object MediaArtworkLoader {
      * Every call is associated with the exact URL; SystemMediaBridge must
      * also check the playback generation before applying the returned bitmap.
      */
-    fun load(ctx: Context, raw: String, callback: (Bitmap?, String) -> Unit) {
-        val url = normalize(raw) ?: run {
-            main.post { callback(null, "invalid-url") }
-            return
+    fun load(ctx: Context, raw: String, callback: (Bitmap?, String) -> Unit): Subscription {
+        val token = Subscription()
+        fun deliver(bitmap: Bitmap?, result: String) {
+            main.post { if (!token.cancelled) callback(bitmap, result) }
         }
+        val url = normalize(raw) ?: run { deliver(null, "invalid-url"); return token }
         val key = cacheKey(url)
+        val subscriber = Subscriber(token, callback)
         synchronized(memory) {
-            memory.get(key)?.let { bitmap ->
-                main.post { callback(bitmap, "memory-cache") }
-                return
+            memory.get(key)?.takeUnless { it.isRecycled }?.let {
+                deliver(it, "memory-cache")
+                return token
             }
+            val pending = inflight[key]
+            if (pending != null) {
+                pending.removeAll { it.token.cancelled }
+                if (pending.size < 16) pending.add(subscriber)
+                else deliver(null, "queue-limited")
+                return token
+            }
+            if (inflight.size >= 16) {
+                deliver(null, "queue-limited")
+                return token
+            }
+            inflight[key] = mutableListOf(subscriber)
         }
         io.execute {
-            var outcome = "disk-cache"
-            var art = localImage(ctx, key)
-            if (art == null) {
-                outcome = "network"
-                val bytes = try { download(url) } catch (_: Throwable) { null }
-                art = bytes?.let { decode(it) }
-                if (art != null && bytes != null) rememberDisk(ctx, key, bytes)
+            synchronized(memory) {
+                if (inflight[key].orEmpty().none { !it.token.cancelled }) {
+                    inflight.remove(key)
+                    return@execute
+                }
             }
-            if (art != null) synchronized(memory) { memory.put(key, art) }
+            var outcome = "disk-cache"
+            val art = runCatching {
+                localImage(ctx, key) ?: run {
+                    outcome = "network"
+                    val bytes = download(url)
+                    if (bytes == null) null else decode(bytes)?.also {
+                        rememberDisk(ctx, key, bytes)
+                    }
+                }
+            }.getOrNull()
             if (art == null) outcome = "unavailable"
-            main.post { callback(art, outcome) }
+            val subscribers = synchronized(memory) {
+                if (art != null) memory.put(key, art)
+                inflight.remove(key).orEmpty().toList()
+            }
+            main.post {
+                subscribers.filterNot { it.token.cancelled }.forEach {
+                    runCatching { it.callback(art, outcome) }
+                }
+            }
         }
+        return token
     }
 }

@@ -24,12 +24,12 @@ object ModuleSettingsStore {
         "hide_mine_shortcuts", "hide_all_ads", "official_playback_probe"
     )
     // Same default for module UI, target Hook and diagnostic export.
-    fun defaultBoolean(key: String): Boolean = key in setOf(
-        "video_longpress_settings", "disable_shopping_mall",
-        "hide_mine_shortcuts", "hide_all_ads",
-        "audio_focus_pause", "audio_call_pause", "audio_call_auto_resume",
-        "audio_external_pause", "audio_external_auto_resume"
-    )
+    fun defaultBoolean(key: String): Boolean = SettingsCatalog.definition(key).defaultEnabled
+
+    internal fun writeBoolean(editor: SharedPreferences.Editor, key: String, value: Boolean) {
+        editor.putBoolean(key, value)
+        if (value) SettingsCatalog.otherMode(key)?.let { editor.putBoolean(it, false) }
+    }
 
     const val EXTERNAL_RESUME_DELAY = "audio_external_resume_delay_ms"
     val EXTERNAL_RESUME_DELAYS = intArrayOf(1000, 2000, 3000, 5000, 10000)
@@ -54,7 +54,7 @@ object ModuleSettingsStore {
     fun save(ctx: Context, key: String, value: Any): Boolean {
         val editor = prefs(ctx).edit()
         when {
-            key in BOOLEANS && value is Boolean -> editor.putBoolean(key, value)
+            key in BOOLEANS && value is Boolean -> writeBoolean(editor, key, value)
             key in FLOATS && value is Float && value.isFinite() -> editor.putFloat(key, value)
             key in INTS && value is Int && validInt(key, value) -> editor.putInt(key, value)
             else -> return false
@@ -154,7 +154,7 @@ class ModuleSettingsProvider : ContentProvider() {
                 val editor = prefs.edit()
                 val valid = when {
                     key in ModuleSettingsStore.BOOLEANS && extras?.containsKey("b") == true -> {
-                        editor.putBoolean(key, extras.getBoolean("b")); true
+                        ModuleSettingsStore.writeBoolean(editor, key, extras.getBoolean("b")); true
                     }
                     key in ModuleSettingsStore.FLOATS && extras?.containsKey("f") == true -> {
                         val v = extras.getFloat("f")
@@ -171,6 +171,9 @@ class ModuleSettingsProvider : ContentProvider() {
                 Bundle().apply { putBoolean("ok", ok) }
             }
             "import" -> {
+                // A target-local legacy mirror is only a one-time migration.
+                // Do not resurrect values removed by a newer configuration.
+                if (prefs.all.isNotEmpty()) return Bundle().apply { putBoolean("ok", false) }
                 val editor = prefs.edit()
                 var count = 0
                 if (extras != null) {

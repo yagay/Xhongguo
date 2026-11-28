@@ -31,7 +31,7 @@ class MainActivity : Activity() {
         tvStatus = findViewById(R.id.tv_update_status)
 
         currentVersion = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
-        tvVersion.text = "模块 ${BuildConfig.VERSION_NAME}  ·  versionCode ${BuildConfig.VERSION_CODE}"
+        tvVersion.text = "Xhongguo ${BuildConfig.VERSION_NAME}  ·  versionCode ${BuildConfig.VERSION_CODE}"
         updateTargetVersionText()
 
         findViewById<View>(R.id.btn_open_settings).setOnClickListener {
@@ -206,6 +206,12 @@ class MainActivity : Activity() {
     }
 
     private fun manualCheck() {
+        if (BuildConfig.BUILD_CHANNEL == "test") {
+            tvStatus.visibility = View.VISIBLE
+            tvStatus.text = "Test 通道：前往 GitHub Actions 查看最新成功的 Debug APK"
+            UpdateChecker.openUrl(this, UpdateChecker.TEST_BUILDS_URL)
+            return
+        }
         tvStatus.visibility = View.VISIBLE
         tvStatus.text = "正在检查更新…"
         UpdateChecker.checkUpdate(currentVersion) { latest ->

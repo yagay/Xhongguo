@@ -68,7 +68,7 @@ internal object InAppMiniPlayer {
         return NativeMetadataAccess.call(engine, "isPlaying") as? Boolean
     }
     private fun command(engine: Any, play: Boolean): Boolean {
-        if (play && AudioFocusCoordinator.interrupted()) return false
+        if (play && !PlaybackCoordinator.permitsAutomaticPlayback()) return false
         transitionUntil = 0
         transitionPause = false
         manualCommand = true

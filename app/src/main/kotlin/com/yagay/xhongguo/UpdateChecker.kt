@@ -12,8 +12,9 @@ import java.net.URL
 
 object UpdateChecker {
 
-    const val REPO_URL = "https://github.com/KEJIYUNB/hongguo"
+    const val REPO_URL = "https://github.com/yagay/Xhongguo"
     const val RELEASES_URL = "$REPO_URL/releases/latest"
+    const val TEST_BUILDS_URL = "$REPO_URL/actions?query=branch%3Atest"
     const val TG_CHANNEL_URL = "https://t.me/Kmodify"
 
     @Volatile var currentVersion: String = ""
@@ -34,9 +35,17 @@ object UpdateChecker {
 
     fun checkUpdate(version: String, onResult: ((String?) -> Unit)? = null) {
         if (currentVersion.isEmpty()) currentVersion = version
-        if (onResult != null) synchronized(callbacks) { callbacks.add(onResult) }
-        if (checking) return
-        checking = true
+        // Test APKs are Actions artifacts, not stable releases. Never prompt
+        // a test installation to downgrade to an unrelated stable APK.
+        if (BuildConfig.BUILD_CHANNEL == "test") {
+            onResult?.let { mainHandler.post { it(null) } }
+            return
+        }
+        synchronized(callbacks) {
+            if (onResult != null) callbacks.add(onResult)
+            if (checking) return
+            checking = true
+        }
         Thread {
             var newer: String? = null
             try {
@@ -53,11 +62,11 @@ object UpdateChecker {
                 lastError = e.message ?: "网络错误"
                 hasUpdate = false
             } finally {
-                checking = false
-            }
-            mainHandler.post {
-                val list = synchronized(callbacks) { callbacks.toList().also { callbacks.clear() } }
-                list.forEach { it(newer) }
+                val list = synchronized(callbacks) {
+                    checking = false
+                    callbacks.toList().also { callbacks.clear() }
+                }
+                mainHandler.post { list.forEach { runCatching { it(newer) } } }
             }
         }.start()
     }
@@ -102,7 +111,7 @@ object UpdateChecker {
             }
 
             val html = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            return Regex("""/KEJIYUNB/hongguo/releases/tag/([^"'\s<>?]+)""").find(html)
+            return Regex("""/yagay/Xhongguo/releases/tag/([^"'\s<>?]+)""").find(html)
                 ?.groupValues?.get(1)?.removePrefix("v")?.trim()
         } finally {
             conn.disconnect()
@@ -111,8 +120,8 @@ object UpdateChecker {
 
     fun compareVersions(a: String, b: String): Int {
         fun parse(s: String): List<Int> = s.trim().removePrefix("v")
-            .split('.')
-            .map { seg -> seg.filter { it.isDigit() }.toIntOrNull() ?: 0 }
+            .substringBefore('-').substringBefore('+').split('.')
+            .map { seg -> seg.toIntOrNull() ?: 0 }
         val pa = parse(a)
         val pb = parse(b)
         for (i in 0 until maxOf(pa.size, pb.size)) {

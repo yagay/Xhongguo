@@ -1,6 +1,6 @@
 package com.yagay.xhongguo
 
-/** Shared navigation only. Preference keys and playback behavior are unchanged. */
+/** Shared settings metadata, dependency and search definitions. */
 internal object SettingsCatalog {
     enum class Page(val title: String, val summary: String) {
         HOME("Xhongguo 设置", ""),
@@ -28,6 +28,32 @@ internal object SettingsCatalog {
         "disable_shopping_mall", "hide_mine_shortcuts", "hide_all_ads", "ad_block",
         "vip_unlock", "vip_icon" -> Page.CONTENT
         else -> Page.TOOLS
+    }
+
+    data class Definition(val key: String, val page: Page, val order: Int,
+        val defaultEnabled: Boolean, val parentKeys: List<String>, val restartRequired: Boolean)
+
+    private val defaultOn = setOf("video_longpress_settings", "disable_shopping_mall",
+        "hide_mine_shortcuts", "hide_all_ads", "audio_focus_pause", "audio_call_pause",
+        "audio_call_auto_resume", "audio_external_pause", "audio_external_auto_resume")
+    fun definition(key: String): Definition {
+        val parents = when (key) {
+            "audio_external_auto_resume" -> listOf("audio_external_pause")
+            "audio_external_resume_delay_ms" -> listOf("audio_external_pause", "audio_external_auto_resume")
+            "audio_focus_auto_resume", "audio_focus_pause_duck" -> listOf("audio_focus_pause")
+            "audio_call_auto_resume" -> listOf("audio_call_pause")
+            "default_speed_value" -> listOf("default_speed")
+            "download_limit_values" -> listOf("download_limit_unlimit")
+            else -> emptyList()
+        }
+        return Definition(key, page(key), rank(key), key in defaultOn, parents,
+            key in setOf("audio_external_pause", "download_limit_unlimit", "official_playback_probe"))
+    }
+
+    fun otherMode(key: String): String? = when (key) {
+        "in_app_continuous_playback" -> "in_app_mini_player"
+        "in_app_mini_player" -> "in_app_continuous_playback"
+        else -> null
     }
 
     // Consistent grouping order even when a host does not expose every item.

@@ -11,8 +11,12 @@ android {
         applicationId 'com.yagay.xhongguo'
         minSdk 29
         targetSdk 34
-        versionCode 20260811
-        versionName "1.0.1"
+        def runNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '0').toInteger()
+        versionCode 20261128 + runNumber
+        versionName "1.1.0-test" + (runNumber > 0 ? "." + runNumber : "")
+        def revision = (System.getenv('GITHUB_SHA') ?: 'local').take(12)
+        buildConfigField 'String', 'BUILD_CHANNEL', '"test"'
+        buildConfigField 'String', 'BUILD_REVISION', '"' + revision + '"'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 
@@ -81,4 +85,5 @@ android {
 
 dependencies {
     compileOnly libs.libxposed.api
+    testImplementation "junit:junit:4.13.2"
 }

@@ -23,7 +23,7 @@ class MainHook : XposedModule() {
 
     override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
         currentProcessName = param.processName ?: ""
-        LogUtil.init(param.processName)
+        if (!param.isSystemServer) LogUtil.init(param.processName)
         LogUtil.info("══════════ 模块加载 ══════════")
         LogUtil.info("进程=${param.processName} | systemServer=${param.isSystemServer}")
         LogUtil.info("框架=${frameworkName} v${frameworkVersion} | API=${apiVersion}")
@@ -31,7 +31,8 @@ class MainHook : XposedModule() {
         LogUtil.info("══════════════════════════════")
         log(Log.INFO, TAG, "模块已加载 | 进程=${param.processName} | API=${apiVersion}")
 
-        if (param.isSystemServer) return // no network/update checks in system_server
+        if (param.isSystemServer || currentProcessName !in TARGET_PACKAGES &&
+            currentProcessName != DEMO_PACKAGE) return // no network checks in child/system processes
         try {
             val ver = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
             LogUtil.info("更新检查启动 | 当前版本=$ver")
@@ -117,8 +118,11 @@ class MainHook : XposedModule() {
     }
 
     override fun onHotReloading(param: XposedModuleInterface.HotReloadingParam): Boolean {
-        LogUtil.info("热重载中...")
-        return true
+        // The framework cannot atomically replace native media ownership,
+        // existing listeners and app-owned tasks. Fail closed until full teardown
+        // is device-tested rather than leaving two active module generations.
+        LogUtil.warn("暂不安全支持热重载，请重启目标进程（系统框架需重启）")
+        return false
     }
 
     override fun onHotReloaded(param: XposedModuleInterface.HotReloadedParam) {

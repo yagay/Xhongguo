@@ -17,9 +17,13 @@ internal object NativeBusinessResolver {
     private const val ENGINE = "com.ss.ttvideoengine.TTVideoEngine"
     enum class Page { FEED, SERIES, UNKNOWN }
     private data class Shape(val fields: List<Field>, val methods: List<Method>)
-    private val shapes = WeakHashMap<Class<*>, WeakReference<Shape>>()
+    // Bounded process-local LRU. A weak value vanished under memory pressure
+    // even while its native class remained loaded, causing repeated reflection.
+    private val shapes = object : LinkedHashMap<Class<*>, Shape>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Class<*>, Shape>?): Boolean = size > 128
+    }
     @Synchronized private fun shape(type: Class<*>): Shape {
-        shapes[type]?.get()?.let { return it }
+        shapes[type]?.let { return it }
         val fields = ArrayList<Field>()
         var cursor: Class<*>? = type
         repeat(5) {
@@ -33,7 +37,7 @@ internal object NativeBusinessResolver {
         val methods = runCatching { type.methods.toList() }.getOrDefault(emptyList())
             .filter { !Modifier.isStatic(it.modifiers) && !it.isBridge && !it.isSynthetic }
         val value = Shape(fields, methods)
-        shapes[type] = WeakReference(value)
+        shapes[type] = value
         return value
     }
     fun noArg(type: Class<*>, name: String, returns: ((Class<*>) -> Boolean)? = null): Method? =
@@ -142,22 +146,31 @@ internal object NativeBusinessResolver {
 
 /** Circuit breaker for module-owned callbacks, never native chain.proceed(). */
 internal object FeatureFaultGuard {
-    private val failures = HashMap<String, Int>()
-    @Synchronized fun available(name: String): Boolean = (failures[name] ?: 0) < 3
+    private data class Failure(val count: Int, val retryAt: Long)
+    private val failures = HashMap<String, Failure>()
+    @Synchronized fun available(name: String): Boolean {
+        val failure = failures[name] ?: return true
+        if (failure.count < 3) return true
+        if (android.os.SystemClock.elapsedRealtime() < failure.retryAt) return false
+        failures.remove(name)
+        LogUtil.info("功能隔离: $name 冷却结束，重新检测")
+        return true
+    }
+    @Synchronized private fun success(name: String) { failures.remove(name) }
     @Synchronized private fun failure(name: String, error: Throwable) {
-        val count = (failures[name] ?: 0) + 1
-        failures[name] = count
+        val count = (failures[name]?.count ?: 0) + 1
+        failures[name] = Failure(count, android.os.SystemClock.elapsedRealtime() + 60_000L)
         LogUtil.warn("功能隔离: $name failures=$count disabled=" + (count >= 3) +
             " error=" + error.javaClass.name + ": " + error.message)
     }
     fun run(name: String, block: () -> Unit) {
         if (!available(name)) return
-        try { block() } catch (error: Exception) { failure(name, error) }
+        try { block(); success(name) } catch (error: Exception) { failure(name, error) }
         catch (error: LinkageError) { failure(name, error) }
     }
     fun test(name: String, block: () -> Boolean): Boolean {
         if (!available(name)) return false
-        return try { block() } catch (error: Exception) { failure(name, error); false }
+        return try { block().also { success(name) } } catch (error: Exception) { failure(name, error); false }
         catch (error: LinkageError) { failure(name, error); false }
     }
     @Synchronized fun reset() { failures.clear() }

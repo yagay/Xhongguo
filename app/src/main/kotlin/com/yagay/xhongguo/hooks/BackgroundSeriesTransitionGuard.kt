@@ -36,6 +36,8 @@ internal object BackgroundSeriesTransitionGuard {
     private var pendingSeriesAt = 0L
     private var lastFocusReason = ""
     private var pendingRelocation = false
+    private var launchTaskId = -1
+    private var launchAt = 0L
 
     private fun active(): Boolean = SystemMediaBridge.enabled
 
@@ -143,6 +145,10 @@ internal object BackgroundSeriesTransitionGuard {
             visibility == false) {
             inspectBackground(activity, "native-series-launch-immediate")
         }
+        if (taskBackgrounded && visibility != true && !activity.hasWindowFocus()) {
+            launchTaskId = activity.taskId
+            launchAt = SystemClock.uptimeMillis()
+        }
         LogUtil.info("后台切集守护: 捕获红果原生全集 Activity 启动" +
             " caller=" + activity.javaClass.simpleName +
             " taskVisible=" + visibility +
@@ -168,6 +174,14 @@ internal object BackgroundSeriesTransitionGuard {
             taskBackgrounded = false
             return
         }
+        // Require the observed native launch route, not just any new series page.
+        if (launchTaskId != activity.taskId ||
+            SystemClock.uptimeMillis() - launchAt !in 0L..10_000L) {
+            LogUtil.info("后台切集守护: 未匹配后台启动凭证，保留原生导航")
+            return
+        }
+        launchTaskId = -1
+        launchAt = 0L
         pendingSeriesActivity = WeakReference(activity)
         pendingSeriesAt = SystemClock.uptimeMillis()
         pendingRelocation = true
@@ -192,6 +206,8 @@ internal object BackgroundSeriesTransitionGuard {
             if (taskBackgrounded) {
                 taskBackgrounded = false
                 pendingRelocation = false
+                launchTaskId = -1
+                launchAt = 0L
                 pendingSeriesActivity.clear()
                 LogUtil.info("后台切集守护: 用户正常返回前台" +
                     " activity=" + activity.javaClass.simpleName +

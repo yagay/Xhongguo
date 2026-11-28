@@ -164,6 +164,12 @@ internal object SystemMediaBridge {
     private var artworkFailedAt = 0L
     private var currentArtworkUrl: String? = null
     private var artworkGeneration = 0L
+    private var artworkSubscription: MediaArtworkLoader.Subscription? = null
+    private fun invalidateArtworkRequest() {
+        artworkSubscription?.cancel()
+        artworkSubscription = null
+        artworkGeneration++
+    }
     private var lastArtworkDiagnosticAt = 0L
     private var lastMetadataSignature: String? = null
     private var lastMetadataArt: Bitmap? = null
@@ -312,7 +318,8 @@ internal object SystemMediaBridge {
         val ownerEngine = videoEngine.get()
         LogUtil.info("系统媒体: 已发现原生系列海报，准备异步读取 reason=$reason")
         LogUtil.incr("systemMediaArtworkRequested")
-        MediaArtworkLoader.load(ctx, url) { bitmap, source ->
+        artworkSubscription?.cancel()
+        artworkSubscription = MediaArtworkLoader.load(ctx, url) { bitmap, source ->
             if (!enabled || generation != artworkGeneration ||
                 ownerEngine !== videoEngine.get() ||
                 artworkRequestUrl != url) return@load
@@ -338,16 +345,8 @@ internal object SystemMediaBridge {
     private fun updateSessionMetadataDirect(media: MediaSession) {
         // Called before assigning session = media.
         try {
-            val builder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, seriesTitle ?: "红果短剧")
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, seriesTitle ?: "红果短剧")
-                .putString(MediaMetadata.METADATA_KEY_ARTIST,
-                    episodeTitle ?: "正在播放的视频")
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE,
-                    episodeTitle ?: "正在播放的视频")
-            if (durationMs > 0L) builder.putLong(
-                MediaMetadata.METADATA_KEY_DURATION, durationMs)
-            media.setMetadata(builder.build())
+            media.setMetadata(MediaCardSnapshot(seriesTitle ?: "红果短剧",
+                episodeTitle ?: "正在播放的视频", durationMs, coverArt).toPlatformMetadata())
             lastMetadataSignature = null // Let the next snapshot fill artwork.
         } catch (e: Throwable) {
             LogUtil.warn("系统媒体: 初始媒体信息发布失败: " + e.message)
@@ -436,15 +435,16 @@ internal object SystemMediaBridge {
             observed.artworkUrl ?: play.artworkUrl
         val resolvedSeriesId = full.seriesId ?: home.seriesId ?:
             observed.seriesId
-        if (resolvedSeriesId != null && currentSeriesIdentity != null &&
-            resolvedSeriesId != currentSeriesIdentity) {
+        val identityChanged = resolvedSeriesId != null && currentSeriesIdentity != null &&
+            resolvedSeriesId != currentSeriesIdentity
+        if (identityChanged) {
             // One Activity may navigate to another drama. A confirmed ID
             // change must invalidate the old title, poster and late callback.
             seriesTitle = null
             episodeTitle = null
             coverArt = null
             currentArtworkUrl = null
-            artworkGeneration++
+            invalidateArtworkRequest()
             artworkRequestUrl = null
             artworkRequestedAt = 0L
             lastMetadataArt = null
@@ -455,7 +455,7 @@ internal object SystemMediaBridge {
             if (isFullSeries) "series" else "feed"
         if (artworkUrl != null) currentArtworkUrl = artworkUrl
         requestNativeArtwork(currentArtworkUrl, "unified:$reason")
-        var changed = false
+        var changed = identityChanged
         if (title != null && title != seriesTitle) {
             seriesTitle = title
             changed = true
@@ -529,7 +529,7 @@ internal object SystemMediaBridge {
                 currentArtworkUrl = null
                 currentSeriesIdentity = null
             }
-            artworkGeneration++
+            invalidateArtworkRequest()
             artworkRequestUrl = null
             artworkRequestedAt = 0L
             durationMs = -1L
@@ -537,6 +537,8 @@ internal object SystemMediaBridge {
             bufferedMs = -1L
             lastMetadataArt = null
             lastMetadataSignature = null
+            updateSessionMetadata(true)
+            if (reportedCard) updateMediaNotification(knownPlaying)
             LogUtil.info("系统媒体: 同引擎切换视频 ID" +
                 " sameSeries=$sameSeries posterRetained=" + (coverArt != null))
         }
@@ -678,7 +680,7 @@ internal object SystemMediaBridge {
                     currentSeriesIdentity = null
                 }
                 episodeTitle = null
-                artworkGeneration++
+                invalidateArtworkRequest()
                 artworkRequestUrl = null
                 artworkRequestedAt = 0L
                 handler.removeCallbacks(delayedMetadataSync)
@@ -716,7 +718,8 @@ internal object SystemMediaBridge {
         // Track the actual active engine's pause on BOTH player pages.
         // Recovery is allowed only after ActivityManager confirms background.
         val playerPage = NativeBusinessResolver.page(foregroundActivity.get(), candidate)
-        if (action == "pause" && playerPage != NativeBusinessResolver.Page.UNKNOWN) {
+        if (action == "pause" && PlaybackCoordinator.permitsAutomaticPlayback() &&
+            playerPage != NativeBusinessResolver.Page.UNKNOWN) {
             lastLifecyclePauseAt = SystemClock.uptimeMillis()
             lastLifecyclePauseEngine = WeakReference(candidate)
             lastLifecyclePauseWasPlaying = knownPlaying
@@ -1001,6 +1004,7 @@ internal object SystemMediaBridge {
         // instead of TTVideoEngine.pause. Record the same verified candidate
         // only around a real Activity leave/pause, never for user media actions.
         if (!playing && knownPlaying && !userCommandInProgress &&
+            PlaybackCoordinator.permitsAutomaticPlayback() &&
             videoEngine.get() != null &&
             (SystemClock.uptimeMillis() - lastPlayerActivityPauseAt in 0L..1500L ||
              SystemClock.uptimeMillis() - lastUserLeaveAt in 0L..1500L)) {
@@ -1523,7 +1527,7 @@ internal object SystemMediaBridge {
         currentMetadataPage = null
         coverArt = null
         currentArtworkUrl = null
-        artworkGeneration++
+        invalidateArtworkRequest()
         artworkRequestUrl = null
         artworkRequestedAt = 0L
         lastMetadataSignature = null

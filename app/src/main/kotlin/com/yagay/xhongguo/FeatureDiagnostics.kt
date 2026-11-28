@@ -120,6 +120,14 @@ object FeatureDiagnostics {
             if (errors.isNotEmpty()) appendLine("  失败线索：" + errors.joinToString())
         }
         appendLine()
+        appendLine("播放协调与 Hook 生命周期")
+        for (signal in listOf("播放会话: confirmed", "Hook 生命周期: 已安装作用域",
+            "功能隔离:", "音频协调: 已识别原生用户暂停", "后台切集守护: 未匹配后台启动凭证")) {
+            val recent = evidence.lineSequence().filter { it.contains(signal) }.toList()
+            appendLine("  " + signal + " count=" + recent.size)
+            recent.lastOrNull()?.let { appendLine("    " + it.take(300)) }
+        }
+        appendLine()
         appendLine("音频中断重点排查")
         for (key in listOf("audio_focus_pause", "audio_call_pause", "audio_external_pause",
             "audio_focus_auto_resume", "audio_call_auto_resume", "audio_focus_pause_duck", "audio_external_auto_resume")) {

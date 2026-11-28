@@ -381,12 +381,21 @@ object Hooks {
     }
 
     private fun savePref(key: String, value: Boolean) {
-        val editor = gPrefs?.edit()?.putBoolean(key, value) ?: return
+        val editor = gPrefs?.edit() ?: return
+        ModuleSettingsStore.writeBoolean(editor, key, value)
 
         if (key == DOWNLOAD_LIMIT_PREF || key == "master_on") editor.commit()
         else editor.apply()
         appCtx?.let {
-            ModuleSettingsStore.pushFromTarget(it, key, value)
+            if (!ModuleSettingsStore.pushFromTarget(it, key, value))
+                LogUtil.warn("设置同步: 模块 Provider 暂不可用 key=$key")
+            if (com.yagay.xhongguo.SettingsCatalog.otherMode(key) != null) {
+                gMiniPlayerOn = gPrefs?.getBoolean("in_app_mini_player", false) == true
+                InAppPlaybackContinuity.configure(it, gMasterOn &&
+                    gPrefs?.getBoolean("in_app_continuous_playback", false) == true)
+                InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
+                if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
+            }
             if (key in setOf("master_on", "system_media_playback", "audio_focus_pause",
                     "audio_call_pause", "audio_focus_auto_resume", "audio_call_auto_resume",
                     "audio_focus_pause_duck", "audio_external_pause", "audio_external_auto_resume")) configureAudioFocus(it)
@@ -2767,7 +2776,7 @@ object Hooks {
             if (gMasterOn && gProgressOff && !(gRestoreControlsOnPause && gVideoPaused)) for (root in allRoots) scanTreeProgress(root)
             else for (root in allRoots) scanTreeProgressRestore(root)
             if (gMasterOn && gRefreshOff) for (root in allRoots) scanTreeRefreshAccessory(root)
-            else if (!gRefreshOff) restoreRefreshAccessories()
+            else restoreRefreshAccessories()
             syncShortVideoMasks()
             syncCnHomeFragmentMasks()
             if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
@@ -2777,49 +2786,51 @@ object Hooks {
         } catch (_: Exception) {}
     }
 
-    private var gScanRunnable: Runnable? = null
-    private fun startPeriodicScan() {
-        stopPeriodicScan()
-        gScanRunnable = object : Runnable {
-            override fun run() {
-                try {
-                    scanShoppingTabIfNeeded(gCurrentActivity)
-                    if (gMasterOn && (gMineShortcutsOff || gAdOn))
-                        scanMineUiIfNeeded()
-                    if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
-                        forcePauseRestoreControls()
-                    }
-                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val allRoots = collectAllWindows()
-                        for (root in allRoots) scanTreeQuick(root)
-                        syncShortVideoMasks()
-                        syncCnHomeFragmentMasks()
-                        enforceNativeMainBottomHidden(gCurrentActivity)
-                        enforceKnownFeedViewportBottomMargin()
-                    }
-                    if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val decor = try { gCurrentActivity?.window?.decorView } catch (_: Throwable) { null }
-                        if (decor != null) scanTreePlayer(decor)
-                    }
-                    if (gMasterOn && gProgressOff && !(gRestoreControlsOnPause && gVideoPaused)) {
-                        val allRoots2 = collectAllWindows()
-                        for (root in allRoots2) scanTreeProgress(root)
-                    }
-                    if (gMasterOn && gRefreshOff) {
-                        val allRoots3 = collectAllWindows()
-                        for (root in allRoots3) scanTreeRefreshAccessory(root)
-                    }
-                } catch (_: Exception) {}
-                mainHandler.postDelayed(this, 150)
+    private val uiScanScheduler by lazy {
+        UiScanScheduler(mainHandler, { gMasterOn && (gControlOn || gPlayerOn ||
+            gProgressOff || gRefreshOff || gRestoreControlsOnPause || gMineShortcutsOff ||
+            gAdOn || gDisableShoppingMall) }, ::scanVisibleUi)
+    }
+    private fun scanVisibleUi() {
+        try {
+            val roots by lazy { collectAllWindows() }
+            scanShoppingTabIfNeeded(gCurrentActivity)
+            if (gMasterOn && (gMineShortcutsOff || gAdOn))
+                scanMineUiIfNeeded()
+            if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
+                forcePauseRestoreControls()
             }
+            if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                val allRoots = roots
+                for (root in allRoots) scanTreeQuick(root)
+                syncShortVideoMasks()
+                syncCnHomeFragmentMasks()
+                enforceNativeMainBottomHidden(gCurrentActivity)
+                enforceKnownFeedViewportBottomMargin()
+            }
+            if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                val decor = try { gCurrentActivity?.window?.decorView } catch (_: Throwable) { null }
+                if (decor != null) scanTreePlayer(decor)
+            }
+            if (gMasterOn && gProgressOff && !(gRestoreControlsOnPause && gVideoPaused)) {
+                val allRoots2 = roots
+                for (root in allRoots2) scanTreeProgress(root)
+            }
+            if (gMasterOn && gRefreshOff) {
+                val allRoots3 = roots
+                for (root in allRoots3) scanTreeRefreshAccessory(root)
+            }
+        } catch (_: Exception) {}
+    
+    }
+    private fun startPeriodicScan() { uiScanScheduler.start(gCurrentActivity) }
+    private fun stopPeriodicScan() { uiScanScheduler.stop() }
+    private fun applyToCurrent() {
+        mainHandler.post {
+            scanAllWindows()
+            uiScanScheduler.request()
         }
-        mainHandler.postDelayed(gScanRunnable!!, 150)
     }
-    private fun stopPeriodicScan() {
-        gScanRunnable?.let { mainHandler.removeCallbacks(it) }
-        gScanRunnable = null
-    }
-    private fun applyToCurrent() { mainHandler.post { scanAllWindows() } }
 
     /**
      * 0 = three-button, 1 = two-button, 2 = gesture navigation.
@@ -3378,7 +3389,7 @@ object Hooks {
             val flag = if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE else PendingIntent.FLAG_UPDATE_CURRENT
             fun pi(code: Int, action: String) = PendingIntent.getBroadcast(ctx, code, Intent(action).apply { setPackage(gPkg); addFlags(Intent.FLAG_RECEIVER_FOREGROUND) }, flag)
             val n = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(ctx, "lspilot_toggle") else @Suppress("DEPRECATION") android.app.Notification.Builder(ctx)
-            n.setContentTitle("KEJIYU 模块"); n.setContentText(if (gMasterOn) "已启用" else "已停用"); n.setSmallIcon(android.R.drawable.ic_menu_view); n.setOngoing(true)
+            n.setContentTitle("Xhongguo 模块"); n.setContentText(if (gMasterOn) "已启用" else "已停用"); n.setSmallIcon(android.R.drawable.ic_menu_view); n.setOngoing(true)
             n.setContentIntent(pi(9999, "$gPkg.LSPilot.TOGGLE"))
             n.addAction(android.R.drawable.ic_menu_view, if (gMasterOn) "隐藏" else "显示", pi(10001, "$gPkg.LSPilot.TOGGLE"))
             n.addAction(android.R.drawable.ic_menu_edit, "面板", pi(10002, "$gPkg.LSPilot.OPEN_PANEL"))
@@ -3861,7 +3872,7 @@ object Hooks {
                 setPadding(dp(act, 6f), dp(act, 18f), dp(act, 6f), dp(act, 14f))
             }
             header.addView(TextView(act).apply {
-                text = "KEJIYU"
+                text = "Xhongguo"
                 textSize = 25f
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 setTextColor(p.text)
@@ -3878,6 +3889,24 @@ object Hooks {
             val home = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
             val categoryRows = linkedMapOf<com.yagay.xhongguo.SettingsCatalog.Page, MutableList<Pair<String, View>>>()
             val pages = linkedMapOf<com.yagay.xhongguo.SettingsCatalog.Page, LinearLayout>()
+            val searchItems = mutableListOf<com.yagay.xhongguo.SettingsSearch.Item>()
+            val rowSwitches = linkedMapOf<String, Switch>()
+            var refreshingRows = false
+            fun refreshPanelRows() {
+                refreshingRows = true
+                try {
+                    for ((key, sw) in rowSwitches) {
+                        val default = ModuleSettingsStore.defaultBoolean(key)
+                        sw.isChecked = gPrefs?.getBoolean(key, default) ?: default
+                    }
+                    for ((_, rows) in categoryRows) for ((key, view) in rows) {
+                        view.visibility = if (com.yagay.xhongguo.SettingsCatalog.definition(key).parentKeys.all {
+                            val default = ModuleSettingsStore.defaultBoolean(it)
+                            gPrefs?.getBoolean(it, default) ?: default
+                        }) View.VISIBLE else View.GONE
+                    }
+                } finally { refreshingRows = false }
+            }
             var page = com.yagay.xhongguo.SettingsCatalog.Page.HOME
             content.addView(home)
 
@@ -3913,9 +3942,12 @@ object Hooks {
                 onRowAction: (() -> Unit)? = null,
             ): Pair<LinearLayout, Switch> {
                 val (row, sw) = makePanelRow(act, title, description, getter(), p, emphasis, onRowAction != null)
+                rowSwitches[saveKey] = sw
                 sw.setOnCheckedChangeListener { _, v ->
+                    if (refreshingRows) return@setOnCheckedChangeListener
                     setter(v)
                     savePref(saveKey, v)
+                    refreshPanelRows()
                     if (saveKey != "ad_block") applyToCurrent()
                 }
                 row.setOnClickListener {
@@ -3923,6 +3955,8 @@ object Hooks {
                 }
                 categoryRows.getOrPut(com.yagay.xhongguo.SettingsCatalog.page(saveKey)) { mutableListOf() }
                     .add(saveKey to row)
+                searchItems.add(com.yagay.xhongguo.SettingsSearch.Item(saveKey, title, description,
+                    com.yagay.xhongguo.SettingsCatalog.page(saveKey)))
                 return row to sw
             }
 
@@ -4149,6 +4183,7 @@ object Hooks {
 
             }
             fun showPage(target: com.yagay.xhongguo.SettingsCatalog.Page) {
+                refreshPanelRows()
                 page = target
                 home.visibility = if (page == com.yagay.xhongguo.SettingsCatalog.Page.HOME)
                     View.VISIBLE else View.GONE
@@ -4210,6 +4245,26 @@ object Hooks {
                 }
                 appendRow(home, entry)
             }
+            val searchEntry = TextView(act).apply {
+                text = "搜索设置  ›"
+                textSize = 15f
+                setTextColor(p.accent)
+                setPadding(dp(act, 15f), dp(act, 12f), dp(act, 15f), dp(act, 12f))
+                background = roundedBg(act, p.surfaceAlt, 18f)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    com.yagay.xhongguo.SettingsSearch.show(act, searchItems) { item ->
+                        showPage(item.page)
+                        val target = categoryRows[item.page]?.firstOrNull { it.first == item.key }?.second
+                        target?.post {
+                            if (target.visibility == View.VISIBLE) target.requestFocus()
+                            else Toast.makeText(act, "请先启用该项的上级开关", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            home.addView(searchEntry, 0)
             showPage(com.yagay.xhongguo.SettingsCatalog.Page.HOME)
             done.setOnClickListener {
                 if (page != com.yagay.xhongguo.SettingsCatalog.Page.HOME) {
@@ -5077,7 +5132,15 @@ object Hooks {
         }
     }
 
+    private val installedScopes = java.util.WeakHashMap<ClassLoader, MutableSet<String>>()
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
+        val first = synchronized(installedScopes) {
+            installedScopes.getOrPut(classLoader) { mutableSetOf() }.add(pkg)
+        }
+        if (!first) {
+            LogUtil.info("Hook 生命周期: 已安装作用域，跳过重复注册 pkg=$pkg")
+            return
+        }
         LogUtil.info("── installBusinessHooks ── pkg=$pkg")
         InAppMiniPlayer.openHomeTab = { activity ->
             val tab = nativeTabClickForLabel(activity, "首页")
@@ -6080,6 +6143,8 @@ object Hooks {
                                 })) {
                                 return@Hooker null
                             }
+                            if (method.name == "pause")
+                                AudioFocusCoordinator.observeNativePauseIntent(chain.thisObject, gCurrentActivity)
                             val result = chain.proceed()
                             try {
                                 val candidate = chain.thisObject
@@ -6999,6 +7064,8 @@ object Hooks {
                     }
                 } catch (_: Exception) {}
                 mainHandler.postDelayed({
+                    if (a == null || gCurrentActivity !== a || a.isDestroyed ||
+                        a.isFinishing || !a.hasWindowFocus()) return@postDelayed
                     scanAllWindows()
                     if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
                     if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
@@ -7018,7 +7085,7 @@ object Hooks {
                 catch (e: Throwable) {
                     LogUtil.warn("后台切集守护: onPause 诊断失败 " + e.message)
                 }
-                stopPeriodicScan()
+                if (gCurrentActivity === a) stopPeriodicScan()
                 val result = chain.proceed()
                 mainHandler.postDelayed({
                     try {

@@ -39,8 +39,8 @@ internal object NativePlaybackSession {
         if (activity != null && owner() === activity) engine() else null
     fun generation(): Long = current?.generation ?: -1L
     fun videoId(engine: Any?): String? =
-        (NativeMetadataAccess.call(engine, "getVideoID") as? String)
-            ?.takeIf { it.isNotBlank() && it != "null" }
+        NativeMetadataAccess.call(engine, "getVideoID")?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() && it != "null" && it != "0" }
 
     fun boundEngine(candidate: Any?): Any? {
         return NativeBusinessResolver.boundEngine(candidate)
@@ -88,7 +88,10 @@ internal object NativePlaybackSession {
                 pendingOwner.clear()
                 ++serial
                 if (same) return
-                val epoch = serial
+                // A pause/resume of the same native video is not a new
+                // identity. Outstanding recovery checks survive only that case.
+                val epoch = if (vid != null && before?.engine?.get() === actual && before.videoId == vid)
+                    before.generation else serial
                 current = Snapshot(WeakReference(actual), WeakReference(a), vid, true, epoch)
                 LogUtil.info("播放会话: confirmed generation=$epoch page=" + a.javaClass.simpleName +
                     " engine=" + System.identityHashCode(actual))

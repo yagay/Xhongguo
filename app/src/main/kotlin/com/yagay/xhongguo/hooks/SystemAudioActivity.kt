@@ -23,6 +23,7 @@ internal object SystemAudioActivity {
     private var installed = false
     private var callback: AudioManager.AudioPlaybackCallback? = null
     private val previous = HashMap<String, Pair<Boolean, Boolean>>()
+    private val uidCache = HashMap<String, Pair<Int, Long>>()
 
     fun install() {
         try {
@@ -52,8 +53,12 @@ internal object SystemAudioActivity {
                             }.toSet()
                             // System-user packages only; do not cross user/profile boundaries.
                             for (pkg in packages) {
-                                @Suppress("DEPRECATION")
-                                val uid = runCatching { context.packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull()
+                                val now = SystemClock.elapsedRealtime()
+                                val uid = uidCache[pkg]?.takeIf { now - it.second in 0L..60_000L }?.first
+                                    ?: runCatching {
+                                        @Suppress("DEPRECATION")
+                                        context.packageManager.getApplicationInfo(pkg, 0).uid
+                                    }.getOrNull()?.also { uidCache[pkg] = it to now }
                                     ?: continue
                                 val own = uid in active
                                 val other = active.any { it != uid && it / 100000 == uid / 100000 }
