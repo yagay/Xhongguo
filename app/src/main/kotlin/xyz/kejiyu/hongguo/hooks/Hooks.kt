@@ -3875,8 +3875,13 @@ object Hooks {
                 setPadding(0, dp(act, 5f), 0, 0)
             })
             content.addView(header)
+            val home = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
+            val categoryRows = linkedMapOf<xyz.kejiyu.hongguo.SettingsCatalog.Page, MutableList<Pair<String, View>>>()
+            val pages = linkedMapOf<xyz.kejiyu.hongguo.SettingsCatalog.Page, LinearLayout>()
+            var page = xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME
+            content.addView(home)
 
-            content.addView(LinearLayout(act).apply {
+            home.addView(LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
                 background = roundedBg(act, p.surface, 22f, p.divider, 1f)
                 setPadding(dp(act, 15f), dp(act, 13f), dp(act, 15f), dp(act, 13f))
@@ -3916,13 +3921,11 @@ object Hooks {
                 row.setOnClickListener {
                     if (onRowAction != null) onRowAction() else sw.isChecked = !sw.isChecked
                 }
-                content.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(act, 7f)
-                })
+                categoryRows.getOrPut(xyz.kejiyu.hongguo.SettingsCatalog.page(saveKey)) { mutableListOf() }
+                    .add(saveKey to row)
                 return row to sw
             }
 
-            content.addView(sectionTitle(act, "核心", p))
             addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
                 gMasterOn = it
                 InAppPlaybackContinuity.configure(act, it &&
@@ -3938,7 +3941,6 @@ object Hooks {
                 }
             }, "master_on", true)
 
-            content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
             addSwitch("系统媒体后台播放", "实验功能：尝试保留原视频声音，在通知栏显示系统媒体卡片（播放/暂停/返回）；不创建悬浮图标", { gSystemMediaOn }, {
                 gSystemMediaOn = it
@@ -4036,7 +4038,6 @@ object Hooks {
                 else mainHandler.post { scanAllWindows() }
             }, "restore_controls_pause")
 
-            content.addView(sectionTitle(act, "播放与手势", p))
             if (gNames.resolutionController.isNotBlank() || TargetNames.isUniversal(gNames)) {
                 addSwitch("默认最高画质", "播放时自动选择当前视频支持的最高画质", { gMaxQualityOn }, {
                     gMaxQualityOn = it
@@ -4074,7 +4075,6 @@ object Hooks {
             }, "pull_refresh")
             addSwitch("顶部区域拦截下滑", "拦截屏幕顶部区域向下滑动手势", { gTopZoneOn }, { gTopZoneOn = it }, "top_zone")
 
-            content.addView(sectionTitle(act, "内容与账号", p))
             addSwitch("隐藏广告 / 挂件", "默认开启：拦截已适配广告层、金宝箱、悬浮挂件及「我的」广告卡片", { gAdOn }, {
                 gAdOn = it
                 MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it)
@@ -4083,7 +4083,6 @@ object Hooks {
             addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
             addSwitch("显示 VIP 图标", "控制 VIP 图标相关显示逻辑", { gVipIconOn }, { gVipIconOn = it }, "vip_icon")
 
-            content.addView(sectionTitle(act, "实验性功能", p))
             addSwitch("OLED 亮度拦截", "实验功能：仅在需要时手动开启", { gOledProtectOn }, { gOledProtectOn = it }, "oled_protect")
             addSwitch("通知栏快捷菜单", "在通知栏显示模块开关、面板和重启快捷操作。没有效果 记得打开红果的通知权限", { gNotificationMenuOn }, {
                 gNotificationMenuOn = it
@@ -4100,6 +4099,18 @@ object Hooks {
                 DOWNLOAD_LIMIT_PREF,
                 onRowAction = { showDownloadLimitEditor(act, p) {  } },
             )
+
+            fun appendRow(container: LinearLayout, row: View) {
+                container.addView(row, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(act, 6f)
+                })
+            }
+            home.addView(sectionTitle(act, "常用开关", p))
+            for ((_, row) in categoryRows[xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME].orEmpty()) {
+                appendRow(home, row)
+            }
+            home.addView(sectionTitle(act, "功能分类", p))
 
             val scroll = ScrollView(act).apply {
                 isFillViewport = false
@@ -4135,8 +4146,75 @@ object Hooks {
                 isClickable = true
                 isFocusable = true
                 minimumHeight = dp(act, 46f)
-                setOnClickListener {
 
+            }
+            fun showPage(target: xyz.kejiyu.hongguo.SettingsCatalog.Page) {
+                page = target
+                home.visibility = if (page == xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME)
+                    View.VISIBLE else View.GONE
+                for ((key, container) in pages) {
+                    container.visibility = if (key == page) View.VISIBLE else View.GONE
+                }
+                (header.getChildAt(0) as? TextView)?.text =
+                    if (page == xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME) "Xhongguo 设置" else page.title
+                (header.getChildAt(1) as? TextView)?.text =
+                    if (page == xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME)
+                        "红果综合模块  ·  ${BuildConfig.VERSION_NAME}" else page.summary
+                done.text = if (page == xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME) "完成" else "返回分类"
+                scroll.scrollTo(0, 0)
+            }
+
+            for (category in xyz.kejiyu.hongguo.SettingsCatalog.categories) {
+                val rows = categoryRows[category].orEmpty()
+                if (rows.isEmpty()) continue
+                val group = LinearLayout(act).apply {
+                    orientation = LinearLayout.VERTICAL
+                    visibility = View.GONE
+                }
+                for ((_, row) in rows.sortedBy { xyz.kejiyu.hongguo.SettingsCatalog.rank(it.first) }) {
+                    appendRow(group, row)
+                }
+                pages[category] = group
+                content.addView(group)
+                val entry = LinearLayout(act).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = dp(act, 56f)
+                    setPadding(dp(act, 15f), dp(act, 10f), dp(act, 12f), dp(act, 10f))
+                    background = roundedBg(act, p.surfaceAlt, 20f)
+                    isClickable = true
+                    isFocusable = true
+                    val labels = LinearLayout(act).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(TextView(act).apply {
+                            text = category.title
+                            textSize = 15f
+                            setTextColor(p.text)
+                            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                        })
+                        addView(TextView(act).apply {
+                            text = if (category == xyz.kejiyu.hongguo.SettingsCatalog.Page.TOOLS)
+                                "通知快捷菜单、下载限制；日志在模块 App"
+                            else category.summary
+                            textSize = 11.5f
+                            setTextColor(p.textSecondary)
+                        })
+                    }
+                    addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(TextView(act).apply {
+                        text = "›"
+                        textSize = 24f
+                        setTextColor(p.textSecondary)
+                    })
+                    setOnClickListener { showPage(category) }
+                }
+                appendRow(home, entry)
+            }
+            showPage(xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME)
+            done.setOnClickListener {
+                if (page != xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME) {
+                    showPage(xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME)
+                } else {
                     shell.animate().cancel()
                     shell.animate()
                         .alpha(0f)
@@ -4147,6 +4225,14 @@ object Hooks {
                         .withEndAction { if (dialog.isShowing) dialog.dismiss() }
                         .start()
                 }
+            }
+            dialog.setOnKeyListener { _, keyCode, event ->
+                if (keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                    page != xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME) {
+                    if (event.action == android.view.KeyEvent.ACTION_UP)
+                        showPage(xyz.kejiyu.hongguo.SettingsCatalog.Page.HOME)
+                    true
+                } else false
             }
             footer.addView(done, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,

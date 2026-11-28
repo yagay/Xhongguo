@@ -19,6 +19,13 @@ import android.widget.Toast
 /** Standalone settings UI. Nothing needs to be opened inside the target app. */
 class SettingsActivity : Activity() {
     private lateinit var root: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var screen: LinearLayout
+    private lateinit var heading: TextView
+    private lateinit var subtitle: TextView
+    private var currentPage = SettingsCatalog.Page.HOME
+    private val categoryRows = linkedMapOf<SettingsCatalog.Page, MutableList<Pair<String, View>>>()
+    private val pages = linkedMapOf<SettingsCatalog.Page, LinearLayout>()
     private val prefs by lazy { ModuleSettingsStore.prefs(this) }
     private var speedText: TextView? = null
     private var speedSwitch: Switch? = null
@@ -43,7 +50,7 @@ class SettingsActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = color(R.color.app_bg)
         window.navigationBarColor = color(R.color.app_bg)
-        val scroll = ScrollView(this).apply {
+        scroll = ScrollView(this).apply {
             setBackgroundColor(color(R.color.app_bg))
             isVerticalScrollBarEnabled = false
         }
@@ -56,24 +63,20 @@ class SettingsActivity : Activity() {
 
         root.addView(label("‹  返回", 15, R.color.accent, true).apply {
             setPadding(0, 0, 0, dp(18))
-            setOnClickListener { finish() }
+            setOnClickListener { goBack() }
         })
-        root.addView(label("Xhongguo 设置", 26, R.color.text_primary, true))
-        root.addView(label("直接在模块 App 中管理红果的 LSPosed 功能", 13, R.color.text_secondary).apply {
+        heading = label("Xhongguo 设置", 26, R.color.text_primary, true)
+        root.addView(heading)
+        subtitle = label("直接在模块 App 中管理红果的 LSPosed 功能", 13, R.color.text_secondary).apply {
             setPadding(0, dp(5), 0, dp(15))
-        })
-        root.addView(label(
-            "保存后会同步到红果。部分启动时安装的 Hook 需要完全关闭红果并重新打开才会生效。",
-            12, R.color.text_secondary
-        ).apply {
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = background(R.color.accent_soft)
-        })
-
-        section("核心")
+        }
+        root.addView(subtitle)
+        screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(screen, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        
         toggle("模块总开关", "统一启用或停用模块功能", "master_on")
 
-        section("界面精简")
         toggle("隐藏状态栏", "视频页面沉浸显示", "status_bar")
         toggle("隐藏控件", "三键导航下保留首页底部栏和全集入口", "control_hide")
         toggle("隐藏选集相关控件", "适用于联播页面", "player_bar")
@@ -92,38 +95,84 @@ class SettingsActivity : Activity() {
         toggle("降低音量请求时暂停", "默认不额外暂停普通提示音", "audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck"))
         toggle("其他应用音频检测", "检测实际媒体音频（含未抢焦点的 App）；需 LSPosed 系统框架作用域及重启，默认开启", "audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause"))
         toggle("其他应用停止后自动恢复", "仅恢复被外部音频暂停的原视频；手动暂停不恢复", "audio_external_auto_resume", ModuleSettingsStore.defaultBoolean("audio_external_auto_resume"))
-        externalDelayText = action("外部音频恢复延迟", externalDelayDescription()) { chooseExternalDelay() }
+        externalDelayText = action("外部音频恢复延迟", externalDelayDescription(), ModuleSettingsStore.EXTERNAL_RESUME_DELAY) { chooseExternalDelay() }
         toggle("暂停后恢复控件", "暂停视频时临时恢复控件", "restore_controls_pause")
 
-        section("播放与手势")
         toggle("自动最高画质", "使用当前视频支持的最高画质", "max_quality")
         speedSwitch = toggle("默认播放倍速", "可在下一项选择具体倍速", "default_speed")
-        speedText = action("选择倍速", speedDescription()) { chooseSpeed() }
+        speedText = action("选择倍速", speedDescription(), "default_speed_value") { chooseSpeed() }
         toggle("双击打开评论", "替换默认的双击点赞", "double_tap_comment")
         toggle("禁用下拉刷新", "禁用刷新手势与提示区域", "pull_refresh")
         toggle("拦截顶部下滑", "拦截顶部区域的下滑手势", "top_zone")
 
-        section("内容与账号")
         toggle("隐藏广告与挂件", "默认开启：已适配广告层、金宝箱、悬浮挂件和我的页面广告卡片", "hide_all_ads", true)
         toggle("VIP 状态 Hook", "启用现有的 VIP 适配逻辑", "vip_unlock")
         toggle("VIP 图标", "控制 VIP 图标与挂件", "vip_icon")
 
-        section("诊断与日志")
         toggle("官方播放/账号接口诊断", "仅记录接口路径、参数名、账号 Cookie 是否存在、签名头是否存在、状态码、耗时和响应长度；不保存任何凭据或视频地址。无需开启模块总开关。", "official_playback_probe")
-        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析") {
+        action("导出诊断日志 ZIP", "Root + LSPosed Hook 日志、红果进程 logcat、功能成功/失败分析", "diagnostic_export") {
             ModuleDiagnostics.chooseDestination(this)
         }
 
-        section("工具及实验功能")
         toggle("OLED 亮度保护", "实验性亮度拦截", "oled_protect")
         toggle("通知栏快捷菜单", "红果需要授予通知权限", "notification_menu")
         toggle("自定义下载数量限制", "覆盖默认的下载数量限制", "download_limit_unlimit")
-        limitText = action("下载限制数值", limitDescription()) { editLimits() }
+        limitText = action("下载限制数值", limitDescription(), "download_limit_values") { editLimits() }
 
-        root.addView(label(
-            "原红果内设置首次启动红果后会尝试迁移。请在 LSPosed 中启用 Xhongguo 并选择相应的红果作用域。",
-            12, R.color.text_secondary
-        ).apply { setPadding(dp(4), dp(22), dp(4), 0) })
+        buildPages()
+        val restored = savedInstanceState?.getString("settings_page")?.let {
+            runCatching { SettingsCatalog.Page.valueOf(it) }.getOrNull()
+        } ?: SettingsCatalog.Page.HOME
+        showPage(restored)
+    }
+
+    private fun goBack() {
+        if (currentPage == SettingsCatalog.Page.HOME) finish()
+        else showPage(SettingsCatalog.Page.HOME)
+    }
+
+    @Deprecated("Activity back navigation")
+    override fun onBackPressed() { goBack() }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("settings_page", currentPage.name)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun showPage(page: SettingsCatalog.Page) {
+        currentPage = page
+        heading.text = page.title
+        subtitle.text = if (page == SettingsCatalog.Page.HOME) "常用功能与分类设置" else page.summary
+        screen.removeAllViews()
+        pages[page]?.let { screen.addView(it) }
+        scroll.scrollTo(0, 0)
+    }
+
+    private fun buildPages() {
+        for (page in listOf(SettingsCatalog.Page.HOME) + SettingsCatalog.categories) {
+            val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            pages[page] = container
+            if (page == SettingsCatalog.Page.HOME) {
+                section(container, "常用开关")
+            }
+            for ((_, row) in categoryRows[page].orEmpty().sortedBy { SettingsCatalog.rank(it.first) }) {
+                appendTo(container, row)
+            }
+            if (page == SettingsCatalog.Page.HOME) {
+                section(container, "功能分类")
+                for (category in SettingsCatalog.categories) {
+                    val entry = row()
+                    addText(entry, category.title, category.summary)
+                    entry.addView(label("›", 23, R.color.text_secondary))
+                    entry.setOnClickListener { showPage(category) }
+                    appendTo(container, entry)
+                }
+                container.addView(label(
+                    "设置自动同步到红果。系统框架音频检测需要 LSPosed 系统框架作用域及重启；部分 Hook 需要重新打开红果。",
+                    12, R.color.text_secondary
+                ).apply { setPadding(dp(4), dp(18), dp(4), 0) })
+            }
+        }
     }
 
     @Deprecated("Android document picker result")
@@ -132,17 +181,17 @@ class SettingsActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
     }
 
-    private fun section(name: String) {
-        root.addView(label(name, 14, R.color.accent, true).apply {
-            setPadding(dp(5), dp(22), 0, dp(9))
+    private fun section(container: LinearLayout, name: String) {
+        container.addView(label(name, 14, R.color.accent, true).apply {
+            setPadding(dp(5), dp(12), 0, dp(6))
         })
     }
 
     private fun row(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(14), dp(12), dp(14), dp(12))
-        minimumHeight = dp(64)
+        setPadding(dp(14), dp(9), dp(14), dp(9))
+        minimumHeight = dp(56)
         background = background(R.color.surface)
         isClickable = true
         isFocusable = true
@@ -159,8 +208,12 @@ class SettingsActivity : Activity() {
         return summary
     }
 
-    private fun append(row: View) {
-        root.addView(row, LinearLayout.LayoutParams(
+    private fun append(key: String, row: View) {
+        categoryRows.getOrPut(SettingsCatalog.page(key)) { mutableListOf() }.add(key to row)
+    }
+
+    private fun appendTo(container: LinearLayout, row: View) {
+        container.addView(row, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(7) })
     }
@@ -179,16 +232,16 @@ class SettingsActivity : Activity() {
         }
         row.addView(toggle)
         row.setOnClickListener { toggle.isChecked = !toggle.isChecked }
-        append(row)
+        append(key, row)
         return toggle
     }
 
-    private fun action(name: String, sub: String, click: () -> Unit): TextView {
+    private fun action(name: String, sub: String, key: String, click: () -> Unit): TextView {
         val row = row()
         val summary = addText(row, name, sub)
         row.addView(label("›", 23, R.color.text_secondary))
         row.setOnClickListener { click() }
-        append(row)
+        append(key, row)
         return summary
     }
 
