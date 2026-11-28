@@ -54,9 +54,6 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.btn_github).setOnClickListener {
             UpdateChecker.openUrl(this, UpdateChecker.REPO_URL)
         }
-        findViewById<View>(R.id.btn_telegram).setOnClickListener {
-            UpdateChecker.openUrl(this, UpdateChecker.TG_CHANNEL_URL)
-        }
 
         UpdateChecker.resetShown()
         silentCheck()

@@ -243,8 +243,8 @@ object Hooks {
     private var appCtx: Context? = null
     private var gIsNight = false
     private var gSettingsActivity: Activity? = null
-    private val gKejiyuBtnTag = "KEJIYU_BTN_TAG"
-    private val gKejiyuSettingsWrapperTag = "KEJIYU_SETTINGS_WRAPPER_TAG"
+    private val gXhongguoBtnTag = "XHONGGUO_BTN_TAG"
+    private val gXhongguoSettingsWrapperTag = "XHONGGUO_SETTINGS_WRAPPER_TAG"
 
     private var gTopZoneTracking = false
     private var gTopZoneActive = false
@@ -3385,7 +3385,7 @@ object Hooks {
                 nm.cancel(9999)
                 return
             }
-            if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("lspilot_toggle", "KEJIYU", NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
+            if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel("lspilot_toggle", "Xhongguo 快捷菜单", NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
             val flag = if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE else PendingIntent.FLAG_UPDATE_CURRENT
             fun pi(code: Int, action: String) = PendingIntent.getBroadcast(ctx, code, Intent(action).apply { setPackage(gPkg); addFlags(Intent.FLAG_RECEIVER_FOREGROUND) }, flag)
             val n = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(ctx, "lspilot_toggle") else @Suppress("DEPRECATION") android.app.Notification.Builder(ctx)
@@ -4544,7 +4544,7 @@ object Hooks {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(act, 18f), 0, dp(act, 16f), 0)
             minimumHeight = dp(act, 56f)
-            tag = gKejiyuBtnTag
+            tag = gXhongguoBtnTag
             isClickable = true
             isFocusable = true
             try {
@@ -4575,14 +4575,14 @@ object Hooks {
         }
     }
 
-    private fun containsKejiyuEntry(root: View?): Boolean {
+    private fun containsXhongguoEntry(root: View?): Boolean {
         if (root == null) return false
-        if (root.tag == gKejiyuBtnTag) return true
+        if (root.tag == gXhongguoBtnTag) return true
         if (root is TextView) {
             val text = try { root.text?.toString()?.trim().orEmpty() } catch (_: Throwable) { "" }
-            if (text == "模块设置" || text == "KEJIYU 模块设置") return true
+            if (text == "模块设置" || text == "Xhongguo 模块设置") return true
         }
-        if (root is ViewGroup) for (i in 0 until root.childCount) if (containsKejiyuEntry(root.getChildAt(i))) return true
+        if (root is ViewGroup) for (i in 0 until root.childCount) if (containsXhongguoEntry(root.getChildAt(i))) return true
         return false
     }
 
@@ -4958,7 +4958,7 @@ object Hooks {
     }
 
     private fun installSettingsFooterFallback(act: Activity, content: ViewGroup): Boolean {
-        if (containsKejiyuEntry(content)) return true
+        if (containsXhongguoEntry(content)) return true
         if (content.childCount <= 0) return false
         try {
 
@@ -4971,7 +4971,7 @@ object Hooks {
 
             val wrapper = LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
-                tag = gKejiyuSettingsWrapperTag
+                tag = gXhongguoSettingsWrapperTag
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 )
@@ -5014,7 +5014,7 @@ object Hooks {
         try {
             if (act.isFinishing || !isLikelySettingsActivity(act)) return
             val content = act.findViewById<ViewGroup>(android.R.id.content) ?: return
-            if (containsKejiyuEntry(content)) return
+            if (containsXhongguoEntry(content)) return
 
             val nativeContainer = findNativeSettingsContainer(content)
             if (nativeContainer != null) {

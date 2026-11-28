@@ -15,7 +15,6 @@ object UpdateChecker {
     const val REPO_URL = "https://github.com/yagay/Xhongguo"
     const val RELEASES_URL = "$REPO_URL/releases/latest"
     const val TEST_BUILDS_URL = "$REPO_URL/actions?query=branch%3Atest"
-    const val TG_CHANNEL_URL = "https://t.me/Kmodify"
 
     @Volatile var currentVersion: String = ""
         private set
