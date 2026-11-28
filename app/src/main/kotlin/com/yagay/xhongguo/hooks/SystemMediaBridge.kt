@@ -366,6 +366,7 @@ internal object SystemMediaBridge {
             media.setMetadata(snapshot.toPlatformMetadata())
             lastMetadataSignature = signature
             lastMetadataArt = artwork
+            com.yagay.xhongguo.RuntimeStatus.report(appContext, "media_metadata")
             if (!force && (seriesTitle != null ||
                 episodeTitle != null || artwork != null)) {
                 metadataSyncGeneration++

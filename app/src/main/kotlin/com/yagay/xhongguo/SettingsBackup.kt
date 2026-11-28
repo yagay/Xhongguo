@@ -33,7 +33,7 @@ internal object SettingsBackup {
         } ?: error("无法打开备份文件")
     }
 
-    fun restore(activity: Activity, uri: Uri) {
+    fun read(activity: Activity, uri: Uri): Map<String, Any> {
         val data = activity.contentResolver.openInputStream(uri)?.use { input ->
             val out = java.io.ByteArrayOutputStream()
             val buffer = ByteArray(4096)
@@ -48,36 +48,52 @@ internal object SettingsBackup {
         val json = JSONObject(data)
         require(json.optInt("schema") == 1) { "不支持的备份版本" }
         val values = json.getJSONObject("settings")
-        val prefs = ModuleSettingsStore.prefs(activity)
-        val editor = prefs.edit()
+        val result = linkedMapOf<String, Any>()
         val allowed = ModuleSettingsStore.BOOLEANS + ModuleSettingsStore.INTS + ModuleSettingsStore.FLOATS
-        allowed.forEach { editor.remove(it) }
         for (key in allowed) {
             if (!values.has(key)) continue
             val value = values.get(key)
             when (key) {
                 in ModuleSettingsStore.BOOLEANS -> {
                     require(value is Boolean) { "无效开关: $key" }
-                    editor.putBoolean(key, value)
+                    result[key] = value
                 }
                 in ModuleSettingsStore.INTS -> {
                     require(value is Number) { "无效数值: $key" }
                     val n = value.toInt()
                     require(value.toDouble() == n.toDouble() && ModuleSettingsStore.validInt(key, n)) { "数值超出范围: $key" }
-                    editor.putInt(key, n)
+                    result[key] = n
                 }
                 in ModuleSettingsStore.FLOATS -> {
                     require(value is Number && value.toFloat().isFinite() &&
                         value.toFloat() in 0.75f..3f) { "无效倍速" }
-                    editor.putFloat(key, value.toFloat())
+                    result[key] = value.toFloat()
                 }
             }
         }
         if (values.optBoolean("in_app_continuous_playback") && values.optBoolean("in_app_mini_player"))
-            editor.putBoolean("in_app_mini_player", false)
-        // Keep the configuration authoritative even if a backup has no overrides.
+            result["in_app_mini_player"] = false
+        return result
+    }
+    fun diff(activity: Activity, values: Map<String, Any>): List<String> {
+        val current = ModuleSettingsStore.prefs(activity).all
+        val names = com.yagay.xhongguo.ui.SettingsSchema.items.associate { it.key to it.title }
+        val keys = ModuleSettingsStore.BOOLEANS + ModuleSettingsStore.INTS + ModuleSettingsStore.FLOATS
+        return keys.filter { current[it] != values[it] }.map {
+            "${names[it] ?: it}: ${current[it] ?: "默认"} → ${values[it] ?: "默认"}"
+        }
+    }
+    fun apply(activity: Activity, values: Map<String, Any>) {
+        val editor = ModuleSettingsStore.prefs(activity).edit()
+        (ModuleSettingsStore.BOOLEANS + ModuleSettingsStore.INTS + ModuleSettingsStore.FLOATS).forEach { editor.remove(it) }
+        for ((key, value) in values) when (value) {
+            is Boolean -> editor.putBoolean(key, value)
+            is Int -> editor.putInt(key, value)
+            is Float -> editor.putFloat(key, value)
+        }
         editor.putBoolean("_backup_restored", true)
         check(editor.commit()) { "保存设置失败" }
         ModuleSettingsStore.notifyChanged(activity)
     }
+    fun restore(activity: Activity, uri: Uri) = apply(activity, read(activity, uri))
 }

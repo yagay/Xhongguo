@@ -261,7 +261,16 @@ object Hooks {
      * on first use, mirror back to the target XML for the download-process reader,
      * and refresh runtime fields when the app resumes or the provider changes.
      */
+    private var hookInitializationObserved = false
+    private var nativeContractObserved = false
+    private fun reportHookStatus(ctx: Context) {
+        if (hookInitializationObserved) com.yagay.xhongguo.RuntimeStatus.report(ctx, "hook_init")
+        if (nativeContractObserved) com.yagay.xhongguo.RuntimeStatus.report(ctx, "native_contract")
+        if (NativePlaybackHooks.installedTransportCount > 0)
+            com.yagay.xhongguo.RuntimeStatus.report(ctx, "native_transport")
+    }
     private fun initPrefs(ctx: Context) {
+        reportHookStatus(ctx)
         if (gPrefs == null) {
             gPrefs = ctx.getSharedPreferences("lspilot_kejiyu", Context.MODE_PRIVATE)
         }
@@ -269,7 +278,8 @@ object Hooks {
         if (ctx.packageName == TargetNames.CN_PACKAGE ||
             ctx.packageName == TargetNames.OVERSEA_PACKAGE) {
             ModuleSettingsStore.importIfEmpty(ctx, prefs.all)
-            ModuleSettingsStore.pullIntoTarget(ctx, prefs)
+            if (ModuleSettingsStore.pullIntoTarget(ctx, prefs))
+                com.yagay.xhongguo.RuntimeStatus.report(ctx, "settings_sync")
             ensureSettingsObserver(ctx)
         }
 
@@ -330,7 +340,12 @@ object Hooks {
                         val context = appCtx ?: ctx.applicationContext
                         val previouslyHiddenControls = gMasterOn && gControlOn
                         val previouslyHiddenPlayer = gMasterOn && gPlayerOn
+                        val previousQuality = gMaxQualityOn
+                        val previousRestore = gRestoreControlsOnPause
                         initPrefs(context)
+                        if (previousQuality && !gMaxQualityOn) NativePlaybackQuality.reset()
+                        if (!previousRestore && gRestoreControlsOnPause) refreshVideoPauseState("module-settings", gVideoPaused)
+                        gNextMineUiScanAt = 0L
                         if (!InAppMiniPlayer.enabled) InAppMiniPlayer.restore()
                         if (isShoppingMallDisabled()) {
                             gNextShoppingTabScanAt = 0L
@@ -340,6 +355,7 @@ object Hooks {
                             restoreAllSavedViews()
                             restoreShortVideoNativeControls()
                             setVideoToolbarsVisible(true)
+                            restoreNativeBottomWindowColor(gCurrentActivity)
                         } else if (previouslyHiddenPlayer && !gPlayerOn) {
                             restoreShortVideoNativeControls()
                             setVideoToolbarsVisible(true)
@@ -2630,6 +2646,7 @@ object Hooks {
             if (action == "play" || action == "start") AudioFocusCoordinator.onPlaying(engine, activity)
             else AudioFocusCoordinator.onEngineEnded(engine, action)
         }
+        if (action == "play") com.yagay.xhongguo.RuntimeStatus.report(activity ?: appCtx, "playback")
         if (action == "play" && TargetNames.isUniversal(gNames)) {
             if (gCurrentActivity === activity) {
                 setVideoPaused(false, "confirmed-native-engine")
@@ -3489,357 +3506,6 @@ object Hooks {
         }
     }
 
-    private fun styleSwitch(sw: Switch, p: PanelPalette) {
-        try {
-            val states = arrayOf(
-                intArrayOf(android.R.attr.state_checked),
-                intArrayOf(-android.R.attr.state_checked),
-            )
-            sw.thumbTintList = ColorStateList(states, intArrayOf(p.accent, p.switchOffThumb))
-            sw.trackTintList = ColorStateList(states, intArrayOf(p.switchOnTrack, p.switchOffTrack))
-        } catch (_: Throwable) {
-
-        }
-    }
-
-    private fun sectionTitle(ctx: Context, title: String, p: PanelPalette): TextView = TextView(ctx).apply {
-        text = title
-        textSize = 12f
-        setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-        setTextColor(p.textSecondary)
-        isAllCaps = false
-        setPadding(dp(ctx, 4f), dp(ctx, 18f), dp(ctx, 4f), dp(ctx, 5f))
-    }
-
-    private fun makePanelRow(
-        ctx: Context,
-        title: String,
-        description: String,
-        checked: Boolean,
-        p: PanelPalette,
-        emphasis: Boolean = false,
-        hasSubmenu: Boolean = false,
-    ): Pair<LinearLayout, Switch> {
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(ctx, 15f), dp(ctx, 12f), dp(ctx, 12f), dp(ctx, 12f))
-            background = roundedBg(ctx, if (emphasis) p.accentSoft else p.surfaceAlt, 20f)
-            minimumHeight = dp(ctx, 64f)
-        }
-        val labels = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        labels.addView(TextView(ctx).apply {
-            text = title
-            textSize = 15f
-            setTypeface(Typeface.DEFAULT, if (emphasis) Typeface.BOLD else Typeface.NORMAL)
-            setTextColor(p.text)
-            includeFontPadding = false
-        })
-        labels.addView(TextView(ctx).apply {
-            text = description
-            textSize = 11.5f
-            setTextColor(p.textSecondary)
-            includeFontPadding = false
-            setPadding(0, dp(ctx, 4f), dp(ctx, 6f), 0)
-        })
-        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        if (hasSubmenu) {
-
-            val handle = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(dp(ctx, 5f), 0, dp(ctx, 4f), 0)
-            }
-            val heights = floatArrayOf(13f, 19f, 15f)
-            for (height in heights) {
-                handle.addView(View(ctx).apply {
-                    background = roundedBg(ctx, p.textSecondary, 1.5f)
-                }, LinearLayout.LayoutParams(dp(ctx, 2f), dp(ctx, height)).apply {
-                    leftMargin = dp(ctx, 1.5f)
-                    rightMargin = dp(ctx, 1.5f)
-                })
-            }
-            row.addView(handle, LinearLayout.LayoutParams(dp(ctx, 28f), dp(ctx, 30f)))
-        }
-        val sw = Switch(ctx).apply {
-            isChecked = checked
-            setShowText(false)
-            setPadding(dp(ctx, 8f), 0, 0, 0)
-        }
-        styleSwitch(sw, p)
-        row.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        return row to sw
-    }
-
-    private fun showDefaultSpeedEditor(act: Activity, p: PanelPalette, onSelected: (Float) -> Unit) {
-        try {
-            val dialog = Dialog(act)
-            dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-            val root = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(act, 18f), dp(act, 18f), dp(act, 18f), dp(act, 16f))
-                background = roundedBg(act, p.page, 26f, p.divider, 1f)
-            }
-            root.addView(TextView(act).apply {
-                text = "默认倍速"
-                textSize = 20f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(p.text)
-                includeFontPadding = false
-            })
-            root.addView(TextView(act).apply {
-                text = "选择后立即生效，并记住为以后播放的默认速度"
-                textSize = 11.5f
-                setTextColor(p.textSecondary)
-                includeFontPadding = false
-                setPadding(0, dp(act, 6f), 0, dp(act, 10f))
-            })
-
-            DEFAULT_SPEED_OPTIONS.forEach { speed ->
-                val selected = kotlin.math.abs(speed - gDefaultSpeed) < 0.001f
-                val row = LinearLayout(act).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(act, 15f), dp(act, 12f), dp(act, 15f), dp(act, 12f))
-                    background = roundedBg(act, if (selected) p.accentSoft else p.surfaceAlt, 16f)
-                    minimumHeight = dp(act, 50f)
-                }
-                row.addView(TextView(act).apply {
-                    text = formatSpeed(speed)
-                    textSize = 15f
-                    setTypeface(Typeface.DEFAULT, if (selected) Typeface.BOLD else Typeface.NORMAL)
-                    setTextColor(if (selected) p.accent else p.text)
-                    includeFontPadding = false
-                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                row.addView(TextView(act).apply {
-                    text = if (selected) "✓" else ""
-                    textSize = 18f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setTextColor(p.accent)
-                    gravity = Gravity.CENTER
-                    includeFontPadding = false
-                }, LinearLayout.LayoutParams(dp(act, 30f), ViewGroup.LayoutParams.WRAP_CONTENT))
-                row.setOnClickListener {
-                    saveDefaultSpeedValue(speed)
-
-                    if (!gDefaultSpeedOn) {
-                        gDefaultSpeedOn = true
-                        savePref(DEFAULT_SPEED_PREF, true)
-                    }
-                    onSelected(speed)
-                    dialog.dismiss()
-                    scheduleDefaultSpeedApply("menu-select")
-                    Toast.makeText(act, "默认倍速已设为 ${formatSpeed(speed)}", Toast.LENGTH_SHORT).show()
-                }
-                root.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(act, 7f)
-                })
-            }
-
-            dialog.setContentView(root)
-            dialog.setCanceledOnTouchOutside(true)
-            dialog.setOnShowListener {
-                try {
-                    dialog.window?.apply {
-                        setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-                        addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                        attributes = attributes.apply { dimAmount = 0.62f }
-                        setLayout((act.resources.displayMetrics.widthPixels * 0.82f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-                    }
-                } catch (e: Throwable) { LogUtil.error("默认倍速窗口", e) }
-            }
-            dialog.show()
-        } catch (e: Throwable) {
-            LogUtil.error("默认倍速编辑", e)
-        }
-    }
-
-    private fun downloadLimitSummary(): String {
-        val (episode, series, total) = currentDownloadLimitValues()
-        return "单日集数 $episode  ·  单日剧数 $series  ·  总缓存 $total"
-    }
-
-    private fun showDownloadLimitEditor(act: Activity, p: PanelPalette, onSaved: () -> Unit) {
-        try {
-            val (episodeNow, seriesNow, totalNow) = currentDownloadLimitValues()
-            val dialog = Dialog(act)
-            dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-
-            val root = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(act, 18f), dp(act, 18f), dp(act, 18f), dp(act, 16f))
-                background = roundedBg(act, p.page, 26f, p.divider, 1f)
-            }
-            root.addView(TextView(act).apply {
-                text = "自定义下载限制"
-                textSize = 20f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(p.text)
-                includeFontPadding = false
-            })
-            root.addView(TextView(act).apply {
-                text = "默认 99999。测试时可以改成 2、3 等小数值。"
-                textSize = 11.5f
-                setTextColor(p.textSecondary)
-                includeFontPadding = false
-                setPadding(0, dp(act, 6f), 0, dp(act, 12f))
-            })
-
-            fun field(label: String, value: Int): EditText {
-                root.addView(TextView(act).apply {
-                    text = label
-                    textSize = 12f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setTextColor(p.textSecondary)
-                    includeFontPadding = false
-                    setPadding(dp(act, 2f), dp(act, 7f), 0, dp(act, 5f))
-                })
-                return EditText(act).apply {
-                    setText(value.toString())
-                    textSize = 15f
-                    setTextColor(p.text)
-                    setHintTextColor(p.textSecondary)
-                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                    setSingleLine(true)
-                    setSelectAllOnFocus(true)
-                    setPadding(dp(act, 13f), 0, dp(act, 13f), 0)
-                    background = roundedBg(act, p.surfaceAlt, 12f, p.divider, 1f)
-                    root.addView(this, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(act, 48f),
-                    ))
-                }
-            }
-
-            val episodeField = field("单日最大下载集数", episodeNow)
-            val seriesField = field("单日最大下载剧数", seriesNow)
-            val totalField = field("总缓存剧数上限", totalNow)
-
-            root.addView(TextView(act).apply {
-                text = "修改数值后需要强停红果并重新打开，确保主进程和 :downloader 的缓存配置全部刷新。"
-                textSize = 10.8f
-                setTextColor(p.accent)
-                includeFontPadding = false
-                setPadding(dp(act, 2f), dp(act, 12f), dp(act, 2f), dp(act, 4f))
-            })
-
-            val buttons = LinearLayout(act).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(0, dp(act, 12f), 0, 0)
-            }
-            val cancel = TextView(act).apply {
-                text = "取消"
-                textSize = 14f
-                gravity = Gravity.CENTER
-                setTextColor(p.text)
-                background = roundedBg(act, p.surfaceAlt, 12f)
-                setOnClickListener { dialog.dismiss() }
-            }
-            val save = TextView(act).apply {
-                text = "保存"
-                textSize = 14f
-                gravity = Gravity.CENTER
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(Color.WHITE)
-                background = roundedBg(act, p.accent, 12f)
-                setOnClickListener {
-                    val episode = episodeField.text?.toString()?.trim()?.toIntOrNull()
-                    val series = seriesField.text?.toString()?.trim()?.toIntOrNull()
-                    val total = totalField.text?.toString()?.trim()?.toIntOrNull()
-                    if (episode == null || series == null || total == null ||
-                        episode !in 1..999_999_999 || series !in 1..999_999_999 || total !in 1..999_999_999
-                    ) {
-                        Toast.makeText(act, "请输入 1 ~ 999999999 的整数", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    saveDownloadLimitValues(episode, series, total)
-                    LogUtil.info("download limit custom values saved: episode=$episode series=$series total=$total")
-                    onSaved()
-                    dialog.dismiss()
-                    Toast.makeText(act, "已保存，需要强停红果后重新打开生效", Toast.LENGTH_LONG).show()
-                }
-            }
-            buttons.addView(cancel, LinearLayout.LayoutParams(0, dp(act, 44f), 1f).apply { rightMargin = dp(act, 6f) })
-            buttons.addView(save, LinearLayout.LayoutParams(0, dp(act, 44f), 1f).apply { leftMargin = dp(act, 6f) })
-            root.addView(buttons)
-
-            dialog.setContentView(root)
-            dialog.setCanceledOnTouchOutside(true)
-            dialog.setOnShowListener {
-                try {
-                    dialog.window?.apply {
-                        setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-                        addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                        attributes = attributes.apply { dimAmount = 0.62f }
-                        setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                        setLayout((act.resources.displayMetrics.widthPixels * 0.86f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-                    }
-                } catch (e: Throwable) { LogUtil.error("下载限制编辑窗口", e) }
-            }
-            dialog.show()
-        } catch (e: Throwable) {
-            LogUtil.error("下载限制编辑", e)
-        }
-    }
-
-    private fun installPanelWatermark(target: View, ctx: Context, color: Int) {
-        try {
-            val text = "免费模块倒卖死全家"
-            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-
-                this.color = Color.argb(24, Color.red(color), Color.green(color), Color.blue(color))
-                textSize = 12.5f * ctx.resources.displayMetrics.scaledDensity
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val gapX = dp(ctx, 54f).toFloat()
-            val gapY = dp(ctx, 72f).toFloat()
-            val drawable = object : android.graphics.drawable.Drawable() {
-                override fun draw(canvas: android.graphics.Canvas) {
-                    val b = bounds
-                    if (b.width() <= 0 || b.height() <= 0) return
-                    val save = canvas.save()
-                    canvas.rotate(-24f, b.exactCenterX(), b.exactCenterY())
-                    val textW = paint.measureText(text)
-                    val stepX = textW + gapX
-                    var row = 0
-                    var y = -b.height().toFloat()
-                    val maxY = b.height() * 2f
-                    while (y < maxY) {
-                        var x = -b.width().toFloat() - if (row % 2 == 0) 0f else stepX / 2f
-                        val maxX = b.width() * 2f
-                        while (x < maxX) {
-                            canvas.drawText(text, x, y, paint)
-                            x += stepX
-                        }
-                        y += gapY
-                        row++
-                    }
-                    canvas.restoreToCount(save)
-                }
-
-                override fun setAlpha(alpha: Int) { paint.alpha = alpha.coerceIn(0, 255) }
-                override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { paint.colorFilter = colorFilter }
-                @Suppress("DEPRECATION")
-                override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
-            }
-            target.overlay.add(drawable)
-            target.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-                drawable.setBounds(0, 0, v.width, v.height)
-                drawable.invalidateSelf()
-            }
-            target.post {
-                drawable.setBounds(0, 0, target.width, target.height)
-                drawable.invalidateSelf()
-            }
-        } catch (e: Throwable) {
-            LogUtil.error("面板水印", e)
-        }
-    }
-
     private fun targetCompatLabel(ctx: Context): String {
         try {
             @Suppress("DEPRECATION")
@@ -3859,489 +3525,54 @@ object Hooks {
         }
     }
 
+    private var activeSettingsPanel: java.lang.ref.WeakReference<Dialog>? = null
     private fun showPanel(ctx: Context?) {
-
-        val act: Activity = (ctx as? Activity) ?: gCurrentActivity ?: return
+        val act = (ctx as? Activity) ?: gCurrentActivity ?: return
+        if (act.isDestroyed || act.isFinishing || activeSettingsPanel?.get()?.isShowing == true) return
+        val prefs = gPrefs ?: return
         try {
-            val p = panelPalette(act)
-            val content = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(act, 16f), dp(act, 8f), dp(act, 16f), dp(act, 18f))
-                background = roundedBg(act, p.page, 28f)
-            }
-
-            val header = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(act, 6f), dp(act, 18f), dp(act, 6f), dp(act, 14f))
-            }
-            header.addView(TextView(act).apply {
-                text = "Xhongguo"
-                textSize = 25f
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(p.text)
-                includeFontPadding = false
-            })
-            header.addView(TextView(act).apply {
-                text = "红果综合模块  ·  ${BuildConfig.VERSION_NAME}"
-                textSize = 12f
-                setTextColor(p.textSecondary)
-                includeFontPadding = false
-                setPadding(0, dp(act, 5f), 0, 0)
-            })
-            content.addView(header)
-            val home = LinearLayout(act).apply { orientation = LinearLayout.VERTICAL }
-            val categoryRows = linkedMapOf<com.yagay.xhongguo.SettingsCatalog.Page, MutableList<Pair<String, View>>>()
-            val pages = linkedMapOf<com.yagay.xhongguo.SettingsCatalog.Page, LinearLayout>()
-            val searchItems = mutableListOf<com.yagay.xhongguo.SettingsSearch.Item>()
-            val rowSwitches = linkedMapOf<String, Switch>()
-            var refreshingRows = false
-            fun refreshPanelRows() {
-                refreshingRows = true
-                try {
-                    for ((key, sw) in rowSwitches) {
-                        val default = ModuleSettingsStore.defaultBoolean(key)
-                        sw.isChecked = gPrefs?.getBoolean(key, default) ?: default
-                    }
-                    for ((_, rows) in categoryRows) for ((key, view) in rows) {
-                        view.visibility = if (com.yagay.xhongguo.SettingsCatalog.definition(key).parentKeys.all {
-                            val default = ModuleSettingsStore.defaultBoolean(it)
-                            gPrefs?.getBoolean(it, default) ?: default
-                        }) View.VISIBLE else View.GONE
-                    }
-                } finally { refreshingRows = false }
-            }
-            var page = com.yagay.xhongguo.SettingsCatalog.Page.HOME
-            content.addView(home)
-
-            home.addView(LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                background = roundedBg(act, p.surface, 22f, p.divider, 1f)
-                setPadding(dp(act, 15f), dp(act, 13f), dp(act, 15f), dp(act, 13f))
-                addView(TextView(act).apply {
-                    text = "当前运行模式"
-                    textSize = 11f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setTextColor(p.accent)
-                    includeFontPadding = false
-                })
-                addView(TextView(act).apply {
-                    text = targetCompatLabel(act)
-                    textSize = 12.5f
-                    setTextColor(p.text)
-                    includeFontPadding = false
-                    setPadding(0, dp(act, 6f), 0, 0)
-                })
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(act, 4f)
-            })
-
-            fun addSwitch(
-                title: String,
-                description: String,
-                getter: () -> Boolean,
-                setter: (Boolean) -> Unit,
-                saveKey: String,
-                emphasis: Boolean = false,
-                onRowAction: (() -> Unit)? = null,
-            ): Pair<LinearLayout, Switch> {
-                val (row, sw) = makePanelRow(act, title, description, getter(), p, emphasis, onRowAction != null)
-                rowSwitches[saveKey] = sw
-                sw.setOnCheckedChangeListener { _, v ->
-                    if (refreshingRows) return@setOnCheckedChangeListener
-                    setter(v)
-                    savePref(saveKey, v)
-                    refreshPanelRows()
-                    if (saveKey != "ad_block") applyToCurrent()
-                }
-                row.setOnClickListener {
-                    if (onRowAction != null) onRowAction() else sw.isChecked = !sw.isChecked
-                }
-                categoryRows.getOrPut(com.yagay.xhongguo.SettingsCatalog.page(saveKey)) { mutableListOf() }
-                    .add(saveKey to row)
-                searchItems.add(com.yagay.xhongguo.SettingsSearch.Item(saveKey, title, description,
-                    com.yagay.xhongguo.SettingsCatalog.page(saveKey)))
-                return row to sw
-            }
-
-            addSwitch("模块总开关", "所有功能的总控制；关闭后恢复模块修改的界面", { gMasterOn }, {
-                gMasterOn = it
-                InAppPlaybackContinuity.configure(act, it &&
-                    (gPrefs?.getBoolean("in_app_continuous_playback", false) == true))
-                InAppMiniPlayer.enabled = it && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
-                SystemMediaBridge.configure(act, it && gSystemMediaOn)
-                if (!it) {
-                    InAppMiniPlayer.restore()
-                    restoreAllSavedViews()
-                    restoreShortVideoNativeControls()
-                    restoreNativeBottomWindowColor(gCurrentActivity)
-                    setVideoToolbarsVisible(true)
-                }
-            }, "master_on", true)
-
-            addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
-            addSwitch("系统媒体后台播放", "实验功能：尝试保留原视频声音，在通知栏显示系统媒体卡片（播放/暂停/返回）；不创建悬浮图标", { gSystemMediaOn }, {
-                gSystemMediaOn = it
-                SystemMediaBridge.configure(act, it && gMasterOn)
-            }, "system_media_playback")
-            addSwitch("音频焦点丢失时暂停", "其他应用抢占音频焦点时暂停短剧", {
-                gPrefs?.getBoolean("audio_focus_pause", ModuleSettingsStore.defaultBoolean("audio_focus_pause")) ?: true
-            }, {}, "audio_focus_pause")
-            addSwitch("通话时自动暂停", "监听系统铃声、电话及语音通信模式", {
-                gPrefs?.getBoolean("audio_call_pause", ModuleSettingsStore.defaultBoolean("audio_call_pause")) ?: true
-            }, {}, "audio_call_pause")
-            addSwitch("焦点恢复后自动播放", "仅临时中断且同一视频；永久焦点丢失需手动播放", {
-                gPrefs?.getBoolean("audio_focus_auto_resume", ModuleSettingsStore.defaultBoolean("audio_focus_auto_resume")) ?: false
-            }, {}, "audio_focus_auto_resume")
-            addSwitch("通话结束自动恢复", "仅恢复通话前正在播放的同一视频；永久失焦仍需手动播放", {
-                gPrefs?.getBoolean("audio_call_auto_resume", ModuleSettingsStore.defaultBoolean("audio_call_auto_resume")) ?: true
-            }, {}, "audio_call_auto_resume")
-            addSwitch("降低音量请求时暂停", "普通提示音通常只请求短时降低音量；默认不额外暂停", {
-                gPrefs?.getBoolean("audio_focus_pause_duck", ModuleSettingsStore.defaultBoolean("audio_focus_pause_duck")) ?: false
-            }, {}, "audio_focus_pause_duck")
-            addSwitch("其他应用音频检测", "检测实际媒体音频（包括未抢焦点的 App）；需 LSPosed 系统框架作用域及重启，默认开启", {
-                gPrefs?.getBoolean("audio_external_pause", ModuleSettingsStore.defaultBoolean("audio_external_pause")) ?: ModuleSettingsStore.defaultBoolean("audio_external_pause")
-            }, {}, "audio_external_pause")
-            lateinit var externalResumeRow: LinearLayout
-            val externalResumeKey = "audio_external_auto_resume"
-            val delaySummary = {
-                "仅恢复原视频 · 延迟 " + ModuleSettingsStore.externalResumeDelay(gPrefs) / 1000.0 + " 秒（点击调整）"
-            }
-            externalResumeRow = addSwitch("其他应用停止后自动恢复", delaySummary(), {
-                gPrefs?.getBoolean(externalResumeKey, ModuleSettingsStore.defaultBoolean(externalResumeKey)) ?: true
-            }, {}, externalResumeKey, onRowAction = {
-                val options = ModuleSettingsStore.EXTERNAL_RESUME_DELAYS
-                val selected = options.indices.minByOrNull {
-                    kotlin.math.abs(options[it] - ModuleSettingsStore.externalResumeDelay(gPrefs))
-                } ?: 0
-                android.app.AlertDialog.Builder(act)
-                    .setTitle("外部音频恢复延迟")
-                    .setSingleChoiceItems(options.map { "${it / 1000} 秒" }.toTypedArray(), selected) { dialog, index ->
-                        val key = ModuleSettingsStore.EXTERNAL_RESUME_DELAY
-                        gPrefs?.edit()?.putInt(key, options[index])?.commit()
-                        ModuleSettingsStore.pushFromTarget(act, key, options[index])
-                        configureAudioFocus(act)
-                        ((externalResumeRow.getChildAt(0) as? ViewGroup)?.getChildAt(1) as? TextView)?.text = delaySummary()
-                        dialog.dismiss()
-                    }.setNegativeButton("取消", null).show()
-            }).first
-            addSwitch("应用内小窗继续播放", "实验功能：切换应用内页面时复用原视频，整窗拖动、贴边、点击控制、双击缩放；原页面销毁时安全退出", { gMiniPlayerOn }, {
-                gMiniPlayerOn = it
-                InAppMiniPlayer.enabled = it && gMasterOn && !InAppPlaybackContinuity.enabled
-                if (!it) InAppMiniPlayer.restore()
-            }, "in_app_mini_player")
-            addSwitch("应用内持续播放（无小窗）", "仅保护已确认的非播放页面切换；不显示小窗。全集退出共享暂未启用。实验功能", {
-                gPrefs?.getBoolean("in_app_continuous_playback", false) == true
-            }, {
-                InAppPlaybackContinuity.configure(act, it && gMasterOn)
-                InAppMiniPlayer.enabled = gMasterOn && gMiniPlayerOn && !InAppPlaybackContinuity.enabled
-                if (it) InAppMiniPlayer.restore()
-            }, "in_app_continuous_playback")
-            addSwitch("禁用商城", "仅隐藏首页商城 Tab，并阻止打开商城页面；保留首页、剧场、我的", { gDisableShoppingMall }, {
-                gDisableShoppingMall = it
-                if (it) mainHandler.post { scanShoppingTabIfNeeded(gCurrentActivity, force = true) }
-                else restoreShoppingTabViews()
-            }, "disable_shopping_mall")
-            addSwitch("隐藏我的快捷入口", "隐藏「福利、订单、消息」整排；保留账号、收藏和历史", { gMineShortcutsOff }, {
-                gMineShortcutsOff = it
-                MineUiCleaner.configure(gMasterOn && it, gMasterOn && gAdOn)
-                gNextMineUiScanAt = 0L
-            }, "hide_mine_shortcuts")
-            addSwitch("隐藏控件", "精简已适配区域；三键导航保留首页底部导航与全集入口", { gControlOn }, {
-                gControlOn = it
-                if (!it) {
-
-                    restoreAllSavedViews()
-                    restoreShortVideoNativeControls()
-                    restoreNativeBottomWindowColor(gCurrentActivity)
-                    mainHandler.postDelayed({ restoreShortVideoNativeControls(); scanAllWindows() }, 120L)
-                }
-            }, "control_hide")
-            addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件", { gPlayerOn }, {
-                gPlayerOn = it
-                if (!it || (gRestoreControlsOnPause && gVideoPaused)) setVideoToolbarsVisible(true)
-                else setVideoToolbarsVisible(false)
-            }, "player_bar")
-            addSwitch("隐藏视频进度条", "隐藏首页和连续播放页的进度条", { gProgressOff }, {
-                gProgressOff = it
-                if (!it) {
-                    val roots = collectAllWindows()
-                    for (root in roots) scanTreeProgressRestore(root)
-                }
-            }, "progress_off")
-            addSwitch("隐藏底部小白条", "仅手势导航生效；三键导航不会隐藏按键", { gNavBarOff }, { gNavBarOff = it }, "nav_bar_off")
-            addSwitch("暂停后恢复所有控件", "暂停视频时临时恢复控件，继续播放后按规则隐藏", { gRestoreControlsOnPause }, {
-                gRestoreControlsOnPause = it
-                if (it) refreshVideoPauseState("switch-enabled", gVideoPaused)
-                else mainHandler.post { scanAllWindows() }
-            }, "restore_controls_pause")
-
-            if (gNames.resolutionController.isNotBlank() || TargetNames.isUniversal(gNames)) {
-                addSwitch("默认最高画质", "播放时自动选择当前视频支持的最高画质", { gMaxQualityOn }, {
-                    gMaxQualityOn = it
-                    if (!it) NativePlaybackQuality.reset()
-                    if (it) mainHandler.post { applyHighestToKnownEngines() }
-                }, "max_quality")
-            }
-            lateinit var defaultSpeedRow: LinearLayout
-            lateinit var defaultSpeedSwitch: Switch
-            val defaultSpeedPair = addSwitch(
-                "默认倍速",
-                defaultSpeedSummary(),
-                { gDefaultSpeedOn },
-                { enabled ->
-                    gDefaultSpeedOn = enabled
-                    if (enabled) scheduleDefaultSpeedApply("switch-enabled")
-                },
-                DEFAULT_SPEED_PREF,
-                onRowAction = {
-                    showDefaultSpeedEditor(act, p) { _ ->
-                        try {
-                            val labels = defaultSpeedRow.getChildAt(0) as? ViewGroup
-                            (labels?.getChildAt(1) as? TextView)?.text = defaultSpeedSummary()
-                            if (!defaultSpeedSwitch.isChecked) defaultSpeedSwitch.isChecked = true
-                        } catch (_: Throwable) {}
-                    }
-                },
-            )
-            defaultSpeedRow = defaultSpeedPair.first
-            defaultSpeedSwitch = defaultSpeedPair.second
-            addSwitch("双击打开评论区", "替换原双击点赞动作，双击直接打开评论", { gDoubleTapCommentOn }, { gDoubleTapCommentOn = it }, "double_tap_comment")
-            addSwitch("禁用下拉刷新", "禁用下拉手势，并折叠下拉刷新提示区域", { gRefreshOff }, {
-                gRefreshOff = it
-                if (!it) restoreRefreshAccessories() else mainHandler.post { scanAllWindows() }
-            }, "pull_refresh")
-            addSwitch("顶部区域拦截下滑", "拦截屏幕顶部区域向下滑动手势", { gTopZoneOn }, { gTopZoneOn = it }, "top_zone")
-
-            addSwitch("隐藏广告 / 挂件", "默认开启：拦截已适配广告层、金宝箱、悬浮挂件及「我的」广告卡片", { gAdOn }, {
-                gAdOn = it
-                MineUiCleaner.configure(gMasterOn && gMineShortcutsOff, gMasterOn && it)
-                gNextMineUiScanAt = 0L
-            }, "hide_all_ads")
-            addSwitch("解锁 VIP", "启用已适配的 VIP 状态 Hook", { gVipOn }, { gVipOn = it }, "vip_unlock")
-            addSwitch("显示 VIP 图标", "控制 VIP 图标相关显示逻辑", { gVipIconOn }, { gVipIconOn = it }, "vip_icon")
-
-            addSwitch("OLED 亮度拦截", "实验功能：仅在需要时手动开启", { gOledProtectOn }, { gOledProtectOn = it }, "oled_protect")
-            addSwitch("通知栏快捷菜单", "在通知栏显示模块开关、面板和重启快捷操作。没有效果 记得打开红果的通知权限", { gNotificationMenuOn }, {
-                gNotificationMenuOn = it
-                createNotification(act.applicationContext)
-            }, "notification_menu")
-            addSwitch(
-                "自定义下载数量限制",
-                downloadLimitSummary(),
-                { gDownloadLimitUnlimitOn },
-                {
-                    gDownloadLimitUnlimitOn = it
-                    if (it) Toast.makeText(act, "已开启。为确保下载进程读取新配置，请强停红果后重新打开", Toast.LENGTH_LONG).show()
-                },
-                DOWNLOAD_LIMIT_PREF,
-                onRowAction = { showDownloadLimitEditor(act, p) {  } },
-            )
-
-            fun appendRow(container: LinearLayout, row: View) {
-                container.addView(row, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = dp(act, 6f)
-                })
-            }
-            home.addView(sectionTitle(act, "常用开关", p))
-            for ((_, row) in categoryRows[com.yagay.xhongguo.SettingsCatalog.Page.HOME].orEmpty()) {
-                appendRow(home, row)
-            }
-            home.addView(sectionTitle(act, "功能分类", p))
-
-            val scroll = ScrollView(act).apply {
-                isFillViewport = false
-                isVerticalScrollBarEnabled = false
-                overScrollMode = View.OVER_SCROLL_NEVER
-                addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            }
-
             val dialog = Dialog(act)
             dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-            val shell = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                background = roundedBg(act, p.page, 28f, p.divider, 1f)
-                clipToPadding = false
-            }
-            shell.addView(scroll, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ))
-
-            val footer = LinearLayout(act).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(act, 16f), dp(act, 10f), dp(act, 16f), dp(act, 16f))
-            }
-            val done = TextView(act).apply {
-                text = "完成"
-                textSize = 14f
-                gravity = Gravity.CENTER
-                setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(Color.WHITE)
-                background = roundedBg(act, p.accent, 18f)
-                isClickable = true
-                isFocusable = true
-                minimumHeight = dp(act, 46f)
-
-            }
-            fun showPage(target: com.yagay.xhongguo.SettingsCatalog.Page) {
-                refreshPanelRows()
-                page = target
-                home.visibility = if (page == com.yagay.xhongguo.SettingsCatalog.Page.HOME)
-                    View.VISIBLE else View.GONE
-                for ((key, container) in pages) {
-                    container.visibility = if (key == page) View.VISIBLE else View.GONE
-                }
-                (header.getChildAt(0) as? TextView)?.text =
-                    if (page == com.yagay.xhongguo.SettingsCatalog.Page.HOME) "Xhongguo 设置" else page.title
-                (header.getChildAt(1) as? TextView)?.text =
-                    if (page == com.yagay.xhongguo.SettingsCatalog.Page.HOME)
-                        "红果综合模块  ·  ${BuildConfig.VERSION_NAME}" else page.summary
-                done.text = if (page == com.yagay.xhongguo.SettingsCatalog.Page.HOME) "完成" else "返回分类"
-                scroll.scrollTo(0, 0)
-            }
-
-            for (category in com.yagay.xhongguo.SettingsCatalog.categories) {
-                val rows = categoryRows[category].orEmpty()
-                if (rows.isEmpty()) continue
-                val group = LinearLayout(act).apply {
-                    orientation = LinearLayout.VERTICAL
-                    visibility = View.GONE
-                }
-                for ((_, row) in rows.sortedBy { com.yagay.xhongguo.SettingsCatalog.rank(it.first) }) {
-                    appendRow(group, row)
-                }
-                pages[category] = group
-                content.addView(group)
-                val entry = LinearLayout(act).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    minimumHeight = dp(act, 56f)
-                    setPadding(dp(act, 15f), dp(act, 10f), dp(act, 12f), dp(act, 10f))
-                    background = roundedBg(act, p.surfaceAlt, 20f)
-                    isClickable = true
-                    isFocusable = true
-                    val labels = LinearLayout(act).apply {
-                        orientation = LinearLayout.VERTICAL
-                        addView(TextView(act).apply {
-                            text = category.title
-                            textSize = 15f
-                            setTextColor(p.text)
-                            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                        })
-                        addView(TextView(act).apply {
-                            text = if (category == com.yagay.xhongguo.SettingsCatalog.Page.TOOLS)
-                                "通知快捷菜单、下载限制；日志在模块 App"
-                            else category.summary
-                            textSize = 11.5f
-                            setTextColor(p.textSecondary)
-                        })
-                    }
-                    addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                    addView(TextView(act).apply {
-                        text = "›"
-                        textSize = 24f
-                        setTextColor(p.textSecondary)
-                    })
-                    setOnClickListener { showPage(category) }
-                }
-                appendRow(home, entry)
-            }
-            val searchEntry = TextView(act).apply {
-                text = "搜索设置  ›"
-                textSize = 15f
-                setTextColor(p.accent)
-                setPadding(dp(act, 15f), dp(act, 12f), dp(act, 15f), dp(act, 12f))
-                background = roundedBg(act, p.surfaceAlt, 18f)
-                isClickable = true
-                isFocusable = true
-                setOnClickListener {
-                    com.yagay.xhongguo.SettingsSearch.show(act, searchItems) { item ->
-                        showPage(item.page)
-                        val target = categoryRows[item.page]?.firstOrNull { it.first == item.key }?.second
-                        target?.post {
-                            if (target.visibility == View.VISIBLE) target.requestFocus()
-                            else Toast.makeText(act, "请先启用该项的上级开关", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
-            home.addView(searchEntry, 0)
-            showPage(com.yagay.xhongguo.SettingsCatalog.Page.HOME)
-            done.setOnClickListener {
-                if (page != com.yagay.xhongguo.SettingsCatalog.Page.HOME) {
-                    showPage(com.yagay.xhongguo.SettingsCatalog.Page.HOME)
-                } else {
-                    shell.animate().cancel()
-                    shell.animate()
-                        .alpha(0f)
-                        .translationY(dp(act, 14f).toFloat())
-                        .scaleX(0.985f)
-                        .scaleY(0.985f)
-                        .setDuration(130L)
-                        .withEndAction { if (dialog.isShowing) dialog.dismiss() }
-                        .start()
-                }
-            }
-            dialog.setOnKeyListener { _, keyCode, event ->
-                if (keyCode == android.view.KeyEvent.KEYCODE_BACK &&
-                    page != com.yagay.xhongguo.SettingsCatalog.Page.HOME) {
-                    if (event.action == android.view.KeyEvent.ACTION_UP)
-                        showPage(com.yagay.xhongguo.SettingsCatalog.Page.HOME)
+            val surface = com.yagay.xhongguo.ui.SettingsSurface(act, prefs, { values ->
+                val ok = ModuleSettingsStore.pushBatch(act, values)
+                ok && ModuleSettingsStore.pullIntoTarget(act, prefs)
+            }, { dialog.dismiss() }, false, {
+                val opened = runCatching {
+                    act.startActivity(Intent().setClassName("com.yagay.xhongguo", "com.yagay.xhongguo.MainActivity")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }.isSuccess
+                if (opened) dialog.dismiss()
+                else Toast.makeText(act, "请打开 Xhongguo 模块 App", Toast.LENGTH_SHORT).show()
+            }, statusNote = { targetCompatLabel(act) })
+            activeSettingsPanel = java.lang.ref.WeakReference(dialog)
+            dialog.setContentView(surface.view)
+            dialog.setOnDismissListener { activeSettingsPanel = null }
+            dialog.setOnKeyListener { _, key, event ->
+                if (key == android.view.KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                    if (!surface.back()) dialog.dismiss()
                     true
                 } else false
             }
-            footer.addView(done, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(act, 46f),
-            ))
-            shell.addView(footer, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
-
-            installPanelWatermark(shell, act, p.textSecondary)
-
-            shell.alpha = 0f
-            shell.translationY = dp(act, 18f).toFloat()
-            shell.scaleX = 0.975f
-            shell.scaleY = 0.975f
-
-            dialog.setContentView(shell)
             dialog.setCanceledOnTouchOutside(true)
             dialog.setOnShowListener {
-                try {
-                    val dm = act.resources.displayMetrics
-                    dialog.window?.apply {
-
-                        setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-                        addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                        attributes = attributes.apply {
-                            dimAmount = 0.58f
-                            windowAnimations = 0
-                        }
-                        setLayout((dm.widthPixels * 0.90f).toInt(), (dm.heightPixels * 0.86f).toInt())
-                    }
-                    shell.post {
-                        shell.animate().cancel()
-                        shell.animate()
-                            .alpha(1f)
-                            .translationY(0f)
-                            .scaleX(1f)
-                            .scaleY(1f)
-                            .setDuration(220L)
-                            .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f))
-                            .start()
-                    }
-                } catch (e: Throwable) {
-                    LogUtil.error("面板窗口样式", e)
+                val decor = act.window.decorView
+                var width = decor.width.takeIf { it > 0 } ?: act.resources.displayMetrics.widthPixels
+                var height = decor.height.takeIf { it > 0 } ?: act.resources.displayMetrics.heightPixels
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val metrics = act.windowManager.currentWindowMetrics
+                    val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+                        android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+                    width = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(dp(act, 160f))
+                    height = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(dp(act, 160f))
+                }
+                dialog.window?.apply {
+                    setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+                    setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                    setLayout(minOf(width, dp(act, 620f)), height)
                 }
             }
             dialog.show()
-        } catch (e: Exception) {
-            LogUtil.error("面板", e)
-        }
+        } catch (e: Throwable) { LogUtil.error("模块设置面板", e) }
     }
     private fun openPanel() { mainHandler.post { showPanel(gCurrentActivity) } }
 
@@ -5176,7 +4407,8 @@ object Hooks {
         gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
         FeatureFaultGuard.reset()
         AudioFocusCoordinator.install(module)
-        RuntimeCapabilities.inspect(classLoader, pkg, detected.first)
+        nativeContractObserved = RuntimeCapabilities.inspect(classLoader, pkg, detected.first)
+            .any { it.name == "Native transport" && it.available }
         // Re-read settings now the target version is known.
         appCtx?.let { initPrefs(it) }
         LogUtil.info("系统导航=" + (if (isGestureNavigation(appCtx)) "gesture" else "three-button/unknown") +
@@ -7386,6 +6618,8 @@ object Hooks {
             LogUtil.info("  ✓ NsVipImpl") } catch (e: Exception) { LogUtil.warn("  NsVipImpl 未找到: $e") }
 
         bindingAudit.report()
+        hookInitializationObserved = true
+        appCtx?.let(::reportHookStatus)
         LogUtil.info("installBusinessHooks done"); LogUtil.diagDump(true)
     }
 

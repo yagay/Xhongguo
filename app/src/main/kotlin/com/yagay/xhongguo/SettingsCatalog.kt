@@ -8,23 +8,28 @@ internal object SettingsCatalog {
         AUDIO("音频中断与恢复", "其他应用音频、通话、音频焦点"),
         PLAYER("播放器与手势", "画质、倍速、评论、刷新手势"),
         DISPLAY("界面精简", "状态栏、进度条、选集、导航栏"),
-        CONTENT("内容与账号", "商城、我的页面、广告、账号"),
+        CONTENT("内容管理", "商城、我的页面、广告、账号"),
+        MODULE("模块设置", "主题、密度、入口"),
+        ADVANCED("高级功能", "实验功能与诊断"),
         TOOLS("工具与诊断", "通知快捷菜单、下载限制、日志")
     }
 
     val categories = listOf(Page.BACKGROUND, Page.AUDIO, Page.PLAYER,
-        Page.DISPLAY, Page.CONTENT, Page.TOOLS)
+        Page.DISPLAY, Page.CONTENT, Page.MODULE, Page.ADVANCED, Page.TOOLS)
 
     fun page(key: String): Page = when (key) {
-        "master_on", "system_media_playback" -> Page.HOME
-        "in_app_continuous_playback", "in_app_mini_player" -> Page.BACKGROUND
+        "master_on" -> Page.HOME
+        "system_media_playback" -> Page.BACKGROUND
+        "ui_theme", "ui_density", "ui_color", "notification_menu", "video_longpress_settings" -> Page.MODULE
+        "oled_protect", "official_playback_probe" -> Page.ADVANCED
+        "in_app_continuous_playback", "in_app_mini_player", "app_playback_mode" -> Page.BACKGROUND
         "audio_focus_pause", "audio_focus_auto_resume", "audio_focus_pause_duck",
         "audio_call_pause", "audio_call_auto_resume", "audio_external_pause",
         "audio_external_auto_resume", "audio_external_resume_delay_ms" -> Page.AUDIO
         "max_quality", "default_speed", "default_speed_value", "double_tap_comment",
         "pull_refresh", "top_zone" -> Page.PLAYER
         "status_bar", "control_hide", "player_bar", "progress_off", "nav_bar_off",
-        "restore_controls_pause", "video_longpress_settings" -> Page.DISPLAY
+        "restore_controls_pause" -> Page.DISPLAY
         "disable_shopping_mall", "hide_mine_shortcuts", "hide_all_ads", "ad_block",
         "vip_unlock", "vip_icon" -> Page.CONTENT
         else -> Page.TOOLS

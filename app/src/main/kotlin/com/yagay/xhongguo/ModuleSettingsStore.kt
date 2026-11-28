@@ -37,19 +37,54 @@ object ModuleSettingsStore {
         (prefs?.getInt(EXTERNAL_RESUME_DELAY, 1000) ?: 1000).coerceIn(1000, 10000)
 
     internal fun validInt(key: String, value: Int): Boolean =
-        if (key == EXTERNAL_RESUME_DELAY) value in 1000..10000
-        else value in 1..999_999_999
+        when (key) {
+            EXTERNAL_RESUME_DELAY -> value in 1000..10000
+            "ui_theme" -> value in 0..3
+            "ui_density", "ui_color" -> value in 0..1
+            else -> value in 1..999_999_999
+        }
 
     val FLOATS = setOf("default_speed_value")
     val INTS = setOf(
         "download_limit_one_day_episode", "download_limit_one_day_series",
-        "download_limit_total_series", EXTERNAL_RESUME_DELAY
+        "download_limit_total_series", EXTERNAL_RESUME_DELAY, "ui_theme", "ui_density", "ui_color"
     )
 
     fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
 
     fun notifyChanged(ctx: Context) { ctx.contentResolver.notifyChange(URI, null) }
+
+    // Atomic settings transactions for radio modes, numeric forms and reset.
+    fun saveBatch(ctx: Context, values: Map<String, Any>): Boolean {
+        val prefs = prefs(ctx)
+        val edit = prefs.edit()
+        if (values["in_app_mini_player"] == true && values["in_app_continuous_playback"] == true) return false
+        for ((key, value) in values) {
+            when {
+                key in BOOLEANS && value is Boolean -> edit.putBoolean(key, value)
+                key in INTS && value is Int && validInt(key, value) -> edit.putInt(key, value)
+                key in FLOATS && value is Float && value.isFinite() && value in 0.75f..3f -> edit.putFloat(key, value)
+                else -> return false
+            }
+        }
+        if (values["in_app_mini_player"] == true) edit.putBoolean("in_app_continuous_playback", false)
+        if (values["in_app_continuous_playback"] == true) edit.putBoolean("in_app_mini_player", false)
+        val ok = edit.commit()
+        if (ok) notifyChanged(ctx)
+        return ok
+    }
+
+    fun pushBatch(ctx: Context, values: Map<String, Any>): Boolean {
+        val data = Bundle()
+        for ((key, value) in values) when (value) {
+            is Boolean -> data.putBoolean(key, value)
+            is Int -> data.putInt(key, value)
+            is Float -> data.putFloat(key, value)
+            else -> return false
+        }
+        return runCatching { ctx.contentResolver.call(URI, "set_batch", null, data)?.getBoolean("ok") == true }.getOrDefault(false)
+    }
 
     fun save(ctx: Context, key: String, value: Any): Boolean {
         val editor = prefs(ctx).edit()
@@ -91,11 +126,11 @@ object ModuleSettingsStore {
     }
 
     /** Mirror to target-local prefs so legacy XML readers observe the same settings. */
-    fun pullIntoTarget(ctx: Context, local: SharedPreferences) {
+    fun pullIntoTarget(ctx: Context, local: SharedPreferences): Boolean {
         val data = try {
             ctx.contentResolver.call(URI, "snapshot", null, null)
-        } catch (_: Throwable) { null } ?: return
-        if (!data.getBoolean("_configured", false)) return
+        } catch (_: Throwable) { null } ?: return false
+        if (!data.getBoolean("_configured", false)) return false
         val values = local.all
         val edit = local.edit()
         var dirty = false
@@ -117,7 +152,7 @@ object ModuleSettingsStore {
                 if (values[key] != v) { edit.putInt(key, v); dirty = true }
             } else if (values.containsKey(key)) { edit.remove(key); dirty = true }
         }
-        if (dirty) edit.commit()
+        return !dirty || edit.commit()
     }
 }
 
@@ -149,6 +184,14 @@ class ModuleSettingsProvider : ContentProvider() {
                     if (prefs.contains(it)) putInt(it, prefs.getInt(it, 99999))
                 }
             }
+            "set_batch" -> {
+                val values = extras?.let { bundle -> bundle.keySet().associateWith { bundle.get(it) } }.orEmpty()
+                val valid = values.values.all { it is Boolean || it is Int || it is Float }
+                @Suppress("UNCHECKED_CAST")
+                val ok = valid && values.isNotEmpty() && ModuleSettingsStore.saveBatch(ctx, values as Map<String, Any>)
+                Bundle().apply { putBoolean("ok", ok) }
+            }
+            "runtime_status" -> RuntimeStatus.accept(ctx, extras)
             "set" -> {
                 val key = extras?.getString("key").orEmpty()
                 val editor = prefs.edit()

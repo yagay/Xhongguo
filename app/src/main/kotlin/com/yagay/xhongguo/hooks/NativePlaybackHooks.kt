@@ -8,6 +8,8 @@ import io.github.libxposed.api.XposedInterface.Hooker
 
 /** Verified native transport binding. Original host invocation always occurs at most once. */
 internal object NativePlaybackHooks {
+    @Volatile var installedTransportCount = 0
+        private set
     fun install(module: MainHook, loader: ClassLoader, universal: Boolean,
                 foreground: () -> Activity?,
                 publish: (Any, String, Activity?) -> Unit,
@@ -72,6 +74,7 @@ internal object NativePlaybackHooks {
                 }
             }
         }
+        installedTransportCount = installed
         LogUtil.info("  ✓ system media TTVideoEngine transport observers: $installed/" + transports.size)
         audit.report()
     }

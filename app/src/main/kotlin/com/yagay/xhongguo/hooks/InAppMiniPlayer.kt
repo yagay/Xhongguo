@@ -361,9 +361,12 @@ internal object InAppMiniPlayer {
         }
     }
     private fun button(a: Activity, label: String, description: String): TextView = TextView(a).apply {
-        text = label; textSize = 20f; setTextColor(Color.WHITE)
+        text = label; textSize = 18f; setTextColor(Color.WHITE)
         gravity = Gravity.CENTER; contentDescription = description
-        background = shape(Color.argb(180, 16, 17, 19), dp(a, 20f).toFloat())
+        background = android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x33ffffff),
+            shape(Color.argb(200, 16, 17, 19), dp(a, 24f).toFloat()),
+            shape(Color.WHITE, dp(a, 24f).toFloat()))
         isClickable = true; isFocusable = true
     }
     private fun updatePlayButton(s: Session) {
@@ -393,10 +396,10 @@ internal object InAppMiniPlayer {
         val close = button(a, "×", "关闭并暂停")
         val play = button(a, "Ⅱ", "暂停")
         s.playButton = play
-        val size = dp(a, 34f)
+        val size = dp(a, 40f)
         overlay.addView(expand, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.LEFT))
         overlay.addView(close, FrameLayout.LayoutParams(size, size, Gravity.TOP or Gravity.RIGHT))
-        overlay.addView(play, FrameLayout.LayoutParams(dp(a, 44f), dp(a, 44f), Gravity.CENTER))
+        overlay.addView(play, FrameLayout.LayoutParams(dp(a, 48f), dp(a, 48f), Gravity.CENTER))
         s.controls = listOf(expand, close, play)
         s.controls.forEach { it.visibility = View.GONE }
         expand.setOnClickListener { returnToVideo() }

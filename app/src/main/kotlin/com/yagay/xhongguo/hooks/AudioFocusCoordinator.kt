@@ -202,6 +202,7 @@ internal object AudioFocusCoordinator {
                     val changed = active != externalRawActive
                     externalSignalAt = sent
                     externalRawActive = active
+                    com.yagay.xhongguo.RuntimeStatus.report(context, "audio_snapshot")
                     if (first || changed || now - lastExternalDiagnosticAt >= 60_000L) {
                         lastExternalDiagnosticAt = now
                         LogUtil.info("音频协调: 系统音频状态同步 external=$active own=$ownActive first=$first")
@@ -368,6 +369,7 @@ internal object AudioFocusCoordinator {
                     cancelExternalResume("confirmed")
                     LogUtil.info("音频协调: 外部音频恢复播放已确认")
                     LogUtil.incr("audioExternalResumeConfirmed")
+                    com.yagay.xhongguo.RuntimeStatus.report(externalContext, "audio_resume")
                 } else {
                     manualHold = true
                     if (externalResumeAttempts < 3) scheduleExternalResume()
